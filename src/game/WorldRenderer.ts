@@ -4,6 +4,7 @@ import {
   ROAD_HALF_WIDTH,
   RoadFrame,
   SHOULDER_HALF_WIDTH,
+  TRACK_LENGTH,
   getBiomeAt,
   getBoostPadInSlot,
   hash1,
@@ -12,6 +13,7 @@ import {
   roadX,
   roadY,
   sampleRoadFrame,
+  signedTrackDelta,
 } from './RoadMath';
 import { getPixelAtlas } from './PixelTextures';
 import { BikeVisual } from './BikeModel';
@@ -172,6 +174,7 @@ export class WorldRenderer {
   private readonly lampInst: THREE.InstancedMesh;
   private readonly boostInst: THREE.InstancedMesh;
   private readonly billboardMeshes: THREE.Mesh[] = [];
+  private readonly lapArchGroup: THREE.Group;
 
   // Particle pool
   private readonly particles: Particle[] = [];
@@ -372,6 +375,36 @@ export class WorldRenderer {
       this.scene.add(g);
       this.billboardMeshes.push(g as unknown as THREE.Mesh);
     }
+
+    // Checkered 3D Start/Finish Lap Arch placed at cyclic loop s = 0
+    this.lapArchGroup = new THREE.Group();
+    const archSpan = ROAD_HALF_WIDTH + 1.3;
+    const archFrameGeo = mergeBoxGeometries(
+      [
+        { w: 0.9, h: 7.4, d: 0.9, x: -archSpan, y: 3.7, z: 0, colorHex: 0x24283b },
+        { w: 0.9, h: 7.4, d: 0.9, x: archSpan, y: 3.7, z: 0, colorHex: 0x24283b },
+        { w: 1.05, h: 0.55, d: 1.05, x: -archSpan, y: 7.6, z: 0, colorHex: 0x00f5d4 },
+        { w: 1.05, h: 0.55, d: 1.05, x: archSpan, y: 7.6, z: 0, colorHex: 0x00f5d4 },
+        { w: archSpan * 2 + 1.0, h: 0.35, d: 0.72, x: 0, y: 7.45, z: 0, colorHex: 0xffd166 },
+      ],
+      true
+    );
+    const archFrameMesh = new THREE.Mesh(
+      archFrameGeo,
+      new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })
+    );
+    this.lapArchGroup.add(archFrameMesh);
+
+    const archBannerGeo = new THREE.PlaneGeometry(archSpan * 2 - 0.5, 2.15);
+    const archBannerMat = new THREE.MeshBasicMaterial({
+      map: atlas.lapArch,
+      side: THREE.DoubleSide,
+    });
+    const archBanner = new THREE.Mesh(archBannerGeo, archBannerMat);
+    archBanner.position.set(0, 6.25, 0);
+    this.lapArchGroup.add(archBanner);
+    this.lapArchGroup.visible = false;
+    this.scene.add(this.lapArchGroup);
 
     // Instanced traffic meshes (all cars rendered in 4-5 draw calls total)
     const carBodyGeo = new THREE.BoxGeometry(2.15, 0.85, 4.5);
@@ -835,9 +868,10 @@ export class WorldRenderer {
       crUvArr[ui + 1] = vCurb;
       crUvArr[ui + 3] = vCurb;
 
-      // Scenic terrain skirts (rolling roadside hillside / coast drop)
-      const hillL = Math.sin(s * 0.017) * 5.0 + 3.0;
-      const hillR = Math.cos(s * 0.014) * 5.0 - 1.5;
+      // Scenic terrain skirts (strictly periodic over 2400m circuit for seamless lap transitions)
+      const hillPhase = (s * Math.PI * 2) / TRACK_LENGTH;
+      const hillL = Math.sin(hillPhase * 6) * 5.0 + 3.0;
+      const hillR = Math.cos(hillPhase * 5) * 5.0 - 1.5;
 
       tlArr[vi] = cx - f.rx * terrainFar;
       tlArr[vi + 1] = cy - f.ry * terrainFar + hillL;
@@ -893,13 +927,14 @@ export class WorldRenderer {
 
     for (let slot = minSlot; slot <= maxSlot; slot++) {
       const s = slot * slotStep;
+      const wSlot = ((slot % 200) + 200) % 200; // 2400 / 12 = 200 exact slots per lap
       const biome = getBiomeAt(s);
       sampleRoadFrame(s, f);
       const yaw = Math.atan2(-f.tx, -f.tz);
 
       // Guard posts every slot along outer shoulder
       for (let side = -1; side <= 1; side += 2) {
-        if (postC < MAX_PROPS_PER_POOL * 2 && (slot % 2 === 0)) {
+        if (postC < MAX_PROPS_PER_POOL * 2 && (wSlot % 2 === 0)) {
           roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH - 0.4), 0, originS, originX, originY, pos);
           d.position.copy(pos);
           d.rotation.set(0, yaw, 0);
@@ -908,13 +943,13 @@ export class WorldRenderer {
           this.postInst.setMatrixAt(postC++, d.matrix);
         }
 
-        const h = hash1(slot * 37 + (side > 0 ? 101 : 211));
-        const h2 = hash1(slot * 71 + (side > 0 ? 19 : 83));
+        const h = hash1(wSlot * 37 + (side > 0 ? 101 : 211));
+        const h2 = hash1(wSlot * 71 + (side > 0 ? 19 : 83));
         const dist = SHOULDER_HALF_WIDTH + 3.2 + h2 * 18.0;
 
         // Street lamps in twilight biome or periodic highway lamps
-        if (lampC < MAX_PROPS_PER_POOL && ((biome === 3 && slot % 2 === 0) || slot % 6 === 0)) {
-          if ((slot + (side > 0 ? 1 : 0)) % 2 === 0) {
+        if (lampC < MAX_PROPS_PER_POOL && ((biome === 3 && wSlot % 2 === 0) || wSlot % 6 === 0)) {
+          if ((wSlot + (side > 0 ? 1 : 0)) % 2 === 0) {
             roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH + 0.8), 0, originS, originX, originY, pos);
             d.position.copy(pos);
             d.rotation.set(0, yaw, 0);
@@ -954,15 +989,27 @@ export class WorldRenderer {
         }
       }
 
-      // Retro arcade billboards every 9 slots
-      if (slot > 0 && slot % 9 === 3 && bbIdx < this.billboardMeshes.length) {
-        const side = (slot % 18 === 3) ? -1 : 1;
+      // Retro arcade billboards every 9 slots (keep clear of start/lap arch at wSlot 0..2)
+      if (wSlot > 2 && wSlot % 9 === 3 && bbIdx < this.billboardMeshes.length) {
+        const side = (wSlot % 18 === 3) ? -1 : 1;
         roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH + 3.6), 0, originS, originX, originY, pos);
         const bb = this.billboardMeshes[bbIdx++];
         bb.visible = true;
         bb.position.copy(pos);
         bb.rotation.set(0, yaw - side * 0.22, 0);
       }
+    }
+
+    // Checkered Start/Finish Overhead Lap Arch at cyclic s = 0
+    const archDs = signedTrackDelta(0, originS);
+    if (archDs >= -32 && archDs <= 320) {
+      sampleRoadFrame(0, f);
+      roadFrameToLocalWorld(f, 0, 0, 0, originS, originX, originY, pos);
+      this.lapArchGroup.visible = true;
+      this.lapArchGroup.position.copy(pos);
+      this.setRoadBasisQuaternion(f, this.lapArchGroup.quaternion);
+    } else if (this.lapArchGroup.visible) {
+      this.lapArchGroup.visible = false;
     }
 
     for (let i = bbIdx; i < this.billboardMeshes.length; i++) {
@@ -1027,7 +1074,7 @@ export class WorldRenderer {
 
     for (let i = 0; i < traffic.length && used < MAX_TRAFFIC_RENDER; i++) {
       const car = traffic[i];
-      const ds = car.s - originS;
+      const ds = signedTrackDelta(car.s, originS);
       if (ds < -26 || ds > 295) continue;
 
       sampleRoadFrame(car.s, f);
@@ -1100,7 +1147,7 @@ export class WorldRenderer {
     let crateC = 0;
     for (let i = 0; i < vis.crates.length && crateC < 16; i++) {
       const c = vis.crates[i];
-      const ds = c.s - originS;
+      const ds = signedTrackDelta(c.s, originS);
       if (ds < -20 || ds > 260) continue;
       sampleRoadFrame(c.s, f);
       const bobY = 0.98 + 0.22 * Math.sin(timeSec * 4.5 + c.slot);
@@ -1185,7 +1232,7 @@ export class WorldRenderer {
     for (let i = 0; i < vis.interceptors.length && copC < 4; i++) {
       const cop = vis.interceptors[i];
       if (!cop.active) continue;
-      const ds = cop.s - originS;
+      const ds = signedTrackDelta(cop.s, originS);
       if (ds < -35 || ds > 290) continue;
       sampleRoadFrame(cop.s, f);
       roadFrameToLocalWorld(f, cop.s, cop.x, 0, originS, originX, originY, pos);
@@ -1206,7 +1253,7 @@ export class WorldRenderer {
     for (let i = 0; i < vis.hazards.length; i++) {
       const h = vis.hazards[i];
       if (!h.active) continue;
-      const ds = h.s - originS;
+      const ds = signedTrackDelta(h.s, originS);
       if (ds < -24 || ds > 260) continue;
       sampleRoadFrame(h.s, f);
       roadFrameToLocalWorld(f, h.s, h.x, 0.04, originS, originX, originY, pos);
@@ -1273,7 +1320,7 @@ export class WorldRenderer {
         this.bikeMap.set(r.id, vis);
       }
 
-      const ds = r.s - originS;
+      const ds = signedTrackDelta(r.s, originS);
       if (ds < -45 || ds > 320) {
         vis.root.visible = false;
         continue;

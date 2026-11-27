@@ -10,6 +10,7 @@ import {
   setCustomAvatar,
 } from './game/PixelAvatars';
 import { InputState, ParticleKind, PlayerCallbacks, PlayerPhysics } from './game/PlayerPhysics';
+import { getLapNumber, signedTrackDelta } from './game/RoadMath';
 import { TrafficSystem } from './game/TrafficSystem';
 import {
   BIKE_PALETTES,
@@ -133,12 +134,16 @@ const inputState: InputState = {
   brake: false,
   left: false,
   right: false,
+  analogSteer: 0,
   nitro: false,
   wheelie: false,
   attackLeft: false,
   attackRight: false,
   attackAuto: false,
 };
+
+let gyroSteer = 0;
+let lastLap = 1;
 
 // Reusable frame arrays (zero per-frame allocations)
 const combatTargets: RiderRenderState[] = [];
@@ -155,6 +160,7 @@ let itemCallbacks!: ItemCallbacks;
 
 function spawnPackWarpFx(target: PackSpawnTarget): void {
   player.spawnAt(target.s, target.x, target.speed);
+  lastLap = getLapNumber(player.state.s);
   audio.playSpawnChime();
   world.spawnParticles(
     target.s,
@@ -349,9 +355,9 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     hud.refreshLocalAvatar();
     hud.showToast('已恢复像素头像', 'gold');
   },
-  onUseItem() {
+  onUseItem(slotIndex = 0) {
     audio.unlock();
-    items.useHeldItem(player.state, combatTargets, itemCallbacks);
+    items.useHeldItem(player.state, combatTargets, itemCallbacks, slotIndex);
   },
   onSelectSniperTarget(targetId: string) {
     audio.unlock();
@@ -385,6 +391,9 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     if (target) {
       spawnPackWarpFx(target);
     }
+  },
+  onGyroSteer(steer: number | null) {
+    gyroSteer = steer === null ? 0 : steer;
   },
   onTouchInput(patch: TouchInputPatch) {
     audio.unlock();
@@ -692,7 +701,7 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
   switch (e.code) {
     case 'KeyR':
     case 'KeyX':
-      items.useHeldItem(player.state, combatTargets, itemCallbacks);
+      items.useHeldItem(player.state, combatTargets, itemCallbacks, 0);
       break;
     case 'Digit1':
       player.cycleWeapon(0);
@@ -733,18 +742,36 @@ window.addEventListener('blur', () => {
   clearHeldInputs();
 });
 
-// Canvas mouse melee combat (Left-Click = left attack, Right-Click = right attack)
+// Canvas melee combat: desktop mouse (L/R click) + mobile tap-screen-to-attack (42% L / 16% Auto / 42% R)
 canvas.addEventListener('contextmenu', (e: MouseEvent) => {
   e.preventDefault();
 });
 
 canvas.addEventListener('pointerdown', (e: PointerEvent) => {
-  if (hud.isEditingName() || e.pointerType === 'touch') return;
+  if (hud.isEditingName()) return;
   audio.unlock();
+  if (e.pointerType === 'touch') {
+    touchModeActive = true;
+    const fracX = e.clientX / Math.max(1, window.innerWidth);
+    if (fracX < 0.42) {
+      player.triggerAttack(1, combatTargets);
+      hud.flashTapAttack('left');
+    } else if (fracX > 0.58) {
+      player.triggerAttack(2, combatTargets);
+      hud.flashTapAttack('right');
+    } else {
+      player.triggerAttack(0, combatTargets);
+      hud.flashTapAttack(player.state.attackSide === 1 ? 'left' : 'right');
+    }
+    return;
+  }
+
   if (e.button === 0) {
     player.triggerAttack(1, combatTargets);
+    hud.flashTapAttack('left');
   } else if (e.button === 2) {
     player.triggerAttack(2, combatTargets);
+    hud.flashTapAttack('right');
   }
 });
 
@@ -776,6 +803,7 @@ function syncInputState(): void {
   inputState.brake = brake;
   inputState.left = pressedKeys.has('KeyA') || pressedKeys.has('ArrowLeft') || touchState.left;
   inputState.right = pressedKeys.has('KeyD') || pressedKeys.has('ArrowRight') || touchState.right;
+  inputState.analogSteer = gyroSteer;
   inputState.nitro =
     pressedKeys.has('ShiftLeft') || pressedKeys.has('ShiftRight') || touchState.nitro;
   inputState.wheelie = pressedKeys.has('Space') || touchState.wheelie;
@@ -886,7 +914,7 @@ function frame(nowPerfMs: number): void {
 
   let nearbyRealCount = 0;
   for (let i = 0; i < remoteRiders.length; i++) {
-    if (Math.abs(remoteRiders[i].s - player.state.s) < NEARBY_REAL_RANGE_M) {
+    if (Math.abs(signedTrackDelta(remoteRiders[i].s, player.state.s)) < NEARBY_REAL_RANGE_M) {
       nearbyRealCount++;
     }
   }
@@ -901,7 +929,8 @@ function frame(nowPerfMs: number): void {
       player.state,
       currentTraffic,
       nearbyRealCount,
-      handleBotHitPlayer
+      handleBotHitPlayer,
+      items.visuals.crates
     );
 
     combatTargets.length = 0;
@@ -913,6 +942,15 @@ function frame(nowPerfMs: number): void {
     }
 
     player.update(dt, combatTargets, currentTraffic, playerCallbacks);
+
+    // Detect lap completion across 2400m cyclic circuit
+    const curLap = getLapNumber(player.state.s);
+    if (curLap > lastLap) {
+      lastLap = curLap;
+      audio.playSpawnChime();
+      hud.showToast(`🏁 LAP ${curLap}!`, 'gold');
+      hud.pushBroadcast(`🏁 ${player.state.name} 进入第 ${curLap} 圈!`, 'gold');
+    }
   }
 
   // 3. Assemble render list (local + live remote peers + local bots)

@@ -4,6 +4,7 @@ import {
   RoadFrame,
   getBoostPadInSlot,
   sampleRoadFrame,
+  signedTrackDelta,
 } from './RoadMath';
 import { AVATAR_COUNT } from './PixelAvatars';
 import { RiderRenderState, TrafficCar, WEAPONS, WeaponType } from './types';
@@ -13,6 +14,7 @@ export interface InputState {
   brake: boolean;
   left: boolean;
   right: boolean;
+  analogSteer?: number;
   nitro: boolean;
   wheelie: boolean;
   attackLeft: boolean;
@@ -149,6 +151,7 @@ export class PlayerPhysics {
       wheelAngle: 0,
       kos: 0,
       heldItem: null,
+      heldItems: [],
       wheelieCharge: 0,
       magnetTimer: 0,
       turboShieldTimer: 0,
@@ -162,6 +165,7 @@ export class PlayerPhysics {
     this.input.brake = input.brake;
     this.input.left = input.left;
     this.input.right = input.right;
+    this.input.analogSteer = input.analogSteer ?? 0;
     this.input.nitro = input.nitro;
     this.input.wheelie = input.wheelie;
     this.input.attackLeft = input.attackLeft;
@@ -264,7 +268,7 @@ export class PlayerPhysics {
       for (let i = 0; i < targets.length; i++) {
         const t = targets[i];
         if (t.id === st.id || t.crashed) continue;
-        const ds = t.s - st.s;
+        const ds = signedTrackDelta(t.s, st.s);
         if (ds < -4.2 || ds > 4.2) continue;
         const dx = t.x - st.x;
         const absDx = Math.abs(dx);
@@ -475,7 +479,7 @@ export class PlayerPhysics {
         for (let i = 0; i < targets.length; i++) {
           const t = targets[i];
           if (t.id === st.id || t.crashed || t.invulnTimer > 0) continue;
-          const ds = t.s - st.s;
+          const ds = signedTrackDelta(t.s, st.s);
           if (ds < -2.2 || ds > 4.4) continue;
           if (Math.abs(t.x - st.x) >= 2.9) continue;
 
@@ -565,8 +569,9 @@ export class PlayerPhysics {
       st.speed = Math.max(0, st.speed - coastDrag * step);
     }
 
-    // Steering, corner centrifugal drift & bike lean
-    const steer = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    // Steering (digital keys take priority, else smooth analog gyro steer), corner drift & bike lean
+    const digitalSteer = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    const steer = digitalSteer !== 0 ? digitalSteer : clamp(inp.analogSteer ?? 0, -1, 1);
     const speedAuthority = clamp(st.speed / 12.0, 0, 1);
     const airFactor = st.y > 0.15 ? 0.48 : 1.0;
     const spinFactor = st.spinOutTimer > 0 ? 0.35 : 1.0;
@@ -577,11 +582,11 @@ export class PlayerPhysics {
     const centrifugal = -this._frame.curvature * st.speed * st.speed * 0.46;
 
     st.vx += (steerAccel + centrifugal + spinWobble) * step;
-    const latDamp = steer !== 0 ? 5.6 : 8.8;
+    const latDamp = Math.abs(steer) > 0.05 ? 5.6 : 8.8;
     st.vx *= Math.exp(-latDamp * step);
 
     // Keep stopped bike from drifting sideways
-    if (st.speed < 0.8 && steer === 0) {
+    if (st.speed < 0.8 && Math.abs(steer) <= 0.05) {
       st.vx *= Math.exp(-12.0 * step);
     }
 
@@ -637,10 +642,10 @@ export class PlayerPhysics {
       cb.onParticles('nitro', st.s, st.x, 0.3, st.speed * 0.5);
     }
 
-    // Traffic collisions & near-miss nitro refill
+    // Traffic collisions & near-miss nitro refill (cyclic across 2400m seam)
     for (let i = 0; i < traffic.length; i++) {
       const car = traffic[i];
-      const ds = car.s - st.s;
+      const ds = signedTrackDelta(car.s, st.s);
       if (ds < -4.2 || ds > 4.2) continue;
 
       const carX = car.x + car.bumpOffset;
@@ -716,11 +721,11 @@ export class PlayerPhysics {
       }
     }
 
-    // Soft bike-to-bike body separation
+    // Soft bike-to-bike body separation (cyclic across laps!)
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i];
       if (t.id === st.id || t.crashed) continue;
-      if (Math.abs(t.s - st.s) < 2.0 && Math.abs(st.y - t.y) < 0.9) {
+      if (Math.abs(signedTrackDelta(t.s, st.s)) < 2.0 && Math.abs(st.y - t.y) < 0.9) {
         const dx = st.x - t.x;
         const absDx = Math.abs(dx);
         if (absDx < 0.92) {
@@ -731,7 +736,7 @@ export class PlayerPhysics {
       }
     }
 
-    // Active melee attack progression & hit detection
+    // Active melee attack progression & hit detection (cyclic across laps!)
     if (st.attackSide !== 0) {
       const spec = WEAPONS[st.weapon];
       this.attackTimer += step;
@@ -746,7 +751,8 @@ export class PlayerPhysics {
           if (t.id === st.id || t.crashed || t.invulnTimer > 0) continue;
           if (this.hitIdsThisSwing.has(t.id)) continue;
 
-          if (Math.abs(t.s - st.s) >= 3.5) continue;
+          const ds = signedTrackDelta(t.s, st.s);
+          if (Math.abs(ds) >= 3.5) continue;
           if (Math.abs(t.y - st.y) > 1.5) continue;
 
           const signedDx = t.x - st.x;
@@ -771,7 +777,7 @@ export class PlayerPhysics {
           cb.onHitLanded(t, dmg, side, st.weapon, knockX, ko);
           cb.onParticles(
             'spark',
-            (st.s + t.s) * 0.5,
+            st.s + ds * 0.5,
             (st.x + t.x) * 0.5,
             1.0 + st.y * 0.5,
             st.speed * 0.5

@@ -44,6 +44,7 @@ export interface PixelTextureAtlas {
   canyonRock: THREE.CanvasTexture;
   carWindows: THREE.CanvasTexture;
   crate: THREE.CanvasTexture;
+  lapArch: THREE.CanvasTexture;
   hitWords: Record<string, THREE.CanvasTexture>;
 }
 
@@ -70,6 +71,7 @@ export function getPixelAtlas(): PixelTextureAtlas {
     canyonRock: createRockTexture(),
     carWindows: createCarWindowTexture(),
     crate: createMysteryCrateTexture(),
+    lapArch: createLapArchTexture(),
     hitWords: {
       POW: createComicBurstTexture('POW!', '#ffe600', '#ff2a54'),
       SMACK: createComicBurstTexture('SMACK!', '#00f5d4', '#ff595e'),
@@ -454,6 +456,37 @@ function createComicBurstTexture(label: string, fill: string, stroke: string): T
   ctx.fillText(label, cx + 2, cy + 2);
   ctx.fillStyle = '#ffffff';
   ctx.fillText(label, cx, cy);
+
+  return toCrispTexture(c, 1, 1);
+}
+
+function createLapArchTexture(): THREE.CanvasTexture {
+  const [c, ctx] = makePixelCanvas(192, 32);
+  ctx.fillStyle = '#0d101d';
+  ctx.fillRect(0, 0, 192, 32);
+
+  // Crisp checkered racing strips along top & bottom edges
+  for (let x = 0; x < 192; x += 8) {
+    const even = ((x >> 3) & 1) === 0;
+    ctx.fillStyle = even ? '#f8f9fa' : '#11131f';
+    ctx.fillRect(x, 0, 8, 6);
+    ctx.fillStyle = even ? '#11131f' : '#f8f9fa';
+    ctx.fillRect(x, 26, 8, 6);
+  }
+
+  // Crimson & gold accent trim lines
+  ctx.fillStyle = '#ff2a54';
+  ctx.fillRect(0, 6, 192, 2);
+  ctx.fillRect(0, 24, 192, 2);
+
+  // Bold pixel arcade banner label
+  ctx.font = 'bold 14px "Press Start 2P", "Silkscreen", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#000000';
+  ctx.fillText('START ★ LAP', 98, 18);
+  ctx.fillStyle = '#ffd166';
+  ctx.fillText('START ★ LAP', 96, 16);
 
   return toCrispTexture(c, 1, 1);
 }

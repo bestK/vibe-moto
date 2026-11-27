@@ -42,6 +42,14 @@ export const ITEM_BY_ID: Record<ItemType, ItemSpec> = {
   banana: ITEMS[7],
 };
 
+export const MAX_HELD_ITEMS = 4;
+export const MULTI_ITEM_TTL = 30.0;
+
+export interface HeldItemSlot {
+  type: ItemType;
+  ttl: number;
+}
+
 export interface ItemNetEvent {
   t: 'item_pick' | 'item_use' | 'item_hit' | 'item_miss';
   from: string;
@@ -141,6 +149,7 @@ export interface RiderRenderState {
   wheelAngle: number;
   kos: number;
   heldItem: ItemType | null;
+  heldItems: HeldItemSlot[];
   wheelieCharge: number;
   magnetTimer: number;
   turboShieldTimer: number;

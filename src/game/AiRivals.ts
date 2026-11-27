@@ -4,9 +4,15 @@ import {
   ROAD_HALF_WIDTH,
   RoadFrame,
   sampleRoadFrame,
+  signedTrackDelta,
 } from './RoadMath';
 import { AVATAR_COUNT } from './PixelAvatars';
-import { RiderRenderState, TrafficCar, WEAPONS, WeaponType } from './types';
+import { MAX_HELD_ITEMS, RiderRenderState, TrafficCar, WEAPONS, WeaponType } from './types';
+
+export interface CrateHint {
+  s: number;
+  x: number;
+}
 
 interface BotProfile {
   id: string;
@@ -142,6 +148,7 @@ export class AiRivals {
           wheelAngle: 0,
           kos: 0,
           heldItem: null,
+          heldItems: [],
           wheelieCharge: 0,
           magnetTimer: 0,
           turboShieldTimer: 0,
@@ -157,7 +164,8 @@ export class AiRivals {
     local: RiderRenderState,
     traffic: TrafficCar[],
     nearbyRealCount: number,
-    onBotHitPlayer: (dmg: number, knockX: number, botName: string) => void
+    onBotHitPlayer: (dmg: number, knockX: number, botName: string) => void,
+    crates?: readonly CrateHint[]
   ): RiderRenderState[] {
     const step = dt > 0.05 ? 0.05 : dt < 0.0001 ? 0.0001 : dt;
     this.time += step;
@@ -172,12 +180,12 @@ export class AiRivals {
         continue;
       }
 
-      if (!bot.active || Math.abs(bot.state.s - local.s) > 155) {
+      if (!bot.active || Math.abs(signedTrackDelta(bot.state.s, local.s)) > 155) {
         this.spawnBotNear(bot, local);
         bot.active = true;
       }
 
-      this.updateBot(bot, step, local, traffic, onBotHitPlayer);
+      this.updateBot(bot, step, local, traffic, onBotHitPlayer, crates);
       this.activeList.push(bot.state);
     }
 
@@ -189,7 +197,7 @@ export class AiRivals {
       const bot = this.bots[i];
       if (bot.state.id !== botId) continue;
       const st = bot.state;
-      if (!bot.active || st.crashed || st.invulnTimer > 0) return false;
+      if (!bot.active || st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
 
       st.hp = Math.max(0, st.hp - dmg);
       st.vx = clamp(st.vx + knockX, -22, 22);
@@ -217,7 +225,7 @@ export class AiRivals {
       const bot = this.bots[i];
       if (bot.state.id !== botId) continue;
       const st = bot.state;
-      if (!bot.active || st.crashed || st.invulnTimer > 0) return false;
+      if (!bot.active || st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
       st.spinOutTimer = Math.max(st.spinOutTimer, duration);
       st.speed = Math.max(10, st.speed * 0.62);
       st.hp = Math.max(0, st.hp - dmg);
@@ -281,13 +289,21 @@ export class AiRivals {
     dt: number,
     local: RiderRenderState,
     traffic: TrafficCar[],
-    onBotHitPlayer: (dmg: number, knockX: number, botName: string) => void
+    onBotHitPlayer: (dmg: number, knockX: number, botName: string) => void,
+    crates?: readonly CrateHint[]
   ): void {
     const st = bot.state;
     const p = bot.profile;
 
     if (st.invulnTimer > 0) {
       st.invulnTimer = Math.max(0, st.invulnTimer - dt);
+    }
+    if (st.magnetTimer > 0) {
+      st.magnetTimer = Math.max(0, st.magnetTimer - dt);
+    }
+    if (st.turboShieldTimer > 0) {
+      st.turboShieldTimer = Math.max(0, st.turboShieldTimer - dt);
+      st.spinOutTimer = 0;
     }
     if (st.spinOutTimer > 0) {
       st.spinOutTimer = Math.max(0, st.spinOutTimer - dt);
@@ -316,8 +332,8 @@ export class AiRivals {
         st.lean = 0;
         st.x = clamp(st.x, -ROAD_HALF_WIDTH + 1.2, ROAD_HALF_WIDTH - 1.2);
         // Rubber-band recover not too far behind player
-        if (st.s < local.s - 34) {
-          st.s = local.s - 22;
+        if (signedTrackDelta(st.s, local.s) < -34) {
+          st.s = Math.max(0, local.s - 22);
         }
         st.speed = Math.max(20, local.speed * 0.92);
       }
@@ -332,13 +348,15 @@ export class AiRivals {
     }
     const inDuel = bot.duelTimer > 0 && !local.crashed && local.speed > 18;
 
-    // Smooth rubber-banding longitudinal target
+    // Smooth rubber-banding longitudinal target (cyclic across 2400m circuit!)
     const wave = Math.sin(this.time * p.waveFreq + p.wavePhase) * 14.0;
     const desiredOffset = inDuel ? 0.5 : p.baseOffsetS + wave;
-    const errS = local.s + desiredOffset - st.s;
+    const errS = signedTrackDelta(local.s + desiredOffset, st.s);
 
     let desiredSpeed: number;
-    if (local.speed < 6) {
+    if (st.turboShieldTimer > 0) {
+      desiredSpeed = 80.0;
+    } else if (local.speed < 6) {
       // Let bots cruise calmly past if player stops, then wait gently ahead
       desiredSpeed = errS < -45 ? 12.0 : 20.0;
     } else {
@@ -346,22 +364,22 @@ export class AiRivals {
     }
 
     const speedDiff = desiredSpeed - st.speed;
-    const accel = speedDiff >= 0 ? Math.min(26.0, speedDiff * 2.4) : Math.max(-34.0, speedDiff * 3.0);
+    const accel = speedDiff >= 0 ? Math.min(34.0, speedDiff * 2.6) : Math.max(-34.0, speedDiff * 3.0);
     st.speed = Math.max(10.0, st.speed + accel * dt);
     st.braking = speedDiff < -7.0;
-    st.nitroActive = errS > 24.0 && local.speed > 34.0 && st.speed > 44.0;
+    st.nitroActive = st.turboShieldTimer > 0 || (errS > 24.0 && local.speed > 34.0 && st.speed > 44.0);
 
-    // Lane selection & traffic weaving
+    // Lane selection & traffic weaving (plus gentle bias toward road '?' crates!)
     bot.laneTimer -= dt;
     if (bot.laneTimer <= 0) {
       bot.laneTimer = 0.16;
-      bot.targetX = this.chooseBestLateralX(bot, local, traffic, inDuel);
+      bot.targetX = this.chooseBestLateralX(bot, local, traffic, inDuel, crates);
     }
 
-    // Check immediate traffic evasion override
+    // Check immediate traffic evasion override (cyclic across 2400m seam)
     for (let i = 0; i < traffic.length; i++) {
       const car = traffic[i];
-      const ds = car.s - st.s;
+      const ds = signedTrackDelta(car.s, st.s);
       if (ds < -2.2 || ds > 26.0) continue;
       const carX = car.x + car.bumpOffset;
       if (Math.abs(carX - st.x) < 1.85) {
@@ -384,7 +402,7 @@ export class AiRivals {
     st.vx += (desiredVx - st.vx) * Math.min(1, dt * 7.5);
 
     // Avoid overlapping local player's body
-    if (!local.crashed && Math.abs(st.s - local.s) < 2.2) {
+    if (!local.crashed && Math.abs(signedTrackDelta(st.s, local.s)) < 2.2) {
       const dxPlayer = st.x - local.x;
       const absDx = Math.abs(dxPlayer);
       if (absDx < 1.1) {
@@ -397,7 +415,7 @@ export class AiRivals {
     for (let i = 0; i < this.bots.length; i++) {
       const other = this.bots[i];
       if (other === bot || !other.active || other.state.crashed) continue;
-      if (Math.abs(st.s - other.state.s) < 2.4) {
+      if (Math.abs(signedTrackDelta(st.s, other.state.s)) < 2.4) {
         const dxBot = st.x - other.state.x;
         if (Math.abs(dxBot) < 1.35) {
           const push = dxBot >= 0 ? 1 : -1;
@@ -416,7 +434,7 @@ export class AiRivals {
     // Traffic side-bump protection for bots
     for (let i = 0; i < traffic.length; i++) {
       const car = traffic[i];
-      const ds = car.s - st.s;
+      const ds = signedTrackDelta(car.s, st.s);
       if (ds < -2.7 || ds > 2.7) continue;
       const carX = car.x + car.bumpOffset;
       const dx = st.x - carX;
@@ -431,7 +449,7 @@ export class AiRivals {
     // Melee attacks when riding side-by-side with player
     const spec = WEAPONS[st.weapon];
     if (st.attackSide === 0 && bot.attackCooldown <= 0 && !local.crashed && local.invulnTimer <= 0) {
-      const dsPlayer = Math.abs(st.s - local.s);
+      const dsPlayer = Math.abs(signedTrackDelta(st.s, local.s));
       const dxPlayer = local.x - st.x;
       const absDx = Math.abs(dxPlayer);
       if (dsPlayer < 2.6 && absDx >= 0.75 && absDx <= spec.reach - 0.1) {
@@ -453,7 +471,7 @@ export class AiRivals {
         if (
           !local.crashed &&
           local.invulnTimer <= 0 &&
-          Math.abs(st.s - local.s) < 3.0 &&
+          Math.abs(signedTrackDelta(st.s, local.s)) < 3.0 &&
           Math.abs(local.y - st.y) < 1.05 &&
           sideDist >= 0.45 &&
           sideDist <= spec.reach
@@ -478,12 +496,14 @@ export class AiRivals {
     bot: BotAgent,
     local: RiderRenderState,
     traffic: TrafficCar[],
-    inDuel: boolean
+    inDuel: boolean,
+    crates?: readonly CrateHint[]
   ): number {
     const st = bot.state;
     let idealX: number = LANE_CENTERS[bot.profile.prefLane];
+    const wantsCrate = (st.heldItems?.length ?? 0) < MAX_HELD_ITEMS;
 
-    if (inDuel && Math.abs(st.s - local.s) < 14.0) {
+    if (inDuel && Math.abs(signedTrackDelta(st.s, local.s)) < 14.0) {
       idealX = clamp(
         local.x + bot.duelSide * 1.95,
         -ROAD_HALF_WIDTH + 1.2,
@@ -491,7 +511,7 @@ export class AiRivals {
       );
     }
 
-    // Score each lane center plus ideal duel X for traffic clearance
+    // Score each lane center plus ideal duel X for traffic clearance & nearby '?' crates
     let bestX = idealX;
     let bestScore = -1e9;
 
@@ -499,9 +519,21 @@ export class AiRivals {
       const candX = c < 4 ? LANE_CENTERS[c] : idealX;
       let score = -Math.abs(candX - idealX) * 1.4 - Math.abs(candX - st.x) * 0.45;
 
+      // Gentle steering bias toward upcoming '?' mystery crates when safe
+      if (wantsCrate && crates && crates.length > 0) {
+        for (let k = 0; k < crates.length; k++) {
+          const cr = crates[k];
+          const ds = signedTrackDelta(cr.s, st.s);
+          if (ds < 3.0 || ds > 44.0) continue;
+          if (Math.abs(cr.x - candX) < 1.35) {
+            score += 22.0 * (1.0 - ds / 44.0);
+          }
+        }
+      }
+
       for (let i = 0; i < traffic.length; i++) {
         const car = traffic[i];
-        const ds = car.s - st.s;
+        const ds = signedTrackDelta(car.s, st.s);
         if (ds < -3.0 || ds > 46.0) continue;
         const carX = car.x + car.bumpOffset;
         const dx = Math.abs(carX - candX);

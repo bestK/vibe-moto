@@ -6,7 +6,41 @@ export const SHOULDER_HALF_WIDTH = 11.2;
 export const MAX_LATERAL = 10.4;
 export const LANE_CENTERS = [-5.6, -1.9, 1.9, 5.6] as const;
 
+export const TRACK_LENGTH = 2400; // Seamless 2400m cyclic circuit (4 × 600m biomes)
+const HALF_TRACK = TRACK_LENGTH * 0.5;
+const TWO_PI_L = (Math.PI * 2) / TRACK_LENGTH;
+const W2 = 2 * TWO_PI_L;
+const W5 = 5 * TWO_PI_L;
+const W9 = 9 * TWO_PI_L;
+const W10 = 10 * TWO_PI_L;
+
 export type BiomeId = 0 | 1 | 2 | 3; // 0: Coastal Sunset, 1: Pine Highland, 2: Red Canyon, 3: Twilight Neon
+
+/**
+ * Wraps any unwrapped track distance `s` onto the cyclic circuit `[0, TRACK_LENGTH)`.
+ */
+export function wrapTrackS(s: number): number {
+  const m = s % TRACK_LENGTH;
+  return m < 0 ? m + TRACK_LENGTH : m;
+}
+
+/**
+ * Shortest signed longitudinal delta from `originS` to `targetS` on the 2400m ring,
+ * returning a value in `[-TRACK_LENGTH / 2, +TRACK_LENGTH / 2)`.
+ */
+export function signedTrackDelta(targetS: number, originS: number): number {
+  let d = (targetS - originS) % TRACK_LENGTH;
+  if (d >= HALF_TRACK) d -= TRACK_LENGTH;
+  else if (d < -HALF_TRACK) d += TRACK_LENGTH;
+  return d;
+}
+
+/**
+ * 1-based lap number for an unwrapped track distance `s`.
+ */
+export function getLapNumber(s: number): number {
+  return Math.floor(Math.max(0, s) / TRACK_LENGTH) + 1;
+}
 
 export interface RoadFrame {
   x: number;
@@ -27,46 +61,46 @@ export interface RoadFrame {
 }
 
 /**
- * Deterministic O(1) parametric 3D highway centerline.
- * Every connected multiplayer client computes identical curves, hills, and biomes at every meter `s`.
+ * Deterministic O(1) strictly periodic 3D cyclic highway centerline (period = TRACK_LENGTH = 2400m).
+ * Integer harmonics guarantee C∞ smoothness across the 2400m -> 0m lap seam!
  */
 export function roadX(s: number): number {
   return (
-    38.0 * Math.sin(s * 0.0041) +
-    22.0 * Math.sin(s * 0.0103 + 1.35) +
-    9.5 * Math.cos(s * 0.0191 - 0.5)
+    38.0 * Math.sin(s * W2) +
+    22.0 * Math.sin(s * W5 + 1.35) +
+    9.5 * Math.cos(s * W9 - 0.5)
   );
 }
 
 export function roadDX(s: number): number {
   return (
-    38.0 * 0.0041 * Math.cos(s * 0.0041) +
-    22.0 * 0.0103 * Math.cos(s * 0.0103 + 1.35) -
-    9.5 * 0.0191 * Math.sin(s * 0.0191 - 0.5)
+    38.0 * W2 * Math.cos(s * W2) +
+    22.0 * W5 * Math.cos(s * W5 + 1.35) -
+    9.5 * W9 * Math.sin(s * W9 - 0.5)
   );
 }
 
 export function roadD2X(s: number): number {
   return (
-    -38.0 * 0.0041 * 0.0041 * Math.sin(s * 0.0041) -
-    22.0 * 0.0103 * 0.0103 * Math.sin(s * 0.0103 + 1.35) -
-    9.5 * 0.0191 * 0.0191 * Math.cos(s * 0.0191 - 0.5)
+    -38.0 * W2 * W2 * Math.sin(s * W2) -
+    22.0 * W5 * W5 * Math.sin(s * W5 + 1.35) -
+    9.5 * W9 * W9 * Math.cos(s * W9 - 0.5)
   );
 }
 
 export function roadY(s: number): number {
   return (
-    8.5 * Math.sin(s * 0.0052 + 0.4) +
-    4.0 * Math.sin(s * 0.0131) +
-    1.6 * Math.cos(s * 0.0255)
+    8.5 * Math.sin(s * W2 + 0.4) +
+    4.0 * Math.sin(s * W5) +
+    1.6 * Math.cos(s * W10)
   );
 }
 
 export function roadDY(s: number): number {
   return (
-    8.5 * 0.0052 * Math.cos(s * 0.0052 + 0.4) +
-    4.0 * 0.0131 * Math.cos(s * 0.0131) -
-    1.6 * 0.0255 * Math.sin(s * 0.0255)
+    8.5 * W2 * Math.cos(s * W2 + 0.4) +
+    4.0 * W5 * Math.cos(s * W5) -
+    1.6 * W10 * Math.sin(s * W10)
   );
 }
 
@@ -170,10 +204,11 @@ export function roadFrameToLocalWorld(
   originY: number,
   out: THREE.Vector3
 ): THREE.Vector3 {
+  const ds = signedTrackDelta(s, originS);
   out.set(
     f.x - originX + f.rx * lateralX + f.ux * heightY,
     f.y - originY + f.ry * lateralX + f.uy * heightY,
-    -(s - originS) + f.rz * lateralX + f.uz * heightY
+    -ds + f.rz * lateralX + f.uz * heightY
   );
   return out;
 }
@@ -207,17 +242,18 @@ export function hash1(n: number): number {
 }
 
 export function getBiomeAt(s: number): BiomeId {
-  const seg = Math.floor(Math.max(0, s) / 1400) % 4;
+  const seg = Math.floor(wrapTrackS(s) / (TRACK_LENGTH / 4)) % 4;
   return seg as BiomeId;
 }
 
 /**
- * Deterministic boost pad check: returns lane lateral X if there is a speed pad near `s`, else null.
+ * Deterministic cyclic boost pad check (2400 / 24 = 100 exact slots per lap).
  */
 export function getBoostPadInSlot(slotIndex: number): { s: number; x: number } | null {
-  if (slotIndex < 2) return null;
-  if (slotIndex % 11 !== 4) return null;
-  const h = hash1(slotIndex * 9173 + 17);
+  const wSlot = ((slotIndex % 100) + 100) % 100;
+  if (wSlot < 2) return null;
+  if (wSlot % 11 !== 4) return null;
+  const h = hash1(wSlot * 9173 + 17);
   const laneIdx = Math.floor(h * 4);
   return {
     s: slotIndex * 24 + 12,

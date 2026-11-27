@@ -6,11 +6,15 @@ import {
   getCustomAvatarDataUrl,
   getRiderAvatarDataUrl,
 } from '../game/PixelAvatars';
+import { getLapNumber, signedTrackDelta } from '../game/RoadMath';
 import {
   BIKE_PALETTES,
   BOT_PALETTE,
+  HeldItemSlot,
   ITEM_BY_ID,
   ItemType,
+  MAX_HELD_ITEMS,
+  MULTI_ITEM_TTL,
   RiderRenderState,
   SniperHudState,
   WEAPONS,
@@ -43,7 +47,7 @@ export interface HudCallbacks {
   onAvatarChange(avatarIdx: number): void;
   onCustomAvatarUpload(file: File): void;
   onClearCustomAvatar(): void;
-  onUseItem(): void;
+  onUseItem(slotIndex?: number): void;
   onSelectSniperTarget(targetId: string): void;
   onCancelSniper(): void;
   onEditingName(editing: boolean): void;
@@ -52,6 +56,7 @@ export interface HudCallbacks {
   onCycleCamera(): number;
   onSelectWeapon(w: 0 | 1 | 2): void;
   onRegroupPack(): void;
+  onGyroSteer(steer: number | null): void;
   onTouchInput?(patch: TouchInputPatch): void;
 }
 
@@ -109,6 +114,21 @@ const ICON_SKULL_SM =
   '<rect x="2" y="5" width="4" height="2"/><rect x="3" y="6" width="1" height="1" fill="#1c0810"/>' +
   '</svg>';
 
+const ICON_GYRO =
+  '<svg class="vm-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">' +
+  '<rect x="4" y="0" width="6" height="2"/><rect x="4" y="12" width="6" height="2"/>' +
+  '<rect x="0" y="4" width="2" height="6"/><rect x="12" y="4" width="2" height="6"/>' +
+  '<rect x="2" y="2" width="2" height="2"/><rect x="10" y="2" width="2" height="2"/>' +
+  '<rect x="2" y="10" width="2" height="2"/><rect x="10" y="10" width="2" height="2"/>' +
+  '<rect x="8" y="4" width="2" height="2"/><rect x="6" y="6" width="2" height="2"/>' +
+  '<rect x="4" y="8" width="2" height="2"/>' +
+  '</svg>';
+
+const GYRO_DEADZONE_DEG = 4.0;
+const GYRO_MAX_TILT_DEG = 25.0;
+const GYRO_SENSOR_TIMEOUT_MS = 900;
+const TAP_FLASH_MS = 160;
+
 interface StandingRowRefs {
   root: HTMLDivElement;
   rank: HTMLSpanElement;
@@ -121,6 +141,7 @@ interface StandingRowRefs {
   lastRank: number;
   lastOwnerId: string;
   lastName: string;
+  lastLap: number;
   lastDistTenth: number;
   lastKos: number;
   lastBorderColor: string;
@@ -159,6 +180,21 @@ interface SniperCardRefs {
   lastDistM: number;
   lastAvatarIdx: number;
   lastAvatarVer: number;
+}
+
+interface ItemSlotRefs {
+  btn: HTMLButtonElement;
+  keyEl: HTMLSpanElement | null;
+  iconEl: HTMLSpanElement;
+  nameEl: HTMLSpanElement | null;
+  ttlEl: HTMLSpanElement;
+  barEl: HTMLSpanElement;
+  visible: boolean;
+  lastType: ItemType | null | undefined;
+  lastShowTtl: boolean;
+  lastSec: number;
+  lastUrgency: number; // 0 ok, 1 warn, 2 crit
+  lastBarPct: number;
 }
 
 function getRiderColor(colorIdx: number, isBot: boolean): string {
@@ -220,6 +256,12 @@ export class Hud {
   private readonly pxBtnEl: HTMLButtonElement;
   private readonly camPips: HTMLSpanElement[] = [];
   private readonly regroupBtnEl: HTMLButtonElement;
+  private readonly gyroBtnEl: HTMLButtonElement;
+  private readonly tapFlashLeftEl: HTMLDivElement;
+  private readonly tapFlashRightEl: HTMLDivElement;
+  private touchItemBtnEl: HTMLButtonElement | null = null;
+  private touchItemLabelEl: HTMLSpanElement | null = null;
+  private touchItemCountEl: HTMLSpanElement | null = null;
   private readonly feedLines: HTMLDivElement[] = [];
   private readonly feedEntries: FeedEntry[] = [];
   private nextFeedId = 1;
@@ -257,10 +299,7 @@ export class Hud {
   private readonly hpTagEl: HTMLSpanElement;
   private readonly hpTrackEl: HTMLDivElement;
   private readonly hpSegs: HTMLSpanElement[] = [];
-  private readonly itemSlotBtnEl: HTMLButtonElement;
-  private readonly itemKeyEl: HTMLSpanElement;
-  private readonly itemIconEl: HTMLSpanElement;
-  private readonly itemNameEl: HTMLSpanElement;
+  private readonly itemSlots: ItemSlotRefs[] = [];
   private readonly weaponChips: HTMLButtonElement[] = [];
 
   // Bottom-left keycaps
@@ -283,6 +322,17 @@ export class Hud {
   private onlineCount = 1;
   private hasOnlinePeers = false;
 
+  // Gyroscope steering state
+  private gyroEnabled = false;
+  private gyroHasData = false;
+  private gyroBaseline: number | null = null;
+  private gyroSmoothed = 0;
+  private gyroSensorTimer: number | null = null;
+
+  // Tap-screen attack edge flash timers
+  private tapFlashLeftTimer: number | null = null;
+  private tapFlashRightTimer: number | null = null;
+
   private fastAccum = FAST_UPDATE_INTERVAL;
   private slowAccum = SLOW_UPDATE_INTERVAL;
   private ridingElapsed = 0;
@@ -298,7 +348,8 @@ export class Hud {
   private lastWeapon: WeaponType = 0;
   private lastSwinging = false;
   private lastKos = -1;
-  private lastHeldItem: ItemType | null | undefined = undefined;
+  private lastTouchItemType: ItemType | null | undefined = undefined;
+  private lastTouchItemCount = -1;
   private lastWheeliePct = -1;
   private lastWheelieTier = 0; // 0 hidden, 1 normal, 2 slam, 3 danger
   private lastIncomingLockName: string | null = null;
@@ -340,6 +391,76 @@ export class Hud {
 
   private readonly onWindowResize = (): void => {
     this.radarDimsDirty = true;
+  };
+
+  private readonly onOrientationChange = (): void => {
+    if (this.gyroEnabled) {
+      this.gyroBaseline = null;
+    }
+  };
+
+  private readonly onDeviceOrientation = (e: DeviceOrientationEvent): void => {
+    if (!this.gyroEnabled) return;
+
+    const screenAngle =
+      typeof screen !== 'undefined' &&
+      screen.orientation &&
+      typeof screen.orientation.angle === 'number'
+        ? screen.orientation.angle
+        : typeof (window as unknown as { orientation?: number }).orientation === 'number'
+          ? (window as unknown as { orientation?: number }).orientation!
+          : 0;
+    const normAngle = ((Math.round(screenAngle) % 360) + 360) % 360;
+
+    let raw: number | null;
+    if (normAngle === 90) {
+      raw = e.beta;
+    } else if (normAngle === 270) {
+      raw = e.beta !== null ? -e.beta : null;
+    } else if (normAngle === 180) {
+      raw = e.gamma !== null ? -e.gamma : null;
+    } else {
+      raw = e.gamma;
+    }
+
+    if (raw === null || !Number.isFinite(raw)) return;
+
+    if (!this.gyroHasData) {
+      this.gyroHasData = true;
+      if (this.gyroSensorTimer !== null) {
+        window.clearTimeout(this.gyroSensorTimer);
+        this.gyroSensorTimer = null;
+      }
+      this.gyroBaseline = raw;
+      this.gyroSmoothed = 0;
+      this.showToast('GYRO ON', 'cyan');
+      this.callbacks.onGyroSteer(0);
+      return;
+    }
+
+    if (this.gyroBaseline === null) {
+      this.gyroBaseline = raw;
+      return;
+    }
+
+    let delta = raw - this.gyroBaseline;
+    if (delta > 180) delta -= 360;
+    else if (delta < -180) delta += 360;
+
+    let target = 0;
+    const absDelta = Math.abs(delta);
+    if (absDelta > GYRO_DEADZONE_DEG) {
+      const sign = delta > 0 ? 1 : -1;
+      target =
+        sign *
+        Math.min(1, (absDelta - GYRO_DEADZONE_DEG) / (GYRO_MAX_TILT_DEG - GYRO_DEADZONE_DEG));
+    }
+
+    this.gyroSmoothed += (target - this.gyroSmoothed) * 0.35;
+    if (target === 0 && Math.abs(this.gyroSmoothed) < 0.01) {
+      this.gyroSmoothed = 0;
+    }
+    this.callbacks.onGyroSteer(this.gyroSmoothed);
   };
 
   constructor(
@@ -503,7 +624,19 @@ export class Hud {
       this.regroupBtnEl.blur();
     });
 
-    actions.append(this.muteBtnEl, this.pxBtnEl, camBtnEl, this.regroupBtnEl);
+    this.gyroBtnEl = document.createElement('button');
+    this.gyroBtnEl.type = 'button';
+    this.gyroBtnEl.className = 'vm-btn vm-btn-gyro';
+    this.gyroBtnEl.title = 'Gyro';
+    this.gyroBtnEl.setAttribute('aria-label', 'Toggle gyroscope steering');
+    this.gyroBtnEl.setAttribute('aria-pressed', 'false');
+    this.gyroBtnEl.innerHTML = ICON_GYRO;
+    this.gyroBtnEl.addEventListener('click', () => {
+      this.toggleGyro();
+      this.gyroBtnEl.blur();
+    });
+
+    actions.append(this.muteBtnEl, this.pxBtnEl, camBtnEl, this.gyroBtnEl, this.regroupBtnEl);
     topLeft.append(this.riderPillEl, this.netBadgeEl, actions);
 
     // 3-line pooled broadcast ticker feed
@@ -686,6 +819,7 @@ export class Hud {
         lastRank: -1,
         lastOwnerId: '',
         lastName: '',
+        lastLap: -1,
         lastDistTenth: -1,
         lastKos: -1,
         lastBorderColor: '',
@@ -821,35 +955,70 @@ export class Hud {
 
     gaugesEl.append(nitroRow, hpRow);
 
-    // Combat Bar: Active Powerup Item Slot + Weapon Selector Chips
-    const combatBar = document.createElement('div');
-    combatBar.className = 'vm-combat-bar';
+    // Pooled 4-slot Multi-Item Powerup Tray (30s TTL when >=2 held)
+    const itemTray = document.createElement('div');
+    itemTray.className = 'vm-item-tray';
 
-    this.itemSlotBtnEl = document.createElement('button');
-    this.itemSlotBtnEl.type = 'button';
-    this.itemSlotBtnEl.className = 'vm-item-slot';
-    this.itemSlotBtnEl.disabled = true;
-    this.itemSlotBtnEl.title = 'Use Item (R)';
+    for (let i = 0; i < MAX_HELD_ITEMS; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = i === 0 ? 'vm-item-slot' : 'vm-item-slot is-hidden';
+      btn.disabled = true;
+      btn.title = i === 0 ? 'Use Item (R)' : `Use Slot ${i + 1}`;
 
-    this.itemKeyEl = document.createElement('span');
-    this.itemKeyEl.className = 'vm-item-key';
-    this.itemKeyEl.textContent = 'R';
-
-    this.itemIconEl = document.createElement('span');
-    this.itemIconEl.className = 'vm-item-icon';
-    this.itemIconEl.textContent = '·';
-
-    this.itemNameEl = document.createElement('span');
-    this.itemNameEl.className = 'vm-item-name';
-    this.itemNameEl.textContent = '--';
-
-    this.itemSlotBtnEl.append(this.itemKeyEl, this.itemIconEl, this.itemNameEl);
-    this.itemSlotBtnEl.addEventListener('click', () => {
-      if (!this.itemSlotBtnEl.disabled) {
-        this.callbacks.onUseItem();
+      let keyEl: HTMLSpanElement | null = null;
+      if (i === 0) {
+        keyEl = document.createElement('span');
+        keyEl.className = 'vm-item-key';
+        keyEl.textContent = 'R';
+        btn.appendChild(keyEl);
       }
-      this.itemSlotBtnEl.blur();
-    });
+
+      const iconEl = document.createElement('span');
+      iconEl.className = 'vm-item-icon';
+      iconEl.textContent = '·';
+      btn.appendChild(iconEl);
+
+      let nameEl: HTMLSpanElement | null = null;
+      if (i === 0) {
+        nameEl = document.createElement('span');
+        nameEl.className = 'vm-item-name';
+        nameEl.textContent = '--';
+        btn.appendChild(nameEl);
+      }
+
+      const ttlEl = document.createElement('span');
+      ttlEl.className = 'vm-item-ttl is-hidden';
+      btn.appendChild(ttlEl);
+
+      const barEl = document.createElement('span');
+      barEl.className = 'vm-item-bar is-hidden';
+      btn.appendChild(barEl);
+
+      const slotIndex = i;
+      btn.addEventListener('click', () => {
+        if (!btn.disabled) {
+          this.callbacks.onUseItem(slotIndex);
+        }
+        btn.blur();
+      });
+
+      this.itemSlots.push({
+        btn,
+        keyEl,
+        iconEl,
+        nameEl,
+        ttlEl,
+        barEl,
+        visible: i === 0,
+        lastType: undefined,
+        lastShowTtl: false,
+        lastSec: -1,
+        lastUrgency: -1,
+        lastBarPct: -1,
+      });
+      itemTray.appendChild(btn);
+    }
 
     const weaponsEl = document.createElement('div');
     weaponsEl.className = 'vm-weapons';
@@ -877,16 +1046,23 @@ export class Hud {
       weaponsEl.appendChild(chip);
     }
 
-    combatBar.append(this.itemSlotBtnEl, weaponsEl);
-    bottomRight.append(this.wheelieWrapEl, speedHeader, gaugesEl, combatBar);
+    bottomRight.append(this.wheelieWrapEl, speedHeader, gaugesEl, itemTray, weaponsEl);
 
     // -----------------------------------------------------------------------
-    // 5. BOTTOM-LEFT KEYCAP HINTS & TOUCH CONTROLS
+    // 5. BOTTOM-LEFT KEYCAP HINTS, TOUCH CONTROLS & TAP ATTACK EDGE FLASHES
     // -----------------------------------------------------------------------
     this.keycapsEl = this.buildKeycaps();
     const touchLayer = this.buildTouchControls();
 
+    this.tapFlashLeftEl = document.createElement('div');
+    this.tapFlashLeftEl.className = 'vm-tap-flash vm-tap-flash-left';
+
+    this.tapFlashRightEl = document.createElement('div');
+    this.tapFlashRightEl.className = 'vm-tap-flash vm-tap-flash-right';
+
     this.root.append(
+      this.tapFlashLeftEl,
+      this.tapFlashRightEl,
       topLeftCol,
       this.toastEl,
       this.dangerLockEl,
@@ -1091,7 +1267,7 @@ export class Hud {
       }
 
       this.updateSpeedAndBars(local);
-      this.updateItemSlot(local.heldItem);
+      this.updateItemTray(local.heldItems, local.heldItem);
       this.updateWheelieBar(local.wheelieCharge);
       this.updateIncomingLock(local.incomingLockName);
     }
@@ -1172,9 +1348,113 @@ export class Hud {
     return this.editingName;
   }
 
+  flashTapAttack(side: 'left' | 'right'): void {
+    const isLeft = side === 'left';
+    const el = isLeft ? this.tapFlashLeftEl : this.tapFlashRightEl;
+    const prevTimer = isLeft ? this.tapFlashLeftTimer : this.tapFlashRightTimer;
+    if (prevTimer !== null) {
+      window.clearTimeout(prevTimer);
+    }
+
+    el.classList.add('is-flashing');
+    const timer = window.setTimeout(() => {
+      el.classList.remove('is-flashing');
+      if (isLeft) this.tapFlashLeftTimer = null;
+      else this.tapFlashRightTimer = null;
+    }, TAP_FLASH_MS);
+
+    if (isLeft) this.tapFlashLeftTimer = timer;
+    else this.tapFlashRightTimer = timer;
+  }
+
   // -------------------------------------------------------------------------
   // PRIVATE BUILDERS & EVENTS
   // -------------------------------------------------------------------------
+
+  private toggleGyro(): void {
+    if (this.gyroEnabled) {
+      this.disableGyro(true);
+      return;
+    }
+
+    if (typeof window === 'undefined' || typeof DeviceOrientationEvent === 'undefined') {
+      this.showToast('NO GYRO SENSOR', 'red');
+      return;
+    }
+
+    const doe = DeviceOrientationEvent as unknown as {
+      requestPermission?: () => Promise<'granted' | 'denied'>;
+    };
+
+    if (typeof doe.requestPermission === 'function') {
+      doe
+        .requestPermission()
+        .then((res) => {
+          if (res === 'granted') {
+            this.enableGyroListener();
+          } else {
+            this.showToast('NO GYRO SENSOR', 'red');
+          }
+        })
+        .catch(() => {
+          this.showToast('NO GYRO SENSOR', 'red');
+        });
+      return;
+    }
+
+    this.enableGyroListener();
+  }
+
+  private enableGyroListener(): void {
+    if (this.gyroEnabled) return;
+    this.gyroEnabled = true;
+    this.gyroHasData = false;
+    this.gyroBaseline = null;
+    this.gyroSmoothed = 0;
+
+    this.gyroBtnEl.classList.add('is-active');
+    this.gyroBtnEl.setAttribute('aria-pressed', 'true');
+    this.root.classList.add('vm-gyro-on');
+
+    window.addEventListener('deviceorientation', this.onDeviceOrientation, { passive: true });
+    window.addEventListener('orientationchange', this.onOrientationChange, { passive: true });
+
+    if (this.gyroSensorTimer !== null) {
+      window.clearTimeout(this.gyroSensorTimer);
+    }
+    this.gyroSensorTimer = window.setTimeout(() => {
+      this.gyroSensorTimer = null;
+      if (this.gyroEnabled && !this.gyroHasData) {
+        this.disableGyro(false);
+        this.showToast('NO GYRO SENSOR', 'red');
+      }
+    }, GYRO_SENSOR_TIMEOUT_MS);
+  }
+
+  private disableGyro(showOffToast: boolean): void {
+    if (this.gyroSensorTimer !== null) {
+      window.clearTimeout(this.gyroSensorTimer);
+      this.gyroSensorTimer = null;
+    }
+    if (this.gyroEnabled) {
+      window.removeEventListener('deviceorientation', this.onDeviceOrientation);
+      window.removeEventListener('orientationchange', this.onOrientationChange);
+    }
+
+    this.gyroEnabled = false;
+    this.gyroHasData = false;
+    this.gyroBaseline = null;
+    this.gyroSmoothed = 0;
+
+    this.gyroBtnEl.classList.remove('is-active');
+    this.gyroBtnEl.setAttribute('aria-pressed', 'false');
+    this.root.classList.remove('vm-gyro-on');
+    this.callbacks.onGyroSteer(null);
+
+    if (showOffToast) {
+      this.showToast('GYRO OFF', 'gold');
+    }
+  }
 
   private ensureAvatarPopoverBuilt(): void {
     if (this.avatarPopoverBuilt) return;
@@ -1483,22 +1763,43 @@ export class Hud {
 
     const leftZone = document.createElement('div');
     leftZone.className = 'vm-touch-left';
-    const brkBtn = makePad('BRK', 'brake', 'vm-touch-btn-brk');
     const steerRow = document.createElement('div');
     steerRow.className = 'vm-touch-steer';
     steerRow.append(
-      makePad('◄', 'left', 'vm-touch-btn-steer'),
-      makePad('►', 'right', 'vm-touch-btn-steer')
+      makePad('◀', 'left', 'vm-touch-btn-steer'),
+      makePad('▶', 'right', 'vm-touch-btn-steer')
     );
-    leftZone.append(brkBtn, steerRow);
+    leftZone.appendChild(steerRow);
 
     const rightZone = document.createElement('div');
     rightZone.className = 'vm-touch-right';
+
+    const itemTouchBtn = document.createElement('button');
+    itemTouchBtn.type = 'button';
+    itemTouchBtn.className = 'vm-touch-btn vm-touch-btn-item';
+    itemTouchBtn.setAttribute('aria-label', 'Use item');
+
+    const itemTouchLabel = document.createElement('span');
+    itemTouchLabel.textContent = 'R';
+    const itemTouchCount = document.createElement('span');
+    itemTouchCount.className = 'vm-touch-item-count is-hidden';
+    itemTouchBtn.append(itemTouchLabel, itemTouchCount);
+
+    itemTouchBtn.addEventListener('pointerdown', (e: PointerEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!this.itemSlots[0].btn.disabled) {
+        this.callbacks.onUseItem(0);
+      }
+    });
+    this.touchItemBtnEl = itemTouchBtn;
+    this.touchItemLabelEl = itemTouchLabel;
+    this.touchItemCountEl = itemTouchCount;
+
     rightZone.append(
-      makePad('◄ ATK', 'attackLeft', 'vm-touch-btn-atk'),
-      makePad('ATK ►', 'attackRight', 'vm-touch-btn-atk'),
-      makePad('HOP', 'wheelie', 'vm-touch-btn-hop'),
-      makePad('N2O', 'nitro', 'vm-touch-btn-nitro')
+      itemTouchBtn,
+      makePad('⬆', 'wheelie', 'vm-touch-btn-hop'),
+      makePad('⚡', 'nitro', 'vm-touch-btn-nitro')
     );
 
     layer.append(leftZone, rightZone);
@@ -1541,27 +1842,119 @@ export class Hud {
     }
   }
 
-  private updateItemSlot(heldItem: ItemType | null): void {
-    if (heldItem === this.lastHeldItem) return;
-    this.lastHeldItem = heldItem;
+  private updateItemTray(
+    heldItems: readonly HeldItemSlot[] | undefined,
+    fallbackItem: ItemType | null
+  ): void {
+    const count = heldItems ? Math.min(MAX_HELD_ITEMS, heldItems.length) : fallbackItem ? 1 : 0;
+    const showTtl = count >= 2;
 
-    if (!heldItem) {
-      this.itemSlotBtnEl.disabled = true;
-      this.itemSlotBtnEl.classList.remove('is-ready');
-      this.itemSlotBtnEl.style.borderColor = '';
-      this.itemKeyEl.style.backgroundColor = '';
-      this.itemIconEl.textContent = '·';
-      this.itemNameEl.textContent = '--';
-      return;
+    for (let i = 0; i < MAX_HELD_ITEMS; i++) {
+      const ref = this.itemSlots[i];
+      const shouldShow = i === 0 || i < count;
+
+      if (!shouldShow) {
+        if (ref.visible) {
+          ref.visible = false;
+          ref.btn.classList.add('is-hidden');
+          ref.btn.disabled = true;
+          ref.lastType = undefined;
+          ref.lastShowTtl = false;
+          ref.lastSec = -1;
+          ref.lastUrgency = -1;
+          ref.lastBarPct = -1;
+        }
+        continue;
+      }
+
+      if (!ref.visible) {
+        ref.visible = true;
+        ref.btn.classList.remove('is-hidden');
+      }
+
+      const slot = heldItems && i < count ? heldItems[i] : null;
+      const itemType: ItemType | null = slot ? slot.type : i === 0 ? fallbackItem : null;
+
+      if (itemType !== ref.lastType) {
+        ref.lastType = itemType;
+        if (!itemType) {
+          ref.btn.disabled = true;
+          ref.btn.classList.remove('is-ready');
+          ref.btn.style.borderColor = '';
+          ref.btn.title = 'Use Item (R)';
+          if (ref.keyEl) ref.keyEl.style.backgroundColor = '';
+          ref.iconEl.textContent = '·';
+          if (ref.nameEl) ref.nameEl.textContent = '--';
+        } else {
+          const spec = ITEM_BY_ID[itemType];
+          ref.btn.disabled = false;
+          ref.btn.classList.add('is-ready');
+          ref.btn.style.borderColor = spec.color;
+          ref.btn.title = spec.zhName;
+          if (ref.keyEl) ref.keyEl.style.backgroundColor = spec.color;
+          ref.iconEl.textContent = spec.icon;
+          if (ref.nameEl) ref.nameEl.textContent = spec.zhName;
+        }
+      }
+
+      const activeTtl = showTtl && itemType !== null && slot !== null;
+      if (activeTtl !== ref.lastShowTtl) {
+        ref.lastShowTtl = activeTtl;
+        ref.ttlEl.classList.toggle('is-hidden', !activeTtl);
+        ref.barEl.classList.toggle('is-hidden', !activeTtl);
+      }
+
+      if (activeTtl && slot) {
+        const clampedTtl = Math.max(0, Math.min(MULTI_ITEM_TTL, slot.ttl));
+        const sec = Math.max(1, Math.ceil(clampedTtl));
+        if (sec !== ref.lastSec) {
+          ref.lastSec = sec;
+          ref.ttlEl.textContent = `${sec}s`;
+        }
+
+        const urgency = clampedTtl < 5 ? 2 : clampedTtl < 10 ? 1 : 0;
+        if (urgency !== ref.lastUrgency) {
+          ref.lastUrgency = urgency;
+          const uStr = urgency === 2 ? 'crit' : urgency === 1 ? 'warn' : 'ok';
+          ref.ttlEl.dataset.urgency = uStr;
+          ref.barEl.dataset.urgency = uStr;
+        }
+
+        const pct = Math.round((clampedTtl / MULTI_ITEM_TTL) * 100);
+        if (pct !== ref.lastBarPct) {
+          ref.lastBarPct = pct;
+          ref.barEl.style.transform = `scaleX(${(pct / 100).toFixed(2)})`;
+        }
+      }
     }
 
-    const spec = ITEM_BY_ID[heldItem];
-    this.itemSlotBtnEl.disabled = false;
-    this.itemSlotBtnEl.classList.add('is-ready');
-    this.itemSlotBtnEl.style.borderColor = spec.color;
-    this.itemKeyEl.style.backgroundColor = spec.color;
-    this.itemIconEl.textContent = spec.icon;
-    this.itemNameEl.textContent = spec.zhName;
+    // Mobile touch R button: sync slot 0 icon & ×2/×3/×4 count badge
+    if (this.touchItemBtnEl && this.touchItemLabelEl && this.touchItemCountEl) {
+      const firstType: ItemType | null =
+        heldItems && count > 0 ? heldItems[0].type : fallbackItem;
+      if (firstType !== this.lastTouchItemType) {
+        this.lastTouchItemType = firstType;
+        if (!firstType) {
+          this.touchItemBtnEl.classList.remove('is-ready');
+          this.touchItemBtnEl.style.borderColor = '';
+          this.touchItemLabelEl.textContent = 'R';
+        } else {
+          const spec = ITEM_BY_ID[firstType];
+          this.touchItemBtnEl.classList.add('is-ready');
+          this.touchItemBtnEl.style.borderColor = spec.color;
+          this.touchItemLabelEl.textContent = spec.icon;
+        }
+      }
+      if (count !== this.lastTouchItemCount) {
+        this.lastTouchItemCount = count;
+        if (count > 1) {
+          this.touchItemCountEl.classList.remove('is-hidden');
+          this.touchItemCountEl.textContent = `×${count}`;
+        } else {
+          this.touchItemCountEl.classList.add('is-hidden');
+        }
+      }
+    }
   }
 
   private updateWheelieBar(charge: number): void {
@@ -1731,6 +2124,7 @@ export class Hud {
       const rankNum = riderIdx + 1;
       const isLocal = rider.isLocal || rider.id === local.id;
       const isBot = rider.isBot && !isLocal;
+      const lap = getLapNumber(rider.s);
       const distTenth = Math.round(Math.max(0, rider.s) / 100);
       const borderColor = isLocal ? '#ffd166' : getRiderColor(rider.colorIdx, rider.isBot);
       const avatarIdx = normalizeAvatarIdx(rider.avatarIdx);
@@ -1772,9 +2166,10 @@ export class Hud {
         ref.lastName = rider.name;
         ref.name.textContent = rider.name;
       }
-      if (ref.lastDistTenth !== distTenth) {
+      if (ref.lastLap !== lap || ref.lastDistTenth !== distTenth) {
+        ref.lastLap = lap;
         ref.lastDistTenth = distTenth;
-        ref.dist.textContent = `${(distTenth / 10).toFixed(1)}km`;
+        ref.dist.textContent = `L${lap} · ${(distTenth / 10).toFixed(1)}km`;
       }
       if (ref.lastKos !== kos) {
         const wasZero = ref.lastKos <= 0;
@@ -1822,7 +2217,7 @@ export class Hud {
       const r = allRiders[i];
       if (r.isLocal || r.id === local.id) continue;
 
-      const ds = r.s - local.s;
+      const ds = signedTrackDelta(r.s, local.s);
       const absDs = Math.abs(ds);
 
       if (absDs < closestAbsDs) {

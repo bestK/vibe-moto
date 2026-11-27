@@ -1,4 +1,10 @@
-import { LANE_CENTERS, hash1 } from './RoadMath';
+import {
+  LANE_CENTERS,
+  TRACK_LENGTH,
+  hash1,
+  signedTrackDelta,
+  wrapTrackS,
+} from './RoadMath';
 import { TrafficCar } from './types';
 
 interface TrafficSlot {
@@ -6,10 +12,11 @@ interface TrafficSlot {
   seenStamp: number;
 }
 
-// 4 forward lanes (+s): left lanes are fast cruisers, right lanes steady highway flow
+// 4 forward lanes (+s) with exact integer divisors of TRACK_LENGTH (2400m)
+// so traffic wraps seamlessly around the 2400m circuit across every lap with zero pop!
 const LANE_SPEEDS = [32.5, 27.0, 22.5, 18.5] as const;
-const LANE_SLOT_LEN = [94.0, 82.0, 78.0, 88.0] as const;
-const LANE_SPAWN_CHANCE = [0.56, 0.6, 0.62, 0.58] as const;
+const LANE_SLOT_COUNT = [24, 30, 30, 25] as const; // 24*100, 30*80, 30*80, 25*96 = 2400m
+const LANE_SPAWN_CHANCE = [0.64, 0.68, 0.7, 0.66] as const;
 const POOL_CAPACITY = 44;
 const VIEW_BEHIND = 40.0;
 const VIEW_AHEAD = 315.0;
@@ -51,38 +58,30 @@ export class TrafficSystem {
     this.stamp++;
     this.activeCars.length = 0;
 
-    const minS = originS - VIEW_BEHIND;
-    const maxS = originS + VIEW_AHEAD;
+    const wrappedOrigin = wrapTrackS(originS);
 
     for (let lane = 0; lane < 4; lane++) {
       const speed = LANE_SPEEDS[lane];
-      const slotLen = LANE_SLOT_LEN[lane];
+      const slotCount = LANE_SLOT_COUNT[lane];
+      const slotLen = TRACK_LENGTH / slotCount;
       const chance = LANE_SPAWN_CHANCE[lane];
       const laneX = LANE_CENTERS[lane];
 
-      // Split baseShift = speed * nowSec into integer slot count + remainder
-      // to keep high float64 precision around originS at any wall-clock timestamp.
-      const baseShift = speed * nowSec;
-      const kShift = Math.floor(baseShift / slotLen);
-      const fracShift = baseShift - kShift * slotLen;
+      // Keep phase offset wrapped onto [0, TRACK_LENGTH) for full float64 precision
+      const shiftS = wrapTrackS(speed * nowSec);
 
-      const minIdx = Math.floor((minS - fracShift) / slotLen) - 1;
-      const maxIdx = Math.floor((maxS - fracShift) / slotLen) + 1;
-
-      for (let idx = minIdx; idx <= maxIdx; idx++) {
-        // Deterministic car slot key shared by every online client
-        const k = idx - kShift;
-        const k32 = k | 0;
-        const hSpawn = hash1(Math.imul(k32, 7919) ^ Math.imul(lane + 1, 104729) ^ 0x51f);
+      for (let k = 0; k < slotCount; k++) {
+        const hSpawn = hash1(Math.imul(k, 7919) ^ Math.imul(lane + 1, 104729) ^ 0x51f);
         if (hSpawn >= chance) continue;
 
-        const hJitter = hash1(Math.imul(k32, 3571) ^ Math.imul(lane + 3, 4099));
+        const hJitter = hash1(Math.imul(k, 3571) ^ Math.imul(lane + 3, 4099));
         const jitter = 11.0 + hJitter * (slotLen - 22.0);
-        const carS = idx * slotLen + fracShift + jitter;
+        const carS = wrapTrackS(k * slotLen + jitter + shiftS);
 
-        if (carS < minS || carS > maxS) continue;
+        const ds = signedTrackDelta(carS, wrappedOrigin);
+        if (ds < -VIEW_BEHIND || ds > VIEW_AHEAD) continue;
 
-        // Deterministic anti-wall safeguard on outer lane: never form an impassable 4-lane wall
+        // Deterministic anti-wall safeguard on outer lane across cyclic ring
         if (lane === 3 && this.wouldFormFourLaneWall(carS)) {
           continue;
         }
@@ -90,12 +89,11 @@ export class TrafficSystem {
         const carId = k * 4 + lane;
         let slot = this.byId.get(carId);
         if (!slot) {
-          slot = this.acquireSlot(originS);
+          slot = this.acquireSlot(wrappedOrigin);
           if (!slot) continue;
 
-          const hType = hash1(Math.imul(k32, 1301) ^ Math.imul(lane + 5, 6133));
+          const hType = hash1(Math.imul(k, 1301) ^ Math.imul(lane + 5, 6133));
           let carType: 0 | 1 | 2 | 3 = 0;
-          // Police cruisers more frequent in left fast lanes
           const policeThreshold = lane <= 1 ? 0.14 : 0.06;
           if (hType < policeThreshold) {
             carType = 3;
@@ -106,7 +104,7 @@ export class TrafficSystem {
           }
 
           const colorIdx = Math.floor(
-            hash1(Math.imul(k32, 2029) ^ Math.imul(lane + 7, 997)) * 8
+            hash1(Math.imul(k, 2029) ^ Math.imul(lane + 7, 997)) * 8
           );
 
           const c = slot.car;
@@ -174,24 +172,23 @@ export class TrafficSystem {
     let lanesBlocked = 0;
     for (let i = 0; i < this.activeCars.length; i++) {
       const other = this.activeCars[i];
-      if (Math.abs(other.s - carS) < 8.5) {
+      if (Math.abs(signedTrackDelta(other.s, carS)) < 8.5) {
         lanesBlocked |= 1 << other.lane;
       }
     }
     return (lanesBlocked & 0b0111) === 0b0111;
   }
 
-  private acquireSlot(originS: number): TrafficSlot | undefined {
+  private acquireSlot(wrappedOrigin: number): TrafficSlot | undefined {
     const free = this.freeList.pop();
     if (free) return free;
 
-    // Fallback: recycle the farthest stale slot if pool is saturated
     let worstIdx = -1;
     let worstDist = -1;
     for (let i = 0; i < this.activeSlots.length; i++) {
       const slot = this.activeSlots[i];
       if (slot.seenStamp === this.stamp) continue;
-      const d = Math.abs(slot.car.s - originS);
+      const d = Math.abs(signedTrackDelta(slot.car.s, wrappedOrigin));
       if (d > worstDist) {
         worstDist = d;
         worstIdx = i;

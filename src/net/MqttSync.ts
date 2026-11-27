@@ -1234,6 +1234,7 @@ export class MqttSync {
       wheelAngle: 0,
       kos,
       heldItem,
+      heldItems: [],
       wheelieCharge,
       magnetTimer: magnetActive ? 1 : 0,
       turboShieldTimer: turboShield ? 1 : 0,

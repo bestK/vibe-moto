@@ -511,6 +511,55 @@ body {
   box-shadow: var(--vm-shadow-sm);
 }
 
+.vm-btn-gyro {
+  min-width: 32px;
+  padding: 0 7px;
+}
+
+.vm-btn-gyro.is-active {
+  border-color: var(--vm-cyan);
+  color: var(--vm-cyan);
+  background: rgba(0, 245, 212, 0.14);
+}
+
+.vm-btn-gyro.is-active:hover {
+  border-color: var(--vm-cyan);
+  color: #ffffff;
+}
+
+/* Tap-Screen-to-Attack Arcade Edge Flashes (GPU transform/opacity only) */
+.vm-tap-flash {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  width: min(18vw, 132px);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 18;
+  will-change: opacity, transform;
+  transition: opacity 150ms steps(4, end), transform 150ms steps(4, end);
+}
+
+.vm-tap-flash-left {
+  left: 0;
+  border-left: 5px solid var(--vm-crimson);
+  background: linear-gradient(90deg, rgba(255, 42, 84, 0.36) 0%, rgba(255, 209, 102, 0.12) 48%, transparent 100%);
+  transform: translate3d(-10px, 0, 0);
+}
+
+.vm-tap-flash-right {
+  right: 0;
+  border-right: 5px solid var(--vm-crimson);
+  background: linear-gradient(270deg, rgba(255, 42, 84, 0.36) 0%, rgba(255, 209, 102, 0.12) 48%, transparent 100%);
+  transform: translate3d(10px, 0, 0);
+}
+
+.vm-tap-flash.is-flashing {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  transition: none;
+}
+
 /* Real-Time Broadcast Ticker Feed (Top-Left below nameplate) */
 .vm-feed {
   display: flex;
@@ -963,7 +1012,7 @@ body {
 }
 
 .vm-standings {
-  width: 226px;
+  width: 248px;
   padding: 5px 6px;
   display: flex;
   flex-direction: column;
@@ -1471,25 +1520,27 @@ body {
   animation: vm-pulse-fast 0.45s steps(2, end) infinite;
 }
 
-/* Combat bar: Active Powerup Item Slot + Weapon Selector Chips */
-.vm-combat-bar {
+/* Multi-Item Powerup Tray (up to 4 pooled slots, 30s TTL when >=2) */
+.vm-item-tray {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
   pointer-events: none;
 }
 
 .vm-item-slot {
   pointer-events: auto;
   appearance: none;
+  position: relative;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   height: 28px;
-  min-width: 72px;
-  padding: 0 8px 0 5px;
+  min-width: 52px;
+  padding: 0 7px 2px 5px;
   background: rgba(7, 9, 18, 0.88);
   border: 2px solid #242b47;
   box-shadow: var(--vm-shadow), var(--vm-bevel);
@@ -1500,6 +1551,10 @@ body {
   line-height: 1;
   cursor: default;
   outline: none;
+}
+
+.vm-item-slot.is-hidden {
+  display: none;
 }
 
 .vm-item-key {
@@ -1513,6 +1568,7 @@ body {
   color: #5b658a;
   font-family: var(--vm-font-ui);
   font-size: 10px;
+  flex-shrink: 0;
 }
 
 .vm-item-icon {
@@ -1522,6 +1578,55 @@ body {
 
 .vm-item-name {
   white-space: nowrap;
+}
+
+.vm-item-ttl {
+  font-family: var(--vm-font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 3px;
+  background: rgba(4, 5, 10, 0.78);
+  color: var(--vm-cyan);
+  line-height: 1;
+}
+
+.vm-item-ttl[data-urgency='warn'] {
+  color: var(--vm-gold);
+}
+
+.vm-item-ttl[data-urgency='crit'] {
+  color: var(--vm-crimson);
+  animation: vm-pulse-fast 0.32s steps(2, end) infinite;
+}
+
+.vm-item-ttl.is-hidden {
+  display: none;
+}
+
+.vm-item-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--vm-cyan);
+  transform-origin: left center;
+  transform: scaleX(1);
+  will-change: transform;
+  pointer-events: none;
+}
+
+.vm-item-bar[data-urgency='warn'] {
+  background: var(--vm-gold);
+}
+
+.vm-item-bar[data-urgency='crit'] {
+  background: var(--vm-crimson);
+}
+
+.vm-item-bar.is-hidden {
+  display: none;
 }
 
 .vm-item-slot.is-ready {
@@ -1729,12 +1834,16 @@ body {
   gap: 8px;
 }
 
+.vm-hud-root.vm-gyro-on .vm-touch-steer {
+  display: none;
+}
+
 .vm-touch-right {
   position: absolute;
   right: max(12px, env(safe-area-inset-right));
-  bottom: max(156px, calc(env(safe-area-inset-bottom) + 146px));
-  display: grid;
-  grid-template-columns: repeat(2, 58px);
+  bottom: max(152px, calc(env(safe-area-inset-bottom) + 144px));
+  display: flex;
+  align-items: center;
   gap: 8px;
 }
 
@@ -1744,15 +1853,15 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 58px;
+  min-width: 52px;
   height: 52px;
   padding: 0 8px;
-  background: rgba(13, 16, 29, 0.84);
+  background: rgba(13, 16, 29, 0.86);
   border: 2px solid var(--vm-steel-hi);
   box-shadow: 3px 3px 0 var(--vm-ink);
   color: var(--vm-text);
   font-family: var(--vm-font-ui);
-  font-size: 13px;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1;
   touch-action: none;
@@ -1760,21 +1869,43 @@ body {
 }
 
 .vm-touch-btn-steer {
-  width: 64px;
-  height: 60px;
+  width: 62px;
+  height: 58px;
   font-size: 18px;
 }
 
-.vm-touch-btn-brk {
-  width: 64px;
-  height: 36px;
-  font-size: 11px;
+.vm-touch-btn-item {
+  position: relative;
+  border-color: #2e3759;
   color: var(--vm-dim);
+  font-size: 14px;
 }
 
-.vm-touch-btn-atk {
-  border-color: var(--vm-crimson);
-  color: var(--vm-crimson);
+.vm-touch-btn-item.is-ready {
+  border-color: var(--vm-gold);
+  color: #ffffff;
+  font-size: 18px;
+}
+
+.vm-touch-item-count {
+  position: absolute;
+  right: -4px;
+  top: -5px;
+  padding: 1px 4px;
+  background: var(--vm-gold);
+  border: 1px solid var(--vm-ink);
+  box-shadow: 1px 1px 0 var(--vm-ink);
+  color: var(--vm-ink);
+  font-family: var(--vm-font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.vm-touch-item-count.is-hidden {
+  display: none;
 }
 
 .vm-touch-btn-nitro {
@@ -1793,12 +1924,6 @@ body {
   background: var(--vm-gold);
   border-color: var(--vm-gold);
   color: var(--vm-ink);
-}
-
-.vm-touch-btn-atk.is-active {
-  background: var(--vm-crimson);
-  border-color: var(--vm-crimson);
-  color: #ffffff;
 }
 
 .vm-touch-btn-nitro.is-active {
@@ -1823,7 +1948,7 @@ body {
   }
 
   .vm-bottom-right {
-    right: max(142px, calc(env(safe-area-inset-right) + 136px));
+    right: max(190px, calc(env(safe-area-inset-right) + 184px));
     bottom: max(12px, env(safe-area-inset-bottom));
   }
 
@@ -1862,7 +1987,7 @@ body {
   }
 
   .vm-standings {
-    width: 174px;
+    width: 194px;
     padding: 4px;
   }
 
@@ -2007,6 +2132,7 @@ body {
   .vm-ko-pill,
   .vm-avatar-popover,
   .vm-item-slot,
+  .vm-item-ttl,
   .vm-danger-lock,
   .vm-wheelie-tag,
   .vm-wheelie-fill {
