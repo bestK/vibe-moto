@@ -35,6 +35,7 @@ body {
   padding: 0;
   width: 100%;
   height: 100%;
+  height: 100dvh;
   overflow: hidden;
   background: var(--vm-bg);
   color: var(--vm-text);
@@ -49,8 +50,8 @@ body {
 #game-canvas {
   position: fixed;
   inset: 0;
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   display: block;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
@@ -60,6 +61,8 @@ body {
 #hud {
   position: fixed;
   inset: 0;
+  width: 100%;
+  height: 100%;
   z-index: 10;
   pointer-events: none;
   overflow: hidden;

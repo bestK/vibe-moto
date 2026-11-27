@@ -834,9 +834,31 @@ canvas.addEventListener('pointerdown', (e: PointerEvent) => {
   }
 });
 
-window.addEventListener('resize', () => {
+let orientResizeTimer: number | null = null;
+function handleViewportResize(): void {
   world.resize();
+  syncPerfViewportMetrics();
+}
+
+window.addEventListener('resize', handleViewportResize);
+window.visualViewport?.addEventListener('resize', handleViewportResize);
+window.addEventListener('orientationchange', () => {
+  handleViewportResize();
+  if (orientResizeTimer !== null) {
+    window.clearTimeout(orientResizeTimer);
+  }
+  orientResizeTimer = window.setTimeout(() => {
+    orientResizeTimer = null;
+    handleViewportResize();
+  }, 150);
 });
+
+if (typeof ResizeObserver !== 'undefined') {
+  const ro = new ResizeObserver(() => {
+    handleViewportResize();
+  });
+  ro.observe(canvas);
+}
 
 function syncInputState(): void {
   if (hud.isEditingName()) {
@@ -887,6 +909,12 @@ interface PerfSnapshot {
   geometries: number;
   textures: number;
   fps: number;
+  cssW: number;
+  cssH: number;
+  bufW: number;
+  bufH: number;
+  camAspect: number;
+  aspectDiff: number;
 }
 
 const perfSnapshot: PerfSnapshot = {
@@ -895,8 +923,25 @@ const perfSnapshot: PerfSnapshot = {
   geometries: 0,
   textures: 0,
   fps: 60,
+  cssW: 0,
+  cssH: 0,
+  bufW: 0,
+  bufH: 0,
+  camAspect: 1,
+  aspectDiff: 0,
 };
 (window as unknown as { __VMOTO_PERF__?: PerfSnapshot }).__VMOTO_PERF__ = perfSnapshot;
+
+function syncPerfViewportMetrics(): void {
+  const m = world.getViewportMetrics();
+  perfSnapshot.cssW = m.cssW;
+  perfSnapshot.cssH = m.cssH;
+  perfSnapshot.bufW = m.bufW;
+  perfSnapshot.bufH = m.bufH;
+  perfSnapshot.camAspect = m.camAspect;
+  perfSnapshot.aspectDiff = m.aspectDiff;
+}
+syncPerfViewportMetrics();
 
 let prevPerfMs = performance.now();
 let perfWindowStartMs = prevPerfMs;
@@ -1095,6 +1140,7 @@ function frame(nowPerfMs: number): void {
     perfSnapshot.geometries = info.memory.geometries;
     perfSnapshot.textures = info.memory.textures;
     perfSnapshot.fps = Math.round((perfFrameCount * 1000) / perfElapsed);
+    syncPerfViewportMetrics();
     perfFrameCount = 0;
     perfWindowStartMs = nowPerfMs;
   }

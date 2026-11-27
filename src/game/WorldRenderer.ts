@@ -246,6 +246,10 @@ export class WorldRenderer {
   // Camera & presentation controls
   cameraMode: CameraMode = 0;
   pixelScale = 1; // 1 = HD crisp, 2 = chunky retro pixel grid
+  private lastCssW = 0;
+  private lastCssH = 0;
+  private lastDpr = 0;
+  private lastPixelScale = 0;
   private shakeTime = 0;
   private shakeIntensity = 0;
   private currentFov = 70;
@@ -897,15 +901,41 @@ export class WorldRenderer {
   }
 
   resize(): void {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
+    const dom = this.renderer.domElement;
+    const rect = dom.getBoundingClientRect();
+    const w = Math.max(1, Math.round(rect.width || dom.clientWidth || window.innerWidth));
+    const h = Math.max(1, Math.round(rect.height || dom.clientHeight || window.innerHeight));
     // Cap HD pixelRatio at 1.5 to cut HiDPI fragment load while keeping pixel edges crisp
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     const effectiveRatio = this.pixelScale === 1 ? dpr : 1 / this.pixelScale;
+
+    this.lastCssW = w;
+    this.lastCssH = h;
+    this.lastDpr = dpr;
+    this.lastPixelScale = this.pixelScale;
+
     this.renderer.setPixelRatio(effectiveRatio);
     this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / Math.max(1, h);
+    this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+  }
+
+  getViewportMetrics(): { cssW: number; cssH: number; bufW: number; bufH: number; camAspect: number; aspectDiff: number } {
+    const dom = this.renderer.domElement;
+    const cssW = Math.max(1, dom.clientWidth || this.lastCssW || window.innerWidth);
+    const cssH = Math.max(1, dom.clientHeight || this.lastCssH || window.innerHeight);
+    const bufW = dom.width;
+    const bufH = dom.height;
+    const camAspect = this.camera.aspect;
+    const cssAspect = cssW / cssH;
+    return {
+      cssW,
+      cssH,
+      bufW,
+      bufH,
+      camAspect: Number(camAspect.toFixed(4)),
+      aspectDiff: Number(Math.abs(cssAspect - camAspect).toFixed(6)),
+    };
   }
 
   setPixelScale(scale: number): void {
@@ -981,6 +1011,22 @@ export class WorldRenderer {
     fallenCargo?: readonly FallenCargo[],
     animals?: readonly CrossingAnimal[]
   ): void {
+    // Self-healing zero-stretch guard: ensures camera.aspect & WebGL buffer ALWAYS match actual CSS canvas box
+    const dom = this.renderer.domElement;
+    const cw = dom.clientWidth;
+    const ch = dom.clientHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    if (
+      cw > 0 &&
+      ch > 0 &&
+      (cw !== this.lastCssW ||
+        ch !== this.lastCssH ||
+        dpr !== this.lastDpr ||
+        this.pixelScale !== this.lastPixelScale)
+    ) {
+      this.resize();
+    }
+
     const originS = local.s;
     const originX = roadX(originS);
     const originY = roadY(originS);
@@ -1881,7 +1927,13 @@ export class WorldRenderer {
     dt: number
   ): void {
     const speedNorm = Math.min(1, local.speed / 64);
-    const targetFov = (this.cameraMode === 2 ? 78 : 68) + speedNorm * 14 + (local.nitroActive ? 9 : 0);
+    // Gently widen vertical FOV on narrow portrait phones so the 4-lane highway stays comfortable without stretching
+    const portraitBoost = this.camera.aspect < 0.85 ? Math.min(18, (0.85 - this.camera.aspect) * 42) : 0;
+    const targetFov =
+      (this.cameraMode === 2 ? 78 : 68) +
+      portraitBoost +
+      speedNorm * 14 +
+      (local.nitroActive ? 9 : 0);
     this.currentFov += (targetFov - this.currentFov) * Math.min(1, dt * 8);
     if (Math.abs(this.camera.fov - this.currentFov) > 0.05) {
       this.camera.fov = this.currentFov;
