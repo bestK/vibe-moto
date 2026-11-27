@@ -157,6 +157,28 @@ const _tmpFrame: RoadFrame = {
 };
 
 /**
+ * Converts road-relative coordinates using an already-sampled RoadFrame into floating-origin world position.
+ * Avoids duplicate trigonometric evaluations when sampleRoadFrame(s) was already called for the same `s`.
+ */
+export function roadFrameToLocalWorld(
+  f: RoadFrame,
+  s: number,
+  lateralX: number,
+  heightY: number,
+  originS: number,
+  originX: number,
+  originY: number,
+  out: THREE.Vector3
+): THREE.Vector3 {
+  out.set(
+    f.x - originX + f.rx * lateralX + f.ux * heightY,
+    f.y - originY + f.ry * lateralX + f.uy * heightY,
+    -(s - originS) + f.rz * lateralX + f.uz * heightY
+  );
+  return out;
+}
+
+/**
  * Converts road-relative coordinates (s, lateralX, heightY) into floating-origin world position.
  * Keeps WebGL Float32 coordinates tiny even at s = 1,000,000m.
  */
@@ -170,12 +192,7 @@ export function roadToLocalWorld(
   out: THREE.Vector3
 ): THREE.Vector3 {
   sampleRoadFrame(s, _tmpFrame);
-  out.set(
-    _tmpFrame.x - originX + _tmpFrame.rx * lateralX + _tmpFrame.ux * heightY,
-    _tmpFrame.y - originY + _tmpFrame.ry * lateralX + _tmpFrame.uy * heightY,
-    -(s - originS) + _tmpFrame.rz * lateralX + _tmpFrame.uz * heightY
-  );
-  return out;
+  return roadFrameToLocalWorld(_tmpFrame, s, lateralX, heightY, originS, originX, originY, out);
 }
 
 /**

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { drawAvatarToContext } from './PixelAvatars';
+import { drawRiderAvatarToContext } from './PixelAvatars';
 
 function makePixelCanvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
   const c = document.createElement('canvas');
@@ -43,6 +43,7 @@ export interface PixelTextureAtlas {
   foliagePalm: THREE.CanvasTexture;
   canyonRock: THREE.CanvasTexture;
   carWindows: THREE.CanvasTexture;
+  crate: THREE.CanvasTexture;
   hitWords: Record<string, THREE.CanvasTexture>;
 }
 
@@ -68,12 +69,19 @@ export function getPixelAtlas(): PixelTextureAtlas {
     foliagePalm: createFoliageTexture('#2a7221', '#4ea832', '#70c143'),
     canyonRock: createRockTexture(),
     carWindows: createCarWindowTexture(),
+    crate: createMysteryCrateTexture(),
     hitWords: {
       POW: createComicBurstTexture('POW!', '#ffe600', '#ff2a54'),
       SMACK: createComicBurstTexture('SMACK!', '#00f5d4', '#ff595e'),
       BONK: createComicBurstTexture('BONK!', '#ffbe0b', '#8338ec'),
       KO: createComicBurstTexture('K.O.!', '#ff0054', '#ffe600'),
       BOOST: createComicBurstTexture('NITRO!', '#00e5ff', '#2b7fff'),
+      SLAM: createComicBurstTexture('SLAM!', '#ffd166', '#ff4d00'),
+      FLIP: createComicBurstTexture('FLIPPED!', '#ff2a54', '#11121a'),
+      BOOM: createComicBurstTexture('BOOM!', '#ff4d00', '#ffe600'),
+      SLIP: createComicBurstTexture('SLIP!', '#ffe600', '#3a86ff'),
+      SNIPED: createComicBurstTexture('SNIPED!', '#00f5d4', '#ff0054'),
+      DODGED: createComicBurstTexture('DODGED!', '#52e065', '#00f5d4'),
     },
   };
   return _cachedAtlas;
@@ -450,8 +458,46 @@ function createComicBurstTexture(label: string, fill: string, stroke: string): T
   return toCrispTexture(c, 1, 1);
 }
 
+function createMysteryCrateTexture(): THREE.CanvasTexture {
+  const [c, ctx] = makePixelCanvas(32, 32);
+  ctx.fillStyle = '#18142b';
+  ctx.fillRect(0, 0, 32, 32);
+  // Crisp neon gold & cyan double border
+  ctx.fillStyle = '#ffd166';
+  ctx.fillRect(0, 0, 32, 3);
+  ctx.fillRect(0, 29, 32, 3);
+  ctx.fillRect(0, 0, 3, 32);
+  ctx.fillRect(29, 0, 3, 32);
+  ctx.fillStyle = '#00f5d4';
+  ctx.fillRect(4, 4, 24, 2);
+  ctx.fillRect(4, 26, 24, 2);
+  ctx.fillRect(4, 4, 2, 24);
+  ctx.fillRect(26, 4, 2, 24);
+  // Corner rivets
+  ctx.fillStyle = '#ff4d6d';
+  ctx.fillRect(2, 2, 3, 3);
+  ctx.fillRect(27, 2, 3, 3);
+  ctx.fillRect(2, 27, 3, 3);
+  ctx.fillRect(27, 27, 3, 3);
+  // Bold pixel '?'
+  ctx.fillStyle = '#0d0f1a';
+  ctx.fillRect(11, 8, 10, 3);
+  ctx.fillRect(18, 11, 4, 5);
+  ctx.fillRect(14, 15, 6, 3);
+  ctx.fillRect(14, 18, 4, 3);
+  ctx.fillRect(14, 23, 4, 3);
+  ctx.fillStyle = '#fff59d';
+  ctx.fillRect(10, 7, 10, 3);
+  ctx.fillRect(17, 10, 4, 5);
+  ctx.fillRect(13, 14, 6, 3);
+  ctx.fillRect(13, 17, 4, 3);
+  ctx.fillRect(13, 22, 4, 3);
+  return toCrispTexture(c, 1, 1);
+}
+
 /**
  * Generates or updates a crisp pixel floating nameplate + pixel avatar + mini HP strip texture for a rider.
+ * Optimized for 192x48 canvas (~44% less VRAM & upload bandwidth than 256x64).
  */
 export function drawNameplateCanvas(
   canvas: HTMLCanvasElement,
@@ -459,7 +505,8 @@ export function drawNameplateCanvas(
   hp: number,
   accentHex: string,
   isBot: boolean,
-  avatarIdx = 0
+  avatarIdx = 0,
+  ownerId = ''
 ): void {
   const ctx = canvas.getContext('2d')!;
   ctx.imageSmoothingEnabled = false;
@@ -468,16 +515,16 @@ export function drawNameplateCanvas(
   ctx.clearRect(0, 0, w, h);
 
   const label = name.slice(0, 14);
-  ctx.font = 'bold 18px "Silkscreen", "Press Start 2P", monospace';
-  const avatarSize = 32;
-  const avatarBox = avatarSize + 4; // 2px pixel border on all sides
-  const gap = 4;
-  const maxNameBoxW = w - avatarBox - gap - 8;
-  const nameBoxW = Math.min(maxNameBoxW, Math.max(76, Math.ceil(ctx.measureText(label).width) + 18));
+  ctx.font = 'bold 14px "Silkscreen", "Press Start 2P", monospace';
+  const avatarSize = 24;
+  const avatarBox = avatarSize + 4; // 2px pixel border on all sides -> 28px
+  const gap = 3;
+  const maxNameBoxW = w - avatarBox - gap - 6;
+  const nameBoxW = Math.min(maxNameBoxW, Math.max(58, Math.ceil(ctx.measureText(label).width) + 14));
   const totalW = avatarBox + gap + nameBoxW;
   const startX = Math.floor((w - totalW) / 2);
-  const boxY = 6;
-  const boxH = avatarBox; // 36px
+  const boxY = 4;
+  const boxH = avatarBox; // 28px
   const borderCol = isBot ? '#6c757d' : accentHex;
 
   // Avatar frame on left (crisp 2px pixel border)
@@ -485,7 +532,7 @@ export function drawNameplateCanvas(
   ctx.fillRect(startX - 1, boxY - 1, avatarBox + 2, boxH + 2);
   ctx.fillStyle = borderCol;
   ctx.fillRect(startX, boxY, avatarBox, boxH);
-  drawAvatarToContext(ctx, avatarIdx, startX + 2, boxY + 2, avatarSize);
+  drawRiderAvatarToContext(ctx, ownerId, avatarIdx, startX + 2, boxY + 2, avatarSize);
 
   // Name box on right
   const nameX = startX + avatarBox + gap;
@@ -503,15 +550,15 @@ export function drawNameplateCanvas(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#090b12';
-  ctx.fillText(label, textCenterX + 2, textCenterY + 2, nameBoxW - 12);
+  ctx.fillText(label, textCenterX + 1, textCenterY + 1, nameBoxW - 10);
   ctx.fillStyle = isBot ? '#ced4da' : '#ffffff';
-  ctx.fillText(label, textCenterX, textCenterY, nameBoxW - 12);
+  ctx.fillText(label, textCenterX, textCenterY, nameBoxW - 10);
 
   // Mini pixel HP strip underneath
-  const barW = Math.min(totalW - 4, 152);
+  const barW = Math.min(totalW - 4, 118);
   const barX = Math.floor((w - barW) / 2);
-  const barY = boxY + boxH + 5;
-  const barH = 8;
+  const barY = boxY + boxH + 4;
+  const barH = 6;
   ctx.fillStyle = '#0d0f17';
   ctx.fillRect(barX - 2, barY - 2, barW + 4, barH + 4);
   const pct = Math.max(0, Math.min(1, hp / 100));

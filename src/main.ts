@@ -1,10 +1,24 @@
 import './style.css';
 import { RetroAudio } from './audio/RetroAudio';
 import { AiRivals } from './game/AiRivals';
-import { AVATAR_COUNT, PIXEL_AVATARS } from './game/PixelAvatars';
+import { ItemCallbacks, ItemSystem } from './game/ItemSystem';
+import {
+  AVATAR_COUNT,
+  PIXEL_AVATARS,
+  compressCustomAvatarFile,
+  isValidCustomAvatarDataUrl,
+  setCustomAvatar,
+} from './game/PixelAvatars';
 import { InputState, ParticleKind, PlayerCallbacks, PlayerPhysics } from './game/PlayerPhysics';
 import { TrafficSystem } from './game/TrafficSystem';
-import { BIKE_PALETTES, CombatHitEvent, RiderRenderState, WeaponType } from './game/types';
+import {
+  BIKE_PALETTES,
+  CombatHitEvent,
+  ItemNetEvent,
+  ItemType,
+  RiderRenderState,
+  WeaponType,
+} from './game/types';
 import { CameraMode, WorldRenderer } from './game/WorldRenderer';
 import { ConnectionStatus, MqttSync, PackSpawnTarget } from './net/MqttSync';
 import { Hud, TouchInputPatch } from './ui/Hud';
@@ -12,6 +26,7 @@ import { Hud, TouchInputPatch } from './ui/Hud';
 const STORAGE_NAME_KEY = 'vibemoto_name';
 const STORAGE_COLOR_KEY = 'vibemoto_color';
 const STORAGE_AVATAR_KEY = 'vibemoto_avatar';
+const STORAGE_CUSTOM_AVATAR_KEY = 'vibemoto_custom_avatar';
 const HITSTOP_DURATION = 0.042;
 const NEARBY_REAL_RANGE_M = 180;
 
@@ -26,6 +41,14 @@ function readStorage(key: string): string | null {
 function writeStorage(key: string, value: string): void {
   try {
     window.localStorage.setItem(key, value);
+  } catch {
+    // Ignore restricted storage contexts
+  }
+}
+
+function removeStorage(key: string): void {
+  try {
+    window.localStorage.removeItem(key);
   } catch {
     // Ignore restricted storage contexts
   }
@@ -65,6 +88,14 @@ function loadSavedAvatarIdx(): number | null {
   return parsed % AVATAR_COUNT;
 }
 
+function loadSavedCustomAvatar(): string | null {
+  const raw = readStorage(STORAGE_CUSTOM_AVATAR_KEY);
+  if (raw && isValidCustomAvatarDataUrl(raw)) {
+    return raw;
+  }
+  return null;
+}
+
 const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
 const hudContainer = document.getElementById('hud') as HTMLElement | null;
 if (!canvas || !hudContainer) {
@@ -74,11 +105,13 @@ if (!canvas || !hudContainer) {
 const initialName = loadOrCreatePlayerName();
 const savedColor = loadSavedColorIdx();
 const savedAvatar = loadSavedAvatarIdx();
+const initialCustomAvatar = loadSavedCustomAvatar();
 
 const world = new WorldRenderer(canvas);
 const audio = new RetroAudio();
 const traffic = new TrafficSystem();
 const ai = new AiRivals();
+const items = new ItemSystem();
 
 const pressedKeys = new Set<string>();
 const touchState = {
@@ -118,6 +151,7 @@ let lastConnStatus: ConnectionStatus = 'connecting';
 // Forward declarations wired cleanly before mqtt.connect()
 let player!: PlayerPhysics;
 let hud!: Hud;
+let itemCallbacks!: ItemCallbacks;
 
 function spawnPackWarpFx(target: PackSpawnTarget): void {
   player.spawnAt(target.s, target.x, target.speed);
@@ -137,50 +171,62 @@ function spawnPackWarpFx(target: PackSpawnTarget): void {
   hud.showToast(`⚡ 5M → ${target.targetName}`, 'cyan');
 }
 
-const mqtt = new MqttSync(initialName, savedColor ?? 0, savedAvatar ?? 0, {
-  onStatus(status: ConnectionStatus) {
-    lastConnStatus = status;
-    lastOnlineCount = mqtt.getOnlineCount();
-    hud.setConnectionStatus(status, lastOnlineCount);
-  },
-  onInitialPackSpawn(target: PackSpawnTarget) {
-    spawnPackWarpFx(target);
-  },
-  onIncomingHit(ev: CombatHitEvent) {
-    if (ev.to !== mqtt.clientId) return;
-    const causedKo = player.applyExternalHit(ev.dmg, ev.knockX, ev.ko);
-    const isKo = causedKo || ev.ko;
+const mqtt = new MqttSync(
+  initialName,
+  savedColor ?? 0,
+  savedAvatar ?? 0,
+  {
+    onStatus(status: ConnectionStatus) {
+      lastConnStatus = status;
+      lastOnlineCount = mqtt.getOnlineCount();
+      hud.setConnectionStatus(status, lastOnlineCount);
+    },
+    onInitialPackSpawn(target: PackSpawnTarget) {
+      spawnPackWarpFx(target);
+    },
+    onIncomingHit(ev: CombatHitEvent) {
+      if (ev.to !== mqtt.clientId) return;
+      const causedKo = player.applyExternalHit(ev.dmg, ev.knockX, ev.ko);
+      const isKo = causedKo || ev.ko;
 
-    hitstopTimer = Math.max(hitstopTimer, HITSTOP_DURATION);
-    audio.playHit(ev.weapon, isKo);
-    if (isKo) {
-      audio.playCrash();
-    }
-    world.triggerShake(isKo ? 0.65 : 0.36, isKo ? 0.38 : 0.22);
-    world.spawnParticles(
-      player.state.s,
-      player.state.x,
-      0.95,
-      isKo ? 20 : 12,
-      isKo ? 0xff2a54 : 0xffd166,
-      9.0,
-      0.18,
-      0.48,
-      14,
-      player.state.speed * 0.35
-    );
-    world.spawnHitPopup(
-      isKo ? 'KO' : ev.weapon === 1 ? 'BONK' : ev.weapon === 2 ? 'SMACK' : 'POW',
-      player.state.s,
-      player.state.x,
-      1.75
-    );
-    hud.showToast(isKo ? `K.O. BY ${ev.fromName}!` : `${ev.fromName} HIT!`, 'red');
+      hitstopTimer = Math.max(hitstopTimer, HITSTOP_DURATION);
+      audio.playHit(ev.weapon, isKo);
+      if (isKo) {
+        audio.playCrash();
+      }
+      world.triggerShake(isKo ? 0.65 : 0.36, isKo ? 0.38 : 0.22);
+      world.spawnParticles(
+        player.state.s,
+        player.state.x,
+        0.95,
+        isKo ? 20 : 12,
+        isKo ? 0xff2a54 : 0xffd166,
+        9.0,
+        0.18,
+        0.48,
+        14,
+        player.state.speed * 0.35
+      );
+      world.spawnHitPopup(
+        isKo ? 'KO' : ev.weapon === 1 ? 'BONK' : ev.weapon === 2 ? 'SMACK' : 'POW',
+        player.state.s,
+        player.state.x,
+        1.75
+      );
+      hud.showToast(isKo ? `K.O. BY ${ev.fromName}!` : `${ev.fromName} HIT!`, 'red');
+    },
+    onItemEvent(ev: ItemNetEvent) {
+      items.handleNetEvent(ev, player.state, itemCallbacks);
+    },
+    onRemoteCustomAvatar(peerId: string, dataUrl: string | null) {
+      setCustomAvatar(peerId, dataUrl);
+    },
+    onPeerEvent(msg: string) {
+      hud.showToast(msg, 'cyan');
+    },
   },
-  onPeerEvent(msg: string) {
-    hud.showToast(msg, 'cyan');
-  },
-});
+  initialCustomAvatar
+);
 
 const colorIdx = savedColor ?? hashIdToColorIdx(mqtt.clientId);
 if (savedColor === null) {
@@ -188,10 +234,14 @@ if (savedColor === null) {
   mqtt.setColor(colorIdx);
 }
 
-const initialAvatar = savedAvatar ?? (colorIdx % AVATAR_COUNT);
+const initialAvatar = savedAvatar ?? colorIdx % AVATAR_COUNT;
 if (savedAvatar === null) {
   writeStorage(STORAGE_AVATAR_KEY, String(initialAvatar));
   mqtt.setAvatar(initialAvatar);
+}
+
+if (initialCustomAvatar) {
+  setCustomAvatar(mqtt.clientId, initialCustomAvatar);
 }
 
 player = new PlayerPhysics(mqtt.clientId, initialName, colorIdx, initialAvatar);
@@ -237,6 +287,27 @@ function cycleCamera(): number {
   return world.cameraMode;
 }
 
+function spawnParticlePreset(kind: ParticleKind, s: number, x: number, y: number, vs = 0): void {
+  switch (kind) {
+    case 'spark':
+      world.spawnParticles(s, x, y, 8, 0xffd166, 7.2, 0.14, 0.32, 14, vs);
+      break;
+    case 'smoke':
+      world.spawnParticles(s, x, y, 4, 0xcbd5e1, 2.6, 0.24, 0.45, -2, vs);
+      break;
+    case 'dust':
+      world.spawnParticles(s, x, y, 5, 0xd4a373, 3.6, 0.2, 0.4, 4, vs);
+      break;
+    case 'nitro':
+      world.spawnParticles(s, x, y, 5, 0x00f5d4, 2.2, 0.18, 0.26, 0, vs);
+      break;
+    case 'crash':
+      world.spawnParticles(s, x, y, 16, 0xff4d00, 10.0, 0.22, 0.56, 15, vs);
+      world.spawnParticles(s, x, y + 0.15, 10, 0xffd166, 9.0, 0.16, 0.42, 14, vs);
+      break;
+  }
+}
+
 hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   onNameChange(name: string) {
     writeStorage(STORAGE_NAME_KEY, name);
@@ -246,12 +317,48 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   onAvatarChange(avatarIdx: number) {
     const safeIdx = ((Math.trunc(avatarIdx) % AVATAR_COUNT) + AVATAR_COUNT) % AVATAR_COUNT;
     writeStorage(STORAGE_AVATAR_KEY, String(safeIdx));
+    removeStorage(STORAGE_CUSTOM_AVATAR_KEY);
+    setCustomAvatar(mqtt.clientId, null);
+    mqtt.setCustomAvatar(null);
     player.state.avatarIdx = safeIdx;
     mqtt.setAvatar(safeIdx);
+    hud.refreshLocalAvatar();
     const meta = PIXEL_AVATARS[safeIdx];
     if (meta) {
       hud.showToast(meta.name, 'gold');
     }
+  },
+  onCustomAvatarUpload(file: File) {
+    audio.unlock();
+    compressCustomAvatarFile(file)
+      .then((dataUrl) => {
+        writeStorage(STORAGE_CUSTOM_AVATAR_KEY, dataUrl);
+        setCustomAvatar(mqtt.clientId, dataUrl);
+        mqtt.setCustomAvatar(dataUrl);
+        hud.refreshLocalAvatar();
+        hud.showToast('📷 自定义头像已同步', 'cyan');
+      })
+      .catch(() => {
+        hud.showToast('头像上传失败', 'red');
+      });
+  },
+  onClearCustomAvatar() {
+    removeStorage(STORAGE_CUSTOM_AVATAR_KEY);
+    setCustomAvatar(mqtt.clientId, null);
+    mqtt.setCustomAvatar(null);
+    hud.refreshLocalAvatar();
+    hud.showToast('已恢复像素头像', 'gold');
+  },
+  onUseItem() {
+    audio.unlock();
+    items.useHeldItem(player.state, combatTargets, itemCallbacks);
+  },
+  onSelectSniperTarget(targetId: string) {
+    audio.unlock();
+    items.selectSniperTarget(targetId, player.state, combatTargets, itemCallbacks);
+  },
+  onCancelSniper() {
+    items.cancelSniper();
   },
   onEditingName(editing: boolean) {
     if (editing) {
@@ -291,6 +398,103 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     if (patch.attackRight !== undefined) touchState.attackRight = patch.attackRight;
   },
 });
+
+itemCallbacks = {
+  onBroadcast(text, accent = 'gold') {
+    hud.pushBroadcast(text, accent);
+  },
+  onToast(text, accent = 'gold') {
+    hud.showToast(text, accent);
+  },
+  onPublishNetEvent(ev) {
+    mqtt.publishItemEvent(ev);
+  },
+  onHitRival(target, _item: ItemType, dmg, knockX, ko, spinOut) {
+    hitstopTimer = Math.max(hitstopTimer, HITSTOP_DURATION);
+    if (target.isBot) {
+      const botKo = spinOut
+        ? ai.applySpinOut(target.id, 1.3, dmg)
+        : ai.applyHit(target.id, dmg, knockX);
+      if (ko || botKo) {
+        player.state.kos += 1;
+        player.state.nitro = Math.min(100, player.state.nitro + 32);
+      }
+    } else if (ko) {
+      player.state.kos += 1;
+      player.state.nitro = Math.min(100, player.state.nitro + 32);
+    }
+  },
+  onPoliceDragRival(target, dt, shoveX) {
+    if (target.isBot) {
+      ai.applyPoliceDrag(target.id, dt, shoveX);
+    }
+  },
+  onLocalDamage(dmg, knockX, ko, sourceLabel, popup) {
+    const causedKo = player.applyExternalHit(dmg, knockX, ko);
+    const isKo = causedKo || (ko && player.state.crashed);
+    hitstopTimer = Math.max(hitstopTimer, HITSTOP_DURATION);
+    if (isKo) {
+      audio.playCrash();
+    }
+    world.triggerShake(isKo ? 0.68 : 0.36, isKo ? 0.38 : 0.22);
+    spawnParticlePreset('crash', player.state.s, player.state.x, 0.9, player.state.speed * 0.35);
+    world.spawnHitPopup(popup, player.state.s, player.state.x, 1.75);
+    hud.showToast(isKo ? `K.O.! ${sourceLabel}` : `${sourceLabel} 命中!`, 'red');
+  },
+  onLocalSpinOut(duration, dmg, sourceLabel) {
+    const causedKo = player.applySpinOut(duration, dmg);
+    world.triggerShake(0.32, 0.24);
+    world.spawnHitPopup(causedKo ? 'KO' : 'SLIP', player.state.s, player.state.x, 1.7);
+    hud.showToast(`🍌 ${sourceLabel} 打滑!`, 'gold');
+    if (causedKo) {
+      audio.playCrash();
+    }
+  },
+  onLocalPoliceDrag(dt, shoveX) {
+    player.applyPoliceDrag(dt, shoveX);
+  },
+  onLocalActivateTurbo(duration) {
+    player.activateTurboShield(duration);
+  },
+  onLocalActivateMagnet(duration) {
+    player.activateMagnet(duration);
+  },
+  onSfx(kind) {
+    switch (kind) {
+      case 'pickup':
+        audio.playPickup();
+        break;
+      case 'explosion':
+        audio.playExplosion();
+        break;
+      case 'sniperLock':
+        audio.playSniperLock();
+        break;
+      case 'sniperShot':
+        audio.playSniperShot();
+        break;
+      case 'siren':
+        audio.playSiren();
+        break;
+      case 'bananaSlip':
+        audio.playBananaSlip();
+        break;
+      case 'jet':
+        audio.playJetFlyby();
+        break;
+      case 'boost':
+        audio.playBoost();
+        break;
+    }
+  },
+  onParticles: spawnParticlePreset,
+  onPopup(kind, s, x, y) {
+    world.spawnHitPopup(kind, s, x, y);
+  },
+  onShake(intensity, duration = 0.24) {
+    world.triggerShake(intensity, duration);
+  },
+};
 
 const playerCallbacks: PlayerCallbacks = {
   onAttackSwing(_side: 1 | 2, _weapon: WeaponType) {
@@ -351,6 +555,46 @@ const playerCallbacks: PlayerCallbacks = {
       hud.showToast(`K.O.! ${target.name}`, 'gold');
     }
   },
+  onWheelieSlam(charge: number, hitsCount: number) {
+    audio.playWheelieSlam();
+    world.triggerShake(0.28 + charge * 0.32, 0.22);
+    if (hitsCount > 0) {
+      world.spawnHitPopup('SLAM', player.state.s + 1.0, player.state.x, 1.65);
+    }
+  },
+  onWheelieSlamHit(target: RiderRenderState, dmg: number, knockX: number, ko: boolean) {
+    hitstopTimer = Math.max(hitstopTimer, HITSTOP_DURATION);
+    let confirmedKo = ko;
+    if (target.isBot) {
+      const botKo = ai.applyHit(target.id, dmg, knockX);
+      confirmedKo = ko || botKo;
+    } else {
+      mqtt.publishHit({
+        to: target.id,
+        dmg,
+        side: knockX < 0 ? 1 : 2,
+        weapon: 1,
+        knockX,
+        ko,
+        s: target.s,
+        x: target.x,
+      });
+    }
+    audio.playHit(1, confirmedKo);
+    world.spawnHitPopup(confirmedKo ? 'KO' : 'SLAM', target.s, target.x, target.y + 1.75);
+    hud.pushBroadcast(
+      `🏍️ ${player.state.name} 翘头猛压击飞了 ${target.name}!`,
+      confirmedKo ? 'red' : 'gold'
+    );
+    if (confirmedKo) {
+      hud.showToast(`SLAM K.O.! ${target.name}`, 'gold');
+    }
+  },
+  onWheelieFlip() {
+    world.spawnHitPopup('FLIP', player.state.s, player.state.x, 1.85);
+    hud.showToast('FLIPPED! 翘头翻车!', 'red');
+    hud.pushBroadcast(`💥 ${player.state.name} 翘头过度翻车了!`, 'red');
+  },
   onBoostPad() {
     audio.playBoost();
     world.triggerShake(0.22, 0.22);
@@ -378,26 +622,7 @@ const playerCallbacks: PlayerCallbacks = {
     world.triggerShake(0.66, 0.4);
     hud.showToast('WIPEOUT!', 'red');
   },
-  onParticles(kind: ParticleKind, s: number, x: number, y: number, vs = 0) {
-    switch (kind) {
-      case 'spark':
-        world.spawnParticles(s, x, y, 8, 0xffd166, 7.2, 0.14, 0.32, 14, vs);
-        break;
-      case 'smoke':
-        world.spawnParticles(s, x, y, 4, 0xcbd5e1, 2.6, 0.24, 0.45, -2, vs);
-        break;
-      case 'dust':
-        world.spawnParticles(s, x, y, 5, 0xd4a373, 3.6, 0.2, 0.4, 4, vs);
-        break;
-      case 'nitro':
-        world.spawnParticles(s, x, y, 5, 0x00f5d4, 2.2, 0.18, 0.26, 0, vs);
-        break;
-      case 'crash':
-        world.spawnParticles(s, x, y, 16, 0xff4d00, 10.0, 0.22, 0.56, 15, vs);
-        world.spawnParticles(s, x, y + 0.15, 10, 0xffd166, 9.0, 0.16, 0.42, 14, vs);
-        break;
-    }
-  },
+  onParticles: spawnParticlePreset,
 };
 
 function handleBotHitPlayer(dmg: number, knockX: number, botName: string): void {
@@ -451,7 +676,24 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
   pressedKeys.add(e.code);
   if (e.repeat) return;
 
+  // Sniper target selection shortcuts (1..5 pick target, Escape cancels)
+  if (items.isSniperSelecting()) {
+    if (e.code === 'Escape') {
+      items.cancelSniper();
+      return;
+    }
+    if (e.code >= 'Digit1' && e.code <= 'Digit5') {
+      const idx = Number.parseInt(e.code.slice(5), 10) - 1;
+      items.selectSniperTargetByIndex(idx, player.state, combatTargets, itemCallbacks);
+      return;
+    }
+  }
+
   switch (e.code) {
+    case 'KeyR':
+    case 'KeyX':
+      items.useHeldItem(player.state, combatTargets, itemCallbacks);
+      break;
     case 'Digit1':
       player.cycleWeapon(0);
       break;
@@ -543,10 +785,7 @@ function syncInputState(): void {
     pressedKeys.has('KeyZ') ||
     touchState.attackLeft;
   inputState.attackRight =
-    pressedKeys.has('KeyK') ||
-    pressedKeys.has('KeyE') ||
-    pressedKeys.has('KeyX') ||
-    touchState.attackRight;
+    pressedKeys.has('KeyK') || pressedKeys.has('KeyE') || touchState.attackRight;
   inputState.attackAuto = pressedKeys.has('KeyL') || pressedKeys.has('KeyF');
 
   player.setInput(inputState);
@@ -555,12 +794,76 @@ function syncInputState(): void {
 // Connect online immediately & boot render loop with zero blocking UI
 mqtt.connect();
 
+interface PerfSnapshot {
+  drawCalls: number;
+  triangles: number;
+  geometries: number;
+  textures: number;
+  fps: number;
+}
+
+const perfSnapshot: PerfSnapshot = {
+  drawCalls: 0,
+  triangles: 0,
+  geometries: 0,
+  textures: 0,
+  fps: 60,
+};
+(window as unknown as { __VMOTO_PERF__?: PerfSnapshot }).__VMOTO_PERF__ = perfSnapshot;
+
 let prevPerfMs = performance.now();
+let perfWindowStartMs = prevPerfMs;
+let perfFrameCount = 0;
 let currentTraffic = traffic.update(player.state.s, Date.now() / 1000, 0);
 let currentBots: RiderRenderState[] = [];
+let rafId: number | null = null;
+let bgHeartbeatId: number | null = null;
+let isPageHidden = document.hidden;
+
+function stopBackgroundHeartbeat(): void {
+  if (bgHeartbeatId !== null) {
+    window.clearInterval(bgHeartbeatId);
+    bgHeartbeatId = null;
+  }
+}
+
+function startBackgroundHeartbeat(): void {
+  if (bgHeartbeatId !== null) return;
+  bgHeartbeatId = window.setInterval(() => {
+    mqtt.tick(player.state, performance.now(), 0.05);
+  }, 1000);
+}
+
+function scheduleNextFrame(): void {
+  if (!isPageHidden && rafId === null) {
+    rafId = window.requestAnimationFrame(frame);
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  isPageHidden = document.hidden;
+  if (isPageHidden) {
+    clearHeldInputs();
+    if (rafId !== null) {
+      window.cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    audio.setBackgroundPaused(true);
+    startBackgroundHeartbeat();
+  } else {
+    stopBackgroundHeartbeat();
+    audio.setBackgroundPaused(false);
+    prevPerfMs = performance.now();
+    perfWindowStartMs = prevPerfMs;
+    perfFrameCount = 0;
+    scheduleNextFrame();
+  }
+});
 
 function frame(nowPerfMs: number): void {
-  window.requestAnimationFrame(frame);
+  rafId = null;
+  if (isPageHidden) return;
+  scheduleNextFrame();
 
   const rawDt = (nowPerfMs - prevPerfMs) / 1000;
   prevPerfMs = nowPerfMs;
@@ -622,10 +925,40 @@ function frame(nowPerfMs: number): void {
     allRiders.push(currentBots[i]);
   }
 
-  // 4. Engine audio, 3D HD-pixel frame, and throttled HUD refresh
-  audio.updateEngine(player.state.speed, player.state.nitroActive, player.state.crashed, dt);
-  world.renderFrame(player.state, allRiders, currentTraffic, dt, timeSec);
+  // 4. Update 8 powerup items, projectiles, bomber jets, sniper scope & hazards
+  if (hitstopTimer <= 0) {
+    items.update(dt, player.state, combatTargets, allRiders, itemCallbacks);
+  }
+
+  // 5. Engine audio, 3D HD-pixel frame, sniper HUD & throttled HUD refresh
+  audio.updateEngine(
+    player.state.speed,
+    player.state.nitroActive || player.state.turboShieldTimer > 0,
+    player.state.crashed,
+    dt
+  );
+  world.renderFrame(player.state, allRiders, currentTraffic, dt, timeSec, items.visuals);
+  hud.setSniperState(items.getSniperHudState(), items.getSniperCandidates());
   hud.update(player.state, allRiders, pressedKeys, dt);
+
+  // 6. Lightweight 1Hz read-only perf snapshot for diagnostics
+  perfFrameCount++;
+  const perfElapsed = nowPerfMs - perfWindowStartMs;
+  if (perfElapsed >= 1000) {
+    const info = world.renderer.info;
+    perfSnapshot.drawCalls = info.render.calls;
+    perfSnapshot.triangles = info.render.triangles;
+    perfSnapshot.geometries = info.memory.geometries;
+    perfSnapshot.textures = info.memory.textures;
+    perfSnapshot.fps = Math.round((perfFrameCount * 1000) / perfElapsed);
+    perfFrameCount = 0;
+    perfWindowStartMs = nowPerfMs;
+  }
 }
 
-window.requestAnimationFrame(frame);
+if (isPageHidden) {
+  audio.setBackgroundPaused(true);
+  startBackgroundHeartbeat();
+} else {
+  scheduleNextFrame();
+}

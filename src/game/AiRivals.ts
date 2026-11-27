@@ -141,6 +141,12 @@ export class AiRivals {
           invulnTimer: 0,
           wheelAngle: 0,
           kos: 0,
+          heldItem: null,
+          wheelieCharge: 0,
+          magnetTimer: 0,
+          turboShieldTimer: 0,
+          spinOutTimer: 0,
+          incomingLockName: null,
         },
       });
     }
@@ -198,11 +204,43 @@ export class AiRivals {
         st.crashTimer = 0;
         st.nitroActive = false;
         st.braking = false;
+        st.spinOutTimer = 0;
         return true;
       }
       return false;
     }
     return false;
+  }
+
+  applySpinOut(botId: string, duration: number, dmg: number): boolean {
+    for (let i = 0; i < this.bots.length; i++) {
+      const bot = this.bots[i];
+      if (bot.state.id !== botId) continue;
+      const st = bot.state;
+      if (!bot.active || st.crashed || st.invulnTimer > 0) return false;
+      st.spinOutTimer = Math.max(st.spinOutTimer, duration);
+      st.speed = Math.max(10, st.speed * 0.62);
+      st.hp = Math.max(0, st.hp - dmg);
+      if (st.hp <= 0) {
+        st.crashed = true;
+        st.crashTimer = 0;
+        st.spinOutTimer = 0;
+        return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  applyPoliceDrag(botId: string, dt: number, shoveX: number): void {
+    for (let i = 0; i < this.bots.length; i++) {
+      const bot = this.bots[i];
+      if (bot.state.id !== botId || !bot.active || bot.state.crashed) continue;
+      const st = bot.state;
+      st.speed = Math.max(11, st.speed * Math.exp(-1.5 * dt));
+      st.vx = clamp(st.vx + shoveX * dt, -14, 14);
+      break;
+    }
   }
 
   private spawnBotNear(bot: BotAgent, local: RiderRenderState): void {
@@ -250,6 +288,10 @@ export class AiRivals {
 
     if (st.invulnTimer > 0) {
       st.invulnTimer = Math.max(0, st.invulnTimer - dt);
+    }
+    if (st.spinOutTimer > 0) {
+      st.spinOutTimer = Math.max(0, st.spinOutTimer - dt);
+      st.speed = Math.max(10, st.speed - 14.0 * dt);
     }
     if (bot.attackCooldown > 0) {
       bot.attackCooldown = Math.max(0, bot.attackCooldown - dt);

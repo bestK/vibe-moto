@@ -18,6 +18,7 @@ export class RetroAudio {
   private noiseBuffer: AudioBuffer | null = null;
 
   private muted = false;
+  private bgPaused = false;
   private initialized = false;
   private smoothRpm = 0.12;
   private smoothNitro = 0;
@@ -119,7 +120,7 @@ export class RetroAudio {
       }
     }
 
-    if (this.ctx && this.ctx.state === 'suspended') {
+    if (this.ctx && this.ctx.state === 'suspended' && !this.muted && !this.bgPaused) {
       this.ctx.resume().catch(() => {});
     }
   }
@@ -128,7 +129,26 @@ export class RetroAudio {
     this.muted = muted;
     if (this.ctx && this.masterGain) {
       const now = this.ctx.currentTime;
-      this.masterGain.gain.setTargetAtTime(muted ? 0 : 0.42, now, 0.025);
+      this.masterGain.gain.setTargetAtTime(muted ? 0 : 0.42, now, 0.02);
+      if (muted) {
+        if (this.ctx.state === 'running') {
+          this.ctx.suspend().catch(() => {});
+        }
+      } else if (!this.bgPaused && this.ctx.state === 'suspended') {
+        this.ctx.resume().catch(() => {});
+      }
+    }
+  }
+
+  setBackgroundPaused(paused: boolean): void {
+    this.bgPaused = paused;
+    if (!this.ctx) return;
+    if (paused) {
+      if (this.ctx.state === 'running') {
+        this.ctx.suspend().catch(() => {});
+      }
+    } else if (!this.muted && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
     }
   }
 
@@ -137,7 +157,7 @@ export class RetroAudio {
   }
 
   updateEngine(speed: number, nitro: boolean, crashed: boolean, dt: number): void {
-    if (!this.initialized || !this.ctx || this.ctx.state !== 'running') return;
+    if (!this.initialized || this.muted || this.bgPaused || !this.ctx || this.ctx.state !== 'running') return;
     if (
       !this.engineOscSaw ||
       !this.engineOscTri ||
@@ -197,6 +217,7 @@ export class RetroAudio {
     return (
       this.initialized &&
       !this.muted &&
+      !this.bgPaused &&
       this.ctx !== null &&
       this.masterGain !== null &&
       this.ctx.state === 'running'
@@ -448,5 +469,202 @@ export class RetroAudio {
       osc.start(t);
       osc.stop(t + 0.19);
     }
+  }
+
+  playPickup(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const notes = [587.33, 880, 1174.66];
+    for (let i = 0; i < notes.length; i++) {
+      const t = now + i * 0.045;
+      const osc = ctx.createOscillator();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(notes[i], t);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.001, t);
+      g.gain.linearRampToValueAtTime(0.18, t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+      osc.connect(g);
+      g.connect(this.masterGain);
+      osc.start(t);
+      osc.stop(t + 0.13);
+    }
+  }
+
+  playWheelieSlam(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain || !this.noiseBuffer) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    // Deep asphalt bass shockwave
+    const sub = ctx.createOscillator();
+    sub.type = 'triangle';
+    sub.frequency.setValueAtTime(140, now);
+    sub.frequency.exponentialRampToValueAtTime(34, now + 0.24);
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(0.7, now);
+    sg.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+    sub.connect(sg);
+    sg.connect(this.masterGain);
+    sub.start(now);
+    sub.stop(now + 0.27);
+
+    // Tire crunch noise snap
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(1400, now);
+    lp.frequency.exponentialRampToValueAtTime(220, now + 0.2);
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.38, now);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+    src.connect(lp);
+    lp.connect(ng);
+    ng.connect(this.masterGain);
+    src.start(now, Math.random(), 0.23);
+  }
+
+  playExplosion(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain || !this.noiseBuffer) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(1600, now);
+    lp.frequency.exponentialRampToValueAtTime(95, now + 0.65);
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.68, now);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.68);
+    src.connect(lp);
+    lp.connect(ng);
+    ng.connect(this.masterGain);
+    src.start(now, Math.random() * 0.5, 0.7);
+
+    const boom = ctx.createOscillator();
+    boom.type = 'sine';
+    boom.frequency.setValueAtTime(115, now);
+    boom.frequency.exponentialRampToValueAtTime(28, now + 0.45);
+    const bg = ctx.createGain();
+    bg.gain.setValueAtTime(0.6, now);
+    bg.gain.exponentialRampToValueAtTime(0.001, now + 0.48);
+    boom.connect(bg);
+    bg.connect(this.masterGain);
+    boom.start(now);
+    boom.stop(now + 0.5);
+  }
+
+  playSniperLock(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1320, now);
+    osc.frequency.setValueAtTime(1760, now + 0.05);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.16, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  }
+
+  playSniperShot(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain || !this.noiseBuffer) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    // Sharp supersonic crack
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(900, now);
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.62, now);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+    src.connect(hp);
+    hp.connect(ng);
+    ng.connect(this.masterGain);
+    src.start(now, Math.random(), 0.24);
+
+    // Metallic bolt tail
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(680, now);
+    osc.frequency.exponentialRampToValueAtTime(95, now + 0.16);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.32, now);
+    og.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    osc.connect(og);
+    og.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.19);
+  }
+
+  playSiren(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(640, now);
+    osc.frequency.linearRampToValueAtTime(980, now + 0.22);
+    osc.frequency.linearRampToValueAtTime(640, now + 0.44);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(0.22, now + 0.03);
+    g.gain.setValueAtTime(0.22, now + 0.36);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.46);
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.47);
+  }
+
+  playBananaSlip(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(980, now);
+    osc.frequency.exponentialRampToValueAtTime(240, now + 0.16);
+    osc.frequency.exponentialRampToValueAtTime(760, now + 0.3);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.24, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.33);
+  }
+
+  playJetFlyby(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain || !this.noiseBuffer) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(320, now);
+    bp.frequency.exponentialRampToValueAtTime(1600, now + 0.35);
+    bp.frequency.exponentialRampToValueAtTime(240, now + 0.85);
+    bp.Q.value = 1.6;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(0.38, now + 0.32);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.88);
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(this.masterGain);
+    src.start(now, Math.random() * 0.4, 0.9);
   }
 }

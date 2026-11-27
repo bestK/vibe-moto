@@ -367,7 +367,8 @@ const AVATAR_SPRITES: readonly PixelSpriteDef[] = [
 
 export const PIXEL_AVATARS: readonly PixelAvatarMeta[] = AVATAR_SPRITES.map((s) => s.meta);
 
-const canvasCache = new Map<string, HTMLCanvasElement>();
+const baseCanvasCache = new Map<number, HTMLCanvasElement>();
+const scaledCanvasCache = new Map<string, HTMLCanvasElement>();
 const dataUrlCache = new Map<string, string>();
 
 function normalizeAvatarIdx(avatarIdx: number): number {
@@ -380,27 +381,23 @@ function normalizeScale(scale: number): number {
 }
 
 /**
- * Returns a cached crisp offscreen canvas containing the pixel-art avatar.
- * Default scale = 2 (64x64 crisp nearest-neighbor pixels).
+ * Lazily renders and caches the tiny 32x32 (scale=1, ~4 KB RGBA) base canvas
+ * for an avatar. Zero canvas work happens at module import time.
  */
-export function getAvatarCanvas(avatarIdx: number, scale = 2): HTMLCanvasElement {
-  const idx = normalizeAvatarIdx(avatarIdx);
-  const s = normalizeScale(scale);
-  const cacheKey = `${idx}_${s}`;
-  const cached = canvasCache.get(cacheKey);
+function getBaseAvatarCanvas(idx: number): HTMLCanvasElement {
+  const cached = baseCanvasCache.get(idx);
   if (cached) return cached;
 
   const def = AVATAR_SPRITES[idx];
-  const size = GRID_SIZE * s;
   const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
+  canvas.width = GRID_SIZE;
+  canvas.height = GRID_SIZE;
   const ctx = canvas.getContext('2d')!;
   ctx.imageSmoothingEnabled = false;
 
   const bgColor = def.palette['.'] ?? def.meta.bg;
   ctx.fillStyle = bgColor;
-  ctx.fillRect(0, 0, size, size);
+  ctx.fillRect(0, 0, GRID_SIZE, GRID_SIZE);
 
   for (let y = 0; y < GRID_SIZE; y++) {
     const row = def.rows[y];
@@ -416,18 +413,48 @@ export function getAvatarCanvas(avatarIdx: number, scale = 2): HTMLCanvasElement
       const color = def.palette[ch];
       if (color) {
         ctx.fillStyle = color;
-        ctx.fillRect(x * s, y * s, (runEnd - x) * s, s);
+        ctx.fillRect(x, y, runEnd - x, 1);
       }
       x = runEnd;
     }
   }
 
-  canvasCache.set(cacheKey, canvas);
+  baseCanvasCache.set(idx, canvas);
+  return canvas;
+}
+
+function blitScaledCanvas(base: HTMLCanvasElement, scale: number): HTMLCanvasElement {
+  const size = GRID_SIZE * scale;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(base, 0, 0, size, size);
+  return canvas;
+}
+
+/**
+ * Returns a cached crisp offscreen canvas containing the pixel-art avatar.
+ * Default scale = 2 (64x64 crisp nearest-neighbor pixels).
+ */
+export function getAvatarCanvas(avatarIdx: number, scale = 2): HTMLCanvasElement {
+  const idx = normalizeAvatarIdx(avatarIdx);
+  const s = normalizeScale(scale);
+  if (s === 1) return getBaseAvatarCanvas(idx);
+
+  const cacheKey = `${idx}_${s}`;
+  const cached = scaledCanvasCache.get(cacheKey);
+  if (cached) return cached;
+
+  const canvas = blitScaledCanvas(getBaseAvatarCanvas(idx), s);
+  scaledCanvasCache.set(cacheKey, canvas);
   return canvas;
 }
 
 /**
  * Returns a cached crisp PNG data URL for use in HTML <img> portraits.
+ * Renders lazily on demand without retaining redundant scaled canvas surfaces.
  */
 export function getAvatarDataUrl(avatarIdx: number, scale = 2): string {
   const idx = normalizeAvatarIdx(avatarIdx);
@@ -436,13 +463,29 @@ export function getAvatarDataUrl(avatarIdx: number, scale = 2): string {
   const cached = dataUrlCache.get(cacheKey);
   if (cached) return cached;
 
-  const url = getAvatarCanvas(idx, s).toDataURL('image/png');
+  const base = getBaseAvatarCanvas(idx);
+  let url: string;
+  if (s === 1) {
+    url = base.toDataURL('image/png');
+  } else {
+    const existingScaled = scaledCanvasCache.get(cacheKey);
+    if (existingScaled) {
+      url = existingScaled.toDataURL('image/png');
+    } else {
+      const tmp = blitScaledCanvas(base, s);
+      url = tmp.toDataURL('image/png');
+      tmp.width = 0;
+      tmp.height = 0;
+    }
+  }
+
   dataUrlCache.set(cacheKey, url);
   return url;
 }
 
 /**
- * Draws a crisp nearest-neighbor pixel avatar directly into any 2D canvas context.
+ * Draws a crisp nearest-neighbor pixel avatar directly into any 2D canvas context
+ * using the tiny cached 32x32 base canvas.
  */
 export function drawAvatarToContext(
   ctx: CanvasRenderingContext2D,
@@ -451,9 +494,278 @@ export function drawAvatarToContext(
   y: number,
   size: number
 ): void {
-  const src = getAvatarCanvas(avatarIdx, 1);
+  const src = getBaseAvatarCanvas(normalizeAvatarIdx(avatarIdx));
   const prevSmoothing = ctx.imageSmoothingEnabled;
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(src, Math.round(x), Math.round(y), Math.round(size), Math.round(size));
   ctx.imageSmoothingEnabled = prevSmoothing;
+}
+
+// ---------------------------------------------------------------------------
+// Custom Uploaded Avatars (client-side compression -> compact base64 sync)
+// ---------------------------------------------------------------------------
+
+export const MAX_CUSTOM_AVATAR_BYTES = 6000;
+const TARGET_CUSTOM_AVATAR_BYTES = 3200;
+const CUSTOM_AVATAR_DATA_URL_RE = /^data:image\/(webp|jpeg|png);base64,[A-Za-z0-9+/=]+$/;
+
+export function isValidCustomAvatarDataUrl(url: string): boolean {
+  return (
+    typeof url === 'string' &&
+    url.length <= MAX_CUSTOM_AVATAR_BYTES &&
+    CUSTOM_AVATAR_DATA_URL_RE.test(url)
+  );
+}
+
+interface DecodedImageSource {
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+  cleanup: () => void;
+}
+
+function decodeFileViaImageElement(file: File): Promise<DecodedImageSource> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read avatar file'));
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        reject(new Error('Invalid avatar file data'));
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        resolve({
+          source: img,
+          width: img.naturalWidth || img.width,
+          height: img.naturalHeight || img.height,
+          cleanup: () => {
+            img.onload = null;
+            img.onerror = null;
+          },
+        });
+      };
+      img.onerror = () => reject(new Error('Failed to decode avatar image'));
+      img.src = result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function decodeAvatarFile(file: File): Promise<DecodedImageSource> {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file);
+      return {
+        source: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        cleanup: () => {
+          bitmap.close();
+        },
+      };
+    } catch {
+      // Fall back to FileReader + Image for formats unsupported by createImageBitmap
+    }
+  }
+  return decodeFileViaImageElement(file);
+}
+
+function drawSquareCrop(
+  canvas: HTMLCanvasElement,
+  src: DecodedImageSource,
+  size: number,
+  fillBg: string | null
+): void {
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = true;
+  if ('imageSmoothingQuality' in ctx) {
+    ctx.imageSmoothingQuality = 'high';
+  }
+  if (fillBg) {
+    ctx.fillStyle = fillBg;
+    ctx.fillRect(0, 0, size, size);
+  } else {
+    ctx.clearRect(0, 0, size, size);
+  }
+  const side = Math.min(src.width, src.height);
+  const sx = (src.width - side) * 0.5;
+  const sy = (src.height - side) * 0.5;
+  ctx.drawImage(src.source, sx, sy, side, side, 0, 0, size, size);
+}
+
+/**
+ * Center-crops and compresses an uploaded image File into a compact base64 data URL
+ * (< 3200 bytes) suitable for retained MQTT broadcast.
+ */
+export async function compressCustomAvatarFile(file: File): Promise<string> {
+  const decoded = await decodeAvatarFile(file);
+  if (decoded.width <= 0 || decoded.height <= 0) {
+    decoded.cleanup();
+    throw new Error('Empty avatar image');
+  }
+
+  const canvas = document.createElement('canvas');
+  try {
+    // Pass 1: 40x40 WebP @ 0.62
+    drawSquareCrop(canvas, decoded, 40, null);
+    let url = canvas.toDataURL('image/webp', 0.62);
+    if (url.startsWith('data:image/webp;base64,') && url.length <= TARGET_CUSTOM_AVATAR_BYTES) {
+      return url;
+    }
+
+    // Pass 2: 40x40 JPEG @ 0.58 (composited over dark neutral bg for transparent PNGs)
+    drawSquareCrop(canvas, decoded, 40, '#10141c');
+    url = canvas.toDataURL('image/jpeg', 0.58);
+    if (url.length <= TARGET_CUSTOM_AVATAR_BYTES && isValidCustomAvatarDataUrl(url)) {
+      return url;
+    }
+
+    // Pass 3: 32x32 WebP @ 0.52 -> JPEG @ 0.52
+    drawSquareCrop(canvas, decoded, GRID_SIZE, null);
+    url = canvas.toDataURL('image/webp', 0.52);
+    if (url.startsWith('data:image/webp;base64,') && url.length <= TARGET_CUSTOM_AVATAR_BYTES) {
+      return url;
+    }
+
+    drawSquareCrop(canvas, decoded, GRID_SIZE, '#10141c');
+    url = canvas.toDataURL('image/jpeg', 0.52);
+    if (url.length <= TARGET_CUSTOM_AVATAR_BYTES && isValidCustomAvatarDataUrl(url)) {
+      return url;
+    }
+
+    // Final safeguard: 28x28 JPEG @ 0.45 for extremely noisy inputs
+    drawSquareCrop(canvas, decoded, 28, '#10141c');
+    url = canvas.toDataURL('image/jpeg', 0.45);
+    if (isValidCustomAvatarDataUrl(url)) {
+      return url;
+    }
+
+    throw new Error('Compressed avatar exceeded size limit');
+  } finally {
+    canvas.width = 0;
+    canvas.height = 0;
+    decoded.cleanup();
+  }
+}
+
+interface CustomAvatarEntry {
+  dataUrl: string;
+  canvas: HTMLCanvasElement | null;
+  decodeToken: number;
+}
+
+const customAvatarMap = new Map<string, CustomAvatarEntry>();
+const avatarVersionMap = new Map<string, number>();
+let nextDecodeToken = 1;
+
+function bumpAvatarVersion(ownerId: string): number {
+  const next = (avatarVersionMap.get(ownerId) ?? 0) + 1;
+  avatarVersionMap.set(ownerId, next);
+  return next;
+}
+
+/**
+ * Registers or clears a validated custom base64 avatar for a rider ID.
+ * Decodes asynchronously into a tiny 32x32 canvas and bumps version both immediately
+ * and once decoded so 3D nameplates & HUD portraits auto-refresh cleanly.
+ */
+export function setCustomAvatar(ownerId: string, dataUrl: string | null): number {
+  if (!ownerId) return 0;
+
+  const existing = customAvatarMap.get(ownerId);
+  if (!dataUrl || !isValidCustomAvatarDataUrl(dataUrl)) {
+    if (existing) {
+      if (existing.canvas) {
+        existing.canvas.width = 0;
+        existing.canvas.height = 0;
+        existing.canvas = null;
+      }
+      customAvatarMap.delete(ownerId);
+      return bumpAvatarVersion(ownerId);
+    }
+    return avatarVersionMap.get(ownerId) ?? 0;
+  }
+
+  if (existing && existing.dataUrl === dataUrl) {
+    return avatarVersionMap.get(ownerId) ?? 0;
+  }
+
+  if (existing?.canvas) {
+    existing.canvas.width = 0;
+    existing.canvas.height = 0;
+    existing.canvas = null;
+  }
+
+  const token = nextDecodeToken++;
+  const entry: CustomAvatarEntry = {
+    dataUrl,
+    canvas: null,
+    decodeToken: token,
+  };
+  customAvatarMap.set(ownerId, entry);
+  const immediateVer = bumpAvatarVersion(ownerId);
+
+  if (typeof Image !== 'undefined' && typeof document !== 'undefined') {
+    const img = new Image();
+    img.onload = () => {
+      const current = customAvatarMap.get(ownerId);
+      if (!current || current.decodeToken !== token) return;
+      const c = document.createElement('canvas');
+      c.width = GRID_SIZE;
+      c.height = GRID_SIZE;
+      const ctx = c.getContext('2d');
+      if (ctx) {
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(img, 0, 0, GRID_SIZE, GRID_SIZE);
+        current.canvas = c;
+        bumpAvatarVersion(ownerId);
+      }
+    };
+    img.onerror = () => {
+      const current = customAvatarMap.get(ownerId);
+      if (!current || current.decodeToken !== token) return;
+      customAvatarMap.delete(ownerId);
+      bumpAvatarVersion(ownerId);
+    };
+    img.src = dataUrl;
+  }
+
+  return immediateVer;
+}
+
+export function getCustomAvatarDataUrl(ownerId: string): string | null {
+  return customAvatarMap.get(ownerId)?.dataUrl ?? null;
+}
+
+export function getAvatarVersion(ownerId: string): number {
+  return avatarVersionMap.get(ownerId) ?? 0;
+}
+
+export function getRiderAvatarDataUrl(ownerId: string, avatarIdx: number, scale = 1): string {
+  const custom = customAvatarMap.get(ownerId)?.dataUrl;
+  if (custom) return custom;
+  return getAvatarDataUrl(avatarIdx, scale);
+}
+
+export function drawRiderAvatarToContext(
+  ctx: CanvasRenderingContext2D,
+  ownerId: string,
+  avatarIdx: number,
+  x: number,
+  y: number,
+  size: number
+): void {
+  const customCanvas = customAvatarMap.get(ownerId)?.canvas;
+  if (customCanvas) {
+    const prevSmoothing = ctx.imageSmoothingEnabled;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(customCanvas, Math.round(x), Math.round(y), Math.round(size), Math.round(size));
+    ctx.imageSmoothingEnabled = prevSmoothing;
+    return;
+  }
+  drawAvatarToContext(ctx, avatarIdx, x, y, size);
 }

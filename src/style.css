@@ -86,17 +86,26 @@ body {
 }
 
 /* ==========================================================================
-   TOP-LEFT CLUSTER: Nameplate, Live Status, Compact Actions
+   TOP-LEFT CLUSTER: Nameplate, Live Status, Compact Actions + Live Feed
    ========================================================================== */
-.vm-top-left {
+.vm-top-left-col {
   position: absolute;
   top: max(12px, env(safe-area-inset-top));
   left: max(12px, env(safe-area-inset-left));
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: calc(100vw - 240px);
+  pointer-events: none;
+  contain: layout style;
+}
+
+.vm-top-left {
+  display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  max-width: calc(100vw - 240px);
   pointer-events: none;
 }
 
@@ -127,7 +136,7 @@ body {
 }
 
 .vm-avatar-btn:hover {
-  filter: brightness(1.1);
+  border-color: var(--vm-gold) !important;
 }
 
 .vm-avatar-btn:active {
@@ -158,17 +167,95 @@ body {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
-  z-index: 30;
+  z-index: 35;
   display: none;
-  grid-template-columns: repeat(3, 44px);
+  flex-direction: column;
   gap: 6px;
   padding: 6px;
   pointer-events: auto;
 }
 
 .vm-avatar-popover.is-open {
-  display: grid;
+  display: flex;
   animation: vm-pop-in 90ms steps(3, end);
+}
+
+.vm-avatar-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 44px);
+  gap: 6px;
+}
+
+.vm-avatar-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.vm-avatar-upload-btn {
+  pointer-events: auto;
+  appearance: none;
+  flex: 1;
+  height: 26px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: var(--vm-bg-deep);
+  border: 2px solid var(--vm-steel-hi);
+  box-shadow: var(--vm-shadow-sm);
+  color: var(--vm-text);
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  outline: none;
+}
+
+.vm-avatar-upload-btn:hover {
+  border-color: var(--vm-cyan);
+  color: var(--vm-cyan);
+}
+
+.vm-avatar-upload-btn:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--vm-ink);
+}
+
+.vm-avatar-reset-btn {
+  pointer-events: auto;
+  appearance: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(28, 8, 16, 0.94);
+  border: 2px solid var(--vm-crimson);
+  box-shadow: var(--vm-shadow-sm);
+  color: var(--vm-crimson);
+  font-family: var(--vm-font-ui);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  outline: none;
+}
+
+.vm-avatar-reset-btn:hover {
+  background: var(--vm-crimson);
+  color: #ffffff;
+}
+
+.vm-avatar-reset-btn.is-hidden {
+  display: none;
+}
+
+.vm-hidden-file {
+  display: none;
 }
 
 .vm-avatar-opt {
@@ -424,6 +511,385 @@ body {
   box-shadow: var(--vm-shadow-sm);
 }
 
+/* Real-Time Broadcast Ticker Feed (Top-Left below nameplate) */
+.vm-feed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  pointer-events: none;
+  contain: layout style;
+}
+
+.vm-feed-line {
+  max-width: 316px;
+  padding: 4px 8px;
+  background: rgba(10, 13, 24, 0.88);
+  border: 1px solid #232b47;
+  border-left: 3px solid var(--vm-gold);
+  box-shadow: 2px 2px 0 var(--vm-ink);
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--vm-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 1;
+  transition: opacity 260ms steps(4, end);
+}
+
+.vm-feed-line[data-accent='cyan'] {
+  border-left-color: var(--vm-cyan);
+  color: #d9fff9;
+}
+
+.vm-feed-line[data-accent='red'] {
+  border-left-color: var(--vm-crimson);
+  color: #ffe0e6;
+}
+
+.vm-feed-line[data-accent='green'] {
+  border-left-color: var(--vm-green);
+  color: #e2ffe6;
+}
+
+.vm-feed-line.is-fading {
+  opacity: 0;
+}
+
+.vm-feed-line.is-hidden {
+  display: none;
+}
+
+/* Incoming Sniper Lock Warning Pill */
+.vm-danger-lock {
+  position: absolute;
+  top: max(92px, calc(env(safe-area-inset-top) + 80px));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  background: rgba(34, 6, 16, 0.96);
+  border: 3px solid var(--vm-crimson);
+  box-shadow: 4px 4px 0 var(--vm-ink);
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #ffffff;
+  text-shadow: 2px 2px 0 var(--vm-ink);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 26;
+  animation: vm-danger-blink 0.36s steps(2, end) infinite;
+}
+
+.vm-danger-lock.is-hidden {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .vm-danger-lock {
+    top: max(56px, calc(env(safe-area-inset-top) + 44px));
+  }
+}
+
+/* ==========================================================================
+   SNIPER TARGET SELECTOR & PIXEL CROSSHAIR SCOPE OVERLAY
+   ========================================================================== */
+.vm-sniper-picker {
+  position: absolute;
+  top: max(56px, calc(env(safe-area-inset-top) + 44px));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px;
+  max-width: calc(100vw - 24px);
+  z-index: 29;
+  pointer-events: auto;
+  contain: layout style;
+}
+
+.vm-sniper-picker.is-hidden {
+  display: none;
+}
+
+.vm-sniper-card {
+  pointer-events: auto;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 8px 0 5px;
+  background: var(--vm-bg-deep);
+  border: 2px solid var(--vm-cyan);
+  box-shadow: var(--vm-shadow-sm);
+  color: var(--vm-text);
+  font-family: var(--vm-font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  outline: none;
+}
+
+.vm-sniper-card:hover {
+  background: rgba(0, 245, 212, 0.18);
+  border-color: var(--vm-gold);
+  color: var(--vm-gold);
+}
+
+.vm-sniper-card:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--vm-ink);
+}
+
+.vm-sniper-card.is-hidden {
+  display: none;
+}
+
+.vm-sniper-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  background: var(--vm-cyan);
+  color: var(--vm-ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.vm-sniper-avatar {
+  display: block;
+  width: 18px;
+  height: 18px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  border: 1px solid var(--vm-ink);
+  flex-shrink: 0;
+}
+
+.vm-sniper-name {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vm-sniper-dist {
+  color: var(--vm-cyan);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+}
+
+.vm-sniper-esc {
+  pointer-events: auto;
+  appearance: none;
+  height: 30px;
+  padding: 0 8px;
+  background: rgba(28, 8, 16, 0.92);
+  border: 2px solid var(--vm-crimson);
+  box-shadow: var(--vm-shadow-sm);
+  color: var(--vm-crimson);
+  font-family: var(--vm-font-ui);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  outline: none;
+}
+
+.vm-sniper-esc:hover {
+  background: var(--vm-crimson);
+  color: #ffffff;
+}
+
+/* Sniper Crosshair Scope Overlay */
+.vm-scope-layer {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 22;
+  contain: layout style;
+}
+
+.vm-scope-layer.is-hidden {
+  display: none;
+}
+
+.vm-scope-reticle {
+  position: relative;
+  width: 164px;
+  height: 164px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vm-scope-hline,
+.vm-scope-vline {
+  position: absolute;
+  background: rgba(0, 245, 212, 0.72);
+  box-shadow: 0 0 0 1px rgba(4, 5, 10, 0.7);
+}
+
+.vm-scope-hline {
+  left: -34px;
+  right: -34px;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+}
+
+.vm-scope-vline {
+  top: -28px;
+  bottom: -28px;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+}
+
+.vm-scope-layer[data-hot='1'] .vm-scope-hline,
+.vm-scope-layer[data-hot='1'] .vm-scope-vline {
+  background: rgba(255, 42, 84, 0.85);
+}
+
+.vm-scope-brackets {
+  position: absolute;
+  inset: 22px;
+  will-change: transform;
+}
+
+.vm-scope-corner {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-color: var(--vm-cyan);
+  border-style: solid;
+  border-width: 0;
+}
+
+.vm-scope-layer[data-hot='1'] .vm-scope-corner {
+  border-color: var(--vm-crimson);
+}
+
+.vm-sc-tl {
+  top: 0;
+  left: 0;
+  border-top-width: 3px;
+  border-left-width: 3px;
+}
+
+.vm-sc-tr {
+  top: 0;
+  right: 0;
+  border-top-width: 3px;
+  border-right-width: 3px;
+}
+
+.vm-sc-bl {
+  bottom: 0;
+  left: 0;
+  border-bottom-width: 3px;
+  border-left-width: 3px;
+}
+
+.vm-sc-br {
+  bottom: 0;
+  right: 0;
+  border-bottom-width: 3px;
+  border-right-width: 3px;
+}
+
+.vm-scope-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--vm-crimson);
+  border: 1px solid var(--vm-ink);
+  z-index: 2;
+}
+
+.vm-scope-result {
+  position: absolute;
+  padding: 5px 12px;
+  background: rgba(13, 16, 29, 0.95);
+  border: 3px solid var(--vm-crimson);
+  box-shadow: 3px 3px 0 var(--vm-ink);
+  font-family: var(--vm-font-display);
+  font-size: 16px;
+  color: var(--vm-crimson);
+  text-shadow: 2px 2px 0 var(--vm-ink);
+  letter-spacing: 0.08em;
+  z-index: 4;
+}
+
+.vm-scope-result[data-res='DODGED'] {
+  border-color: var(--vm-cyan);
+  color: var(--vm-cyan);
+}
+
+.vm-scope-result[data-res='MISS'] {
+  border-color: var(--vm-gold);
+  color: var(--vm-gold);
+}
+
+.vm-scope-result.is-hidden {
+  display: none;
+}
+
+.vm-scope-meta {
+  margin-top: 12px;
+  padding: 4px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  min-width: 156px;
+}
+
+.vm-scope-target {
+  font-family: var(--vm-font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--vm-cyan);
+  letter-spacing: 0.05em;
+}
+
+.vm-scope-layer[data-hot='1'] .vm-scope-target {
+  color: var(--vm-crimson);
+}
+
+.vm-scope-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--vm-bg-deep);
+  border: 1px solid var(--vm-steel);
+  overflow: hidden;
+}
+
+.vm-scope-fill {
+  width: 100%;
+  height: 100%;
+  background: var(--vm-cyan);
+  transform-origin: left center;
+  transform: scaleX(0);
+  will-change: transform;
+}
+
+.vm-scope-layer[data-hot='1'] .vm-scope-fill {
+  background: var(--vm-crimson);
+}
+
 /* ==========================================================================
    TOP-CENTER TRANSIENT ARCADE TOAST
    ========================================================================== */
@@ -493,6 +959,7 @@ body {
   align-items: flex-end;
   gap: 10px;
   pointer-events: none;
+  contain: layout style;
 }
 
 .vm-standings {
@@ -501,6 +968,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  contain: layout style;
 }
 
 .vm-row {
@@ -620,6 +1088,7 @@ body {
   background: var(--vm-bg-deep);
   border: 2px solid var(--vm-steel);
   box-shadow: var(--vm-shadow);
+  contain: layout style;
 }
 
 /* Dashed center highway line */
@@ -675,23 +1144,25 @@ body {
 
 .vm-radar-local {
   position: absolute;
-  top: 50%;
-  left: 50%;
+  top: 0;
+  left: 0;
   width: 10px;
   height: 10px;
-  margin: -5px 0 0 -5px;
   background: var(--vm-gold);
   border: 2px solid var(--vm-ink);
   box-shadow: inset 0 2px 0 #ffffff, 0 0 0 1px rgba(255, 209, 102, 0.75);
+  will-change: transform;
   z-index: 4;
 }
 
 .vm-radar-dot {
   position: absolute;
+  top: 0;
+  left: 0;
   width: 8px;
   height: 8px;
-  margin: -4px 0 0 -4px;
   border: 1px solid var(--vm-ink);
+  will-change: transform;
   z-index: 3;
 }
 
@@ -702,15 +1173,17 @@ body {
 .vm-radar-dot.is-clamped {
   width: 6px;
   height: 4px;
-  margin: -2px 0 0 -3px;
   opacity: 0.7;
 }
 
 .vm-radar-delta {
   position: absolute;
+  top: 0;
   right: 30px;
-  transform: translateY(-50%);
-  padding: 2px 5px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
   background: var(--vm-bg-slab);
   border: 2px solid var(--vm-cyan);
   box-shadow: 2px 2px 0 var(--vm-ink);
@@ -720,6 +1193,7 @@ body {
   font-variant-numeric: tabular-nums;
   color: var(--vm-cyan);
   white-space: nowrap;
+  will-change: transform;
 }
 
 .vm-radar-delta.is-behind {
@@ -737,7 +1211,7 @@ body {
 }
 
 /* ==========================================================================
-   BOTTOM-RIGHT CLUSTER: KO Tally, Speedometer, Nitro/HP Bars, Weapon Chips
+   BOTTOM-RIGHT CLUSTER: Wheelie Charge, KO, Speed, Bars, Item Slot & Weapons
    ========================================================================== */
 .vm-bottom-right {
   position: absolute;
@@ -748,6 +1222,96 @@ body {
   align-items: flex-end;
   gap: 8px;
   pointer-events: none;
+  contain: layout style;
+}
+
+/* Wheelie Charge & Over-Flip Danger Bar (zero layout shift via visibility/opacity) */
+.vm-wheelie-wrap {
+  width: 238px;
+  padding: 5px 8px;
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  align-items: center;
+  gap: 7px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 80ms steps(2);
+}
+
+.vm-wheelie-wrap.is-active {
+  opacity: 1;
+  visibility: visible;
+}
+
+.vm-wheelie-wrap[data-tier='slam'] {
+  border-color: var(--vm-gold);
+}
+
+.vm-wheelie-wrap[data-tier='danger'] {
+  border-color: var(--vm-crimson);
+}
+
+.vm-wheelie-tag {
+  font-family: var(--vm-font-ui);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--vm-green);
+  white-space: nowrap;
+}
+
+.vm-wheelie-wrap[data-tier='slam'] .vm-wheelie-tag {
+  color: var(--vm-gold);
+}
+
+.vm-wheelie-wrap[data-tier='danger'] .vm-wheelie-tag {
+  color: var(--vm-crimson);
+  animation: vm-pulse-fast 0.3s steps(2, end) infinite;
+}
+
+.vm-wheelie-track {
+  position: relative;
+  height: 10px;
+  background: var(--vm-bg-deep);
+  border: 2px solid #202742;
+  overflow: hidden;
+}
+
+.vm-wheelie-fill {
+  width: 100%;
+  height: 100%;
+  background: var(--vm-green);
+  transform-origin: left center;
+  transform: scaleX(0);
+  will-change: transform;
+}
+
+.vm-wheelie-wrap[data-tier='slam'] .vm-wheelie-fill {
+  background: var(--vm-gold);
+}
+
+.vm-wheelie-wrap[data-tier='danger'] .vm-wheelie-fill {
+  background: var(--vm-crimson);
+  animation: vm-pulse-fast 0.25s steps(2, end) infinite;
+}
+
+.vm-wheelie-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+}
+
+.vm-wheelie-mark-slam {
+  left: 32%;
+}
+
+.vm-wheelie-mark-flip {
+  left: 80%;
+  background: rgba(255, 42, 84, 0.8);
 }
 
 .vm-speed-header {
@@ -907,6 +1471,80 @@ body {
   animation: vm-pulse-fast 0.45s steps(2, end) infinite;
 }
 
+/* Combat bar: Active Powerup Item Slot + Weapon Selector Chips */
+.vm-combat-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.vm-item-slot {
+  pointer-events: auto;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  min-width: 72px;
+  padding: 0 8px 0 5px;
+  background: rgba(7, 9, 18, 0.88);
+  border: 2px solid #242b47;
+  box-shadow: var(--vm-shadow), var(--vm-bevel);
+  color: #4f597d;
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: default;
+  outline: none;
+}
+
+.vm-item-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  background: var(--vm-bg-deep);
+  border: 1px solid #2a3252;
+  color: #5b658a;
+  font-family: var(--vm-font-ui);
+  font-size: 10px;
+}
+
+.vm-item-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.vm-item-name {
+  white-space: nowrap;
+}
+
+.vm-item-slot.is-ready {
+  background: rgba(16, 20, 36, 0.95);
+  color: var(--vm-text);
+  cursor: pointer;
+  animation: vm-item-pulse 1.1s steps(2, end) infinite;
+}
+
+.vm-item-slot.is-ready:hover {
+  background: rgba(28, 34, 58, 0.98);
+}
+
+.vm-item-slot.is-ready:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--vm-ink);
+}
+
+.vm-item-slot.is-ready .vm-item-key {
+  border-color: var(--vm-ink);
+  color: var(--vm-ink);
+}
+
 /* Weapon selector chips */
 .vm-weapons {
   display: flex;
@@ -986,6 +1624,7 @@ body {
   opacity: 0.92;
   transition: opacity 700ms ease;
   pointer-events: none;
+  contain: layout style;
 }
 
 .vm-keycaps.is-faded {
@@ -1197,9 +1836,19 @@ body {
    RESPONSIVE COMPACT BREAKPOINT
    ========================================================================== */
 @media (max-width: 720px) {
-  .vm-top-left {
+  .vm-top-left-col {
     max-width: calc(100vw - 180px);
+    gap: 5px;
+  }
+
+  .vm-top-left {
     gap: 4px;
+  }
+
+  .vm-feed-line {
+    max-width: 210px;
+    font-size: 10px;
+    padding: 3px 6px;
   }
 
   .vm-name-text {
@@ -1230,9 +1879,12 @@ body {
   }
 
   .vm-avatar-popover {
+    padding: 5px;
+  }
+
+  .vm-avatar-grid {
     grid-template-columns: repeat(3, 38px);
     gap: 5px;
-    padding: 5px;
   }
 
   .vm-avatar-opt {
@@ -1253,7 +1905,8 @@ body {
     font-size: 28px;
   }
 
-  .vm-gauges {
+  .vm-gauges,
+  .vm-wheelie-wrap {
     width: 196px;
     padding: 5px 6px;
   }
@@ -1262,7 +1915,8 @@ body {
     grid-template-columns: 42px 1fr;
   }
 
-  .vm-weapon-chip {
+  .vm-weapon-chip,
+  .vm-item-slot {
     height: 25px;
     padding: 0 6px 0 4px;
     font-size: 10px;
@@ -1310,7 +1964,6 @@ body {
 @keyframes vm-ko-pop {
   0% {
     transform: scale(1.22);
-    background: var(--vm-crimson);
   }
   100% {
     transform: scale(1);
@@ -1328,11 +1981,35 @@ body {
   }
 }
 
+@keyframes vm-item-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.78;
+  }
+}
+
+@keyframes vm-danger-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .vm-net-dot,
   .vm-seg,
   .vm-ko-pill,
-  .vm-avatar-popover {
+  .vm-avatar-popover,
+  .vm-item-slot,
+  .vm-danger-lock,
+  .vm-wheelie-tag,
+  .vm-wheelie-fill {
     animation: none !important;
   }
 }

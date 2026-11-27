@@ -1,5 +1,72 @@
 export type WeaponType = 0 | 1 | 2; // 0: Fist/Kick, 1: Spiked Bat, 2: Steel Chain
 
+export type ItemType =
+  | 'rpg'
+  | 'airstrike'
+  | 'sniper'
+  | 'police'
+  | 'turbo'
+  | 'trap'
+  | 'magnet'
+  | 'banana';
+
+export interface ItemSpec {
+  id: ItemType;
+  idx: number;
+  code: string;
+  zhName: string;
+  icon: string;
+  color: string;
+  needsTarget: boolean;
+}
+
+export const ITEMS: readonly ItemSpec[] = [
+  { id: 'rpg', idx: 0, code: 'RPG', zhName: 'RPG 火箭筒', icon: '🚀', color: '#ff4d00', needsTarget: false },
+  { id: 'airstrike', idx: 1, code: 'AIR', zhName: '空中支援', icon: '✈️', color: '#ff0054', needsTarget: false },
+  { id: 'sniper', idx: 2, code: 'SNP', zhName: '狙击枪', icon: '🎯', color: '#00f5d4', needsTarget: true },
+  { id: 'police', idx: 3, code: 'COP', zhName: '警车拦截', icon: '🚓', color: '#3a86ff', needsTarget: false },
+  { id: 'turbo', idx: 4, code: 'MAX', zhName: '超级加速', icon: '⚡', color: '#ffd166', needsTarget: false },
+  { id: 'trap', idx: 5, code: 'TRP', zhName: '路钉陷阱', icon: '⚙️', color: '#ef233c', needsTarget: false },
+  { id: 'magnet', idx: 6, code: 'MAG', zhName: '磁铁', icon: '🧲', color: '#9b5de5', needsTarget: false },
+  { id: 'banana', idx: 7, code: 'BAN', zhName: '香蕉皮', icon: '🍌', color: '#ffe600', needsTarget: false },
+] as const;
+
+export const ITEM_BY_ID: Record<ItemType, ItemSpec> = {
+  rpg: ITEMS[0],
+  airstrike: ITEMS[1],
+  sniper: ITEMS[2],
+  police: ITEMS[3],
+  turbo: ITEMS[4],
+  trap: ITEMS[5],
+  magnet: ITEMS[6],
+  banana: ITEMS[7],
+};
+
+export interface ItemNetEvent {
+  t: 'item_pick' | 'item_use' | 'item_hit' | 'item_miss';
+  from: string;
+  fromName: string;
+  item: ItemType;
+  to?: string;
+  toName?: string;
+  s: number;
+  x: number;
+  dmg?: number;
+  knockX?: number;
+  ko?: boolean;
+  seed?: number;
+  ts: number;
+}
+
+export interface SniperHudState {
+  phase: 'selecting' | 'aiming' | 'fired';
+  targetId: string | null;
+  targetName: string;
+  progress: number;
+  lockQuality: number;
+  result?: 'HIT' | 'DODGED' | 'MISS';
+}
+
 export interface WeaponSpec {
   id: WeaponType;
   code: string;
@@ -73,6 +140,12 @@ export interface RiderRenderState {
   invulnTimer: number;
   wheelAngle: number;
   kos: number;
+  heldItem: ItemType | null;
+  wheelieCharge: number;
+  magnetTimer: number;
+  turboShieldTimer: number;
+  spinOutTimer: number;
+  incomingLockName: string | null;
 }
 
 export interface CombatHitEvent {

@@ -7,6 +7,7 @@ import {
   getBiomeAt,
   getBoostPadInSlot,
   hash1,
+  roadFrameToLocalWorld,
   roadToLocalWorld,
   roadX,
   roadY,
@@ -14,14 +15,91 @@ import {
 } from './RoadMath';
 import { getPixelAtlas } from './PixelTextures';
 import { BikeVisual } from './BikeModel';
-import { RiderRenderState, TrafficCar } from './types';
+import { ItemVisuals } from './ItemSystem';
+import { BIKE_PALETTES, RiderRenderState, TrafficCar } from './types';
 
-const ROAD_SLICES = 116;
-const SLICE_STEP = 3.0; // covers -30m behind to +318m ahead
-const MAX_PARTICLES = 260;
+// Progressive road LOD slices: 3m near camera (-24m..+108m), 6m far (+114m..+324m)
+// Snapping baseS to 6m (LCM of 3 & 6) eliminates vertex shimmer while cutting ~30% road verts & trig calls.
+const ROAD_SLICE_SNAP = 6.0;
+const ROAD_SLICE_OFFSETS: Float32Array = (() => {
+  const offs: number[] = [];
+  for (let d = -24; d <= 108; d += 3) offs.push(d);
+  for (let d = 114; d <= 324; d += 6) offs.push(d);
+  return new Float32Array(offs);
+})();
+const ROAD_SLICES = ROAD_SLICE_OFFSETS.length; // 81 slices (down from 116)
+const MAX_PARTICLES = 140;
 const MAX_PROPS_PER_POOL = 96;
 const MAX_TRAFFIC_RENDER = 26;
+const MAX_SIREN_RENDER = 12;
 const MAX_POPUPS = 14;
+
+interface BoxPartSpec {
+  w: number;
+  h: number;
+  d: number;
+  x: number;
+  y: number;
+  z: number;
+  colorHex?: number;
+}
+
+function mergeBoxGeometries(parts: readonly BoxPartSpec[], withVertexColors = false): THREE.BufferGeometry {
+  const boxVerts = 24;
+  const boxIndices = 36;
+  const totalVerts = parts.length * boxVerts;
+  const totalIndices = parts.length * boxIndices;
+
+  const positions = new Float32Array(totalVerts * 3);
+  const normals = new Float32Array(totalVerts * 3);
+  const uvs = new Float32Array(totalVerts * 2);
+  const colors = withVertexColors ? new Float32Array(totalVerts * 3) : null;
+  const indices = new Uint16Array(totalIndices);
+  const tmpColor = new THREE.Color();
+
+  for (let p = 0; p < parts.length; p++) {
+    const part = parts[p];
+    const g = new THREE.BoxGeometry(part.w, part.h, part.d);
+    g.translate(part.x, part.y, part.z);
+
+    const posArr = g.attributes.position.array as Float32Array;
+    const normArr = g.attributes.normal.array as Float32Array;
+    const uvArr = g.attributes.uv.array as Float32Array;
+    const idxArr = g.index!.array;
+
+    const vOff = p * boxVerts;
+    positions.set(posArr, vOff * 3);
+    normals.set(normArr, vOff * 3);
+    uvs.set(uvArr, vOff * 2);
+
+    if (colors) {
+      tmpColor.setHex(part.colorHex ?? 0xffffff);
+      for (let v = 0; v < boxVerts; v++) {
+        const ci = (vOff + v) * 3;
+        colors[ci] = tmpColor.r;
+        colors[ci + 1] = tmpColor.g;
+        colors[ci + 2] = tmpColor.b;
+      }
+    }
+
+    const iOff = p * boxIndices;
+    for (let k = 0; k < boxIndices; k++) {
+      indices[iOff + k] = idxArr[k] + vOff;
+    }
+
+    g.dispose();
+  }
+
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  merged.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  merged.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  if (colors) {
+    merged.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  }
+  merged.setIndex(new THREE.BufferAttribute(indices, 1));
+  return merged;
+}
 
 export type CameraMode = 0 | 1 | 2; // 0: Arcade Chase, 1: Low Aggressive, 2: First-Person Hood
 
@@ -48,14 +126,6 @@ interface HitPopup {
   y: number;
   life: number;
   maxLife: number;
-}
-
-interface CarVisual {
-  group: THREE.Group;
-  bodyMat: THREE.MeshLambertMaterial;
-  cabin: THREE.Mesh;
-  sirenRed: THREE.Mesh;
-  sirenBlue: THREE.Mesh;
 }
 
 const CAR_COLORS = [
@@ -106,15 +176,43 @@ export class WorldRenderer {
   // Particle pool
   private readonly particles: Particle[] = [];
   private readonly particleInst: THREE.InstancedMesh;
+  private lastParticleCount = 0;
 
   // 3D comic hit popups
   private readonly popups: HitPopup[] = [];
 
-  // Traffic visual pool
-  private readonly carPool: CarVisual[] = [];
+  // Instanced traffic visuals (cuts up to 260 car draw calls down to 4-5!)
+  private readonly carBodyInst: THREE.InstancedMesh;
+  private readonly carCabinInst: THREE.InstancedMesh;
+  private readonly carWheelsInst: THREE.InstancedMesh;
+  private readonly carLightsInst: THREE.InstancedMesh;
+  private readonly carSirenInst: THREE.InstancedMesh;
+  private readonly carSirenMat: THREE.MeshBasicMaterial;
+  private lastTrafficCount = 0;
 
-  // Rider visuals keyed by rider id
+  // Instanced powerup & hazard visuals (0 draw calls when inactive!)
+  private readonly crateInst: THREE.InstancedMesh;
+  private readonly rocketInst: THREE.InstancedMesh;
+  private readonly jetInst: THREE.InstancedMesh;
+  private readonly bombInst: THREE.InstancedMesh;
+  private readonly warningRingInst: THREE.InstancedMesh;
+  private readonly interceptorInst: THREE.InstancedMesh;
+  private readonly trapInst: THREE.InstancedMesh;
+  private readonly bananaInst: THREE.InstancedMesh;
+  private readonly sniperLaserLine: THREE.Line;
+  private readonly sniperLaserPos: Float32Array;
+  private readonly sniperLaserMat: THREE.LineBasicMaterial;
+  private lastCrateCount = 0;
+  private lastRocketCount = 0;
+  private lastJetCount = 0;
+  private lastBombCount = 0;
+  private lastInterceptorCount = 0;
+  private lastTrapCount = 0;
+  private lastBananaCount = 0;
+
+  // Rider visuals keyed by rider id (reusable Set for zero per-frame allocations)
   private readonly bikeMap = new Map<string, BikeVisual>();
+  private readonly activeRiderIds = new Set<string>();
 
   // Camera & presentation controls
   cameraMode: CameraMode = 0;
@@ -146,11 +244,13 @@ export class WorldRenderer {
   private readonly _q = new THREE.Quaternion();
   private readonly _scale = new THREE.Vector3();
   private readonly _dummy = new THREE.Object3D();
+  private readonly _tmpColor = new THREE.Color();
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       antialias: false, // crisp pixel-art edges + higher FPS!
+      stencil: false,
       powerPreference: 'high-performance',
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -251,9 +351,12 @@ export class WorldRenderer {
       20
     );
 
-    // 8 pooled roadside billboards (2 per texture style)
+    // 8 pooled roadside billboards (merged dual-pole geometry saves draw calls)
     const bbGeo = new THREE.PlaneGeometry(7.6, 3.8);
-    const poleGeo = new THREE.BoxGeometry(0.35, 6.0, 0.35);
+    const polesGeo = mergeBoxGeometries([
+      { w: 0.35, h: 6.0, d: 0.35, x: -2.6, y: 3.0, z: -0.1 },
+      { w: 0.35, h: 6.0, d: 0.35, x: 2.6, y: 3.0, z: -0.1 },
+    ]);
     const poleMat = new THREE.MeshLambertMaterial({ color: 0x3b4252 });
     for (let i = 0; i < 8; i++) {
       const g = new THREE.Group();
@@ -263,25 +366,197 @@ export class WorldRenderer {
       );
       board.position.y = 5.4;
       g.add(board);
-      const pL = new THREE.Mesh(poleGeo, poleMat);
-      pL.position.set(-2.6, 3.0, -0.1);
-      g.add(pL);
-      const pR = new THREE.Mesh(poleGeo, poleMat);
-      pR.position.set(2.6, 3.0, -0.1);
-      g.add(pR);
+      const poles = new THREE.Mesh(polesGeo, poleMat);
+      g.add(poles);
       g.visible = false;
       this.scene.add(g);
       this.billboardMeshes.push(g as unknown as THREE.Mesh);
     }
 
-    // Traffic car pool
-    this.initTrafficPool();
+    // Instanced traffic meshes (all cars rendered in 4-5 draw calls total)
+    const carBodyGeo = new THREE.BoxGeometry(2.15, 0.85, 4.5);
+    carBodyGeo.translate(0, 0.68, 0);
+    this.carBodyInst = this.makeInstanced(
+      carBodyGeo,
+      new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+      MAX_TRAFFIC_RENDER
+    );
+    this._tmpColor.setHex(0xffffff);
+    this.carBodyInst.setColorAt(0, this._tmpColor);
+    this.carBodyInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+
+    const carCabinGeo = new THREE.BoxGeometry(1.85, 0.68, 2.25);
+    this.carCabinInst = this.makeInstanced(
+      carCabinGeo,
+      new THREE.MeshLambertMaterial({ map: atlas.carWindows, flatShading: true }),
+      MAX_TRAFFIC_RENDER
+    );
+
+    const carWheelsGeo = mergeBoxGeometries([
+      { w: 0.32, h: 0.56, d: 0.72, x: -1.02, y: 0.3, z: -1.35 },
+      { w: 0.32, h: 0.56, d: 0.72, x: 1.02, y: 0.3, z: -1.35 },
+      { w: 0.32, h: 0.56, d: 0.72, x: -1.02, y: 0.3, z: 1.35 },
+      { w: 0.32, h: 0.56, d: 0.72, x: 1.02, y: 0.3, z: 1.35 },
+    ]);
+    this.carWheelsInst = this.makeInstanced(
+      carWheelsGeo,
+      new THREE.MeshLambertMaterial({ color: 0x161820, flatShading: true }),
+      MAX_TRAFFIC_RENDER
+    );
+
+    const carLightsGeo = mergeBoxGeometries(
+      [
+        { w: 0.48, h: 0.22, d: 0.1, x: -0.72, y: 0.78, z: 2.26, colorHex: 0xff2a44 },
+        { w: 0.48, h: 0.22, d: 0.1, x: 0.72, y: 0.78, z: 2.26, colorHex: 0xff2a44 },
+        { w: 0.48, h: 0.22, d: 0.1, x: -0.72, y: 0.74, z: -2.26, colorHex: 0xfff3b0 },
+        { w: 0.48, h: 0.22, d: 0.1, x: 0.72, y: 0.74, z: -2.26, colorHex: 0xfff3b0 },
+      ],
+      true
+    );
+    this.carLightsInst = this.makeInstanced(
+      carLightsGeo,
+      new THREE.MeshBasicMaterial({ vertexColors: true }),
+      MAX_TRAFFIC_RENDER
+    );
+
+    const carSirenGeo = new THREE.BoxGeometry(0.55, 0.22, 0.28);
+    this.carSirenMat = new THREE.MeshBasicMaterial({ color: 0xff1e42 });
+    this.carSirenInst = this.makeInstanced(carSirenGeo, this.carSirenMat, MAX_SIREN_RENDER);
+
+    // Instanced powerup crates, projectiles, bomber jets, bombs, police interceptors & road hazards
+    const crateGeo = new THREE.BoxGeometry(1.18, 1.18, 1.18);
+    this.crateInst = this.makeInstanced(
+      crateGeo,
+      new THREE.MeshBasicMaterial({ map: atlas.crate }),
+      16
+    );
+
+    const rocketGeo = mergeBoxGeometries(
+      [
+        { w: 0.24, h: 0.24, d: 1.05, x: 0, y: 0, z: 0, colorHex: 0xedf2f4 },
+        { w: 0.3, h: 0.3, d: 0.38, x: 0, y: 0, z: -0.68, colorHex: 0xff2a54 },
+        { w: 0.56, h: 0.08, d: 0.34, x: 0, y: 0, z: 0.42, colorHex: 0xffb703 },
+        { w: 0.08, h: 0.56, d: 0.34, x: 0, y: 0, z: 0.42, colorHex: 0xffb703 },
+      ],
+      true
+    );
+    this.rocketInst = this.makeInstanced(
+      rocketGeo,
+      new THREE.MeshBasicMaterial({ vertexColors: true }),
+      8
+    );
+
+    const jetGeo = mergeBoxGeometries(
+      [
+        { w: 1.5, h: 0.85, d: 6.4, x: 0, y: 0, z: 0, colorHex: 0x3b4252 },
+        { w: 8.6, h: 0.22, d: 2.2, x: 0, y: -0.05, z: 0.4, colorHex: 0x4c566a },
+        { w: 1.2, h: 0.3, d: 1.4, x: -4.1, y: 0, z: 0.6, colorHex: 0xff0054 },
+        { w: 1.2, h: 0.3, d: 1.4, x: 4.1, y: 0, z: 0.6, colorHex: 0xff0054 },
+        { w: 0.26, h: 1.7, d: 1.5, x: 0, y: 0.9, z: 2.4, colorHex: 0xffd166 },
+        { w: 0.9, h: 0.5, d: 1.6, x: 0, y: 0.55, z: -1.4, colorHex: 0x00f5d4 },
+      ],
+      true
+    );
+    this.jetInst = this.makeInstanced(
+      jetGeo,
+      new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
+      3
+    );
+
+    const bombGeo = mergeBoxGeometries(
+      [
+        { w: 0.42, h: 0.88, d: 0.42, x: 0, y: 0, z: 0, colorHex: 0x1b1d2e },
+        { w: 0.62, h: 0.26, d: 0.14, x: 0, y: 0.48, z: 0, colorHex: 0xffd166 },
+        { w: 0.14, h: 0.26, d: 0.62, x: 0, y: 0.48, z: 0, colorHex: 0xffd166 },
+      ],
+      true
+    );
+    this.bombInst = this.makeInstanced(
+      bombGeo,
+      new THREE.MeshBasicMaterial({ vertexColors: true }),
+      16
+    );
+
+    const ringGeo = new THREE.RingGeometry(2.05, 2.75, 16);
+    ringGeo.rotateX(-Math.PI / 2);
+    this.warningRingInst = this.makeInstanced(
+      ringGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xff0054,
+        transparent: true,
+        opacity: 0.72,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+      16
+    );
+
+    const interceptorGeo = mergeBoxGeometries(
+      [
+        { w: 2.2, h: 0.86, d: 4.6, x: 0, y: 0.68, z: 0, colorHex: 0x111626 },
+        { w: 2.24, h: 0.26, d: 2.2, x: 0, y: 0.72, z: 0, colorHex: 0xedf2f4 },
+        { w: 1.85, h: 0.66, d: 2.2, x: 0, y: 1.38, z: 0.12, colorHex: 0x1e2c42 },
+        { w: 0.6, h: 0.24, d: 0.3, x: -0.36, y: 1.82, z: 0.05, colorHex: 0xff1e42 },
+        { w: 0.6, h: 0.24, d: 0.3, x: 0.36, y: 1.82, z: 0.05, colorHex: 0x00b4ff },
+      ],
+      true
+    );
+    this.interceptorInst = this.makeInstanced(
+      interceptorGeo,
+      new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
+      4
+    );
+
+    const trapGeo = mergeBoxGeometries(
+      [
+        { w: 2.7, h: 0.12, d: 0.46, x: 0, y: 0.07, z: 0, colorHex: 0x2b2d42 },
+        { w: 0.18, h: 0.34, d: 0.18, x: -1.05, y: 0.24, z: 0, colorHex: 0xef233c },
+        { w: 0.18, h: 0.34, d: 0.18, x: -0.52, y: 0.24, z: 0, colorHex: 0xd9e0e8 },
+        { w: 0.18, h: 0.34, d: 0.18, x: 0.0, y: 0.24, z: 0, colorHex: 0xef233c },
+        { w: 0.18, h: 0.34, d: 0.18, x: 0.52, y: 0.24, z: 0, colorHex: 0xd9e0e8 },
+        { w: 0.18, h: 0.34, d: 0.18, x: 1.05, y: 0.24, z: 0, colorHex: 0xef233c },
+      ],
+      true
+    );
+    this.trapInst = this.makeInstanced(
+      trapGeo,
+      new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
+      16
+    );
+
+    const bananaGeo = mergeBoxGeometries(
+      [
+        { w: 0.95, h: 0.18, d: 0.32, x: 0, y: 0.12, z: 0, colorHex: 0xffe600 },
+        { w: 0.32, h: 0.18, d: 0.95, x: 0, y: 0.12, z: 0, colorHex: 0xffd166 },
+        { w: 0.32, h: 0.42, d: 0.32, x: 0, y: 0.32, z: 0, colorHex: 0xfff3b0 },
+        { w: 0.16, h: 0.16, d: 0.16, x: 0, y: 0.56, z: 0, colorHex: 0x5c3d2e },
+      ],
+      true
+    );
+    this.bananaInst = this.makeInstanced(
+      bananaGeo,
+      new THREE.MeshBasicMaterial({ vertexColors: true }),
+      16
+    );
+
+    this.sniperLaserPos = new Float32Array(6);
+    const laserGeo = new THREE.BufferGeometry();
+    const laserAttr = new THREE.BufferAttribute(this.sniperLaserPos, 3);
+    laserAttr.setUsage(THREE.DynamicDrawUsage);
+    laserGeo.setAttribute('position', laserAttr);
+    this.sniperLaserMat = new THREE.LineBasicMaterial({ color: 0xff0054 });
+    this.sniperLaserLine = new THREE.Line(laserGeo, this.sniperLaserMat);
+    this.sniperLaserLine.frustumCulled = false;
+    this.sniperLaserLine.visible = false;
+    this.scene.add(this.sniperLaserLine);
 
     // Pixel particle pool
     const pGeo = new THREE.BoxGeometry(1, 1, 1);
     const pMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
     this.particleInst = new THREE.InstancedMesh(pGeo, pMat, MAX_PARTICLES);
     this.particleInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.particleInst.setColorAt(0, this._tmpColor);
+    this.particleInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
     this.particleInst.frustumCulled = false;
     this.particleInst.count = 0;
     this.scene.add(this.particleInst);
@@ -362,79 +637,11 @@ export class WorldRenderer {
     return geo;
   }
 
-  private initTrafficPool(): void {
-    const atlas = getPixelAtlas();
-    const bodyGeo = new THREE.BoxGeometry(2.15, 0.85, 4.5);
-    const cabinGeo = new THREE.BoxGeometry(1.85, 0.68, 2.25);
-    const wheelGeo = new THREE.BoxGeometry(0.32, 0.56, 0.72);
-    const lightGeo = new THREE.BoxGeometry(0.48, 0.22, 0.1);
-    const sirenGeo = new THREE.BoxGeometry(0.55, 0.22, 0.28);
-
-    const wheelMat = new THREE.MeshLambertMaterial({ color: 0x161820, flatShading: true });
-    const winMat = new THREE.MeshLambertMaterial({ map: atlas.carWindows, flatShading: true });
-    const tailMat = new THREE.MeshBasicMaterial({ color: 0xff2a44 });
-    const headMat = new THREE.MeshBasicMaterial({ color: 0xfff3b0 });
-    const redMat = new THREE.MeshBasicMaterial({ color: 0xff1e42 });
-    const blueMat = new THREE.MeshBasicMaterial({ color: 0x00b4ff });
-
-    for (let i = 0; i < MAX_TRAFFIC_RENDER; i++) {
-      const g = new THREE.Group();
-      const bodyMat = new THREE.MeshLambertMaterial({ color: CAR_COLORS[i % CAR_COLORS.length], flatShading: true });
-
-      const body = new THREE.Mesh(bodyGeo, bodyMat);
-      body.position.y = 0.68;
-      g.add(body);
-
-      const cabin = new THREE.Mesh(cabinGeo, winMat);
-      cabin.position.set(0, 1.38, 0.12);
-      g.add(cabin);
-
-      const wPos = [
-        [-1.02, 0.3, -1.35],
-        [1.02, 0.3, -1.35],
-        [-1.02, 0.3, 1.35],
-        [1.02, 0.3, 1.35],
-      ];
-      for (const [wx, wy, wz] of wPos) {
-        const w = new THREE.Mesh(wheelGeo, wheelMat);
-        w.position.set(wx, wy, wz);
-        g.add(w);
-      }
-
-      const tlL = new THREE.Mesh(lightGeo, tailMat);
-      tlL.position.set(-0.72, 0.78, 2.26);
-      g.add(tlL);
-      const tlR = new THREE.Mesh(lightGeo, tailMat);
-      tlR.position.set(0.72, 0.78, 2.26);
-      g.add(tlR);
-
-      const hlL = new THREE.Mesh(lightGeo, headMat);
-      hlL.position.set(-0.72, 0.74, -2.26);
-      g.add(hlL);
-      const hlR = new THREE.Mesh(lightGeo, headMat);
-      hlR.position.set(0.72, 0.74, -2.26);
-      g.add(hlR);
-
-      const sirenRed = new THREE.Mesh(sirenGeo, redMat);
-      sirenRed.position.set(-0.34, 1.82, 0.05);
-      sirenRed.visible = false;
-      g.add(sirenRed);
-
-      const sirenBlue = new THREE.Mesh(sirenGeo, blueMat);
-      sirenBlue.position.set(0.34, 1.82, 0.05);
-      sirenBlue.visible = false;
-      g.add(sirenBlue);
-
-      g.visible = false;
-      this.scene.add(g);
-      this.carPool.push({ group: g, bodyMat, cabin, sirenRed, sirenBlue });
-    }
-  }
-
   resize(): void {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Cap HD pixelRatio at 1.5 to cut HiDPI fragment load while keeping pixel edges crisp
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     const effectiveRatio = this.pixelScale === 1 ? dpr : 1 / this.pixelScale;
     this.renderer.setPixelRatio(effectiveRatio);
     this.renderer.setSize(w, h, false);
@@ -485,8 +692,9 @@ export class WorldRenderer {
     }
   }
 
-  spawnHitPopup(kind: 'POW' | 'SMACK' | 'BONK' | 'KO' | 'BOOST', s: number, x: number, y: number): void {
+  spawnHitPopup(kind: string, s: number, x: number, y: number): void {
     const atlas = getPixelAtlas();
+    const tex = atlas.hitWords[kind] ?? atlas.hitWords.POW;
     for (const p of this.popups) {
       if (!p.active) {
         p.active = true;
@@ -495,7 +703,7 @@ export class WorldRenderer {
         p.y = y;
         p.life = 0.72;
         p.maxLife = 0.72;
-        (p.sprite.material as THREE.SpriteMaterial).map = atlas.hitWords[kind];
+        (p.sprite.material as THREE.SpriteMaterial).map = tex;
         (p.sprite.material as THREE.SpriteMaterial).opacity = 1;
         p.sprite.scale.set(2.4, 1.2, 1);
         p.sprite.visible = true;
@@ -509,7 +717,8 @@ export class WorldRenderer {
     allRiders: RiderRenderState[],
     traffic: TrafficCar[],
     dt: number,
-    timeSec: number
+    timeSec: number,
+    itemVisuals?: ItemVisuals
   ): void {
     const originS = local.s;
     const originX = roadX(originS);
@@ -531,14 +740,19 @@ export class WorldRenderer {
     // 3. Update traffic car meshes
     this.updateTrafficVisuals(traffic, originS, originX, originY, timeSec);
 
-    // 4. Sync & update all motorcycle visuals (local + remote players + bots)
+    // 4. Update instanced powerups, projectiles, jets, bombs, interceptors, hazards & sniper laser
+    if (itemVisuals) {
+      this.updateItemVisuals(itemVisuals, originS, originX, originY, timeSec);
+    }
+
+    // 5. Sync & update all motorcycle visuals (local + remote players + bots)
     this.updateRiders(allRiders, originS, originX, originY, timeSec);
 
-    // 5. Update particles & 3D hit popups
+    // 6. Update particles & 3D hit popups
     this.updateParticles(dt, originS, originX, originY);
     this.updatePopups(dt, originS, originX, originY);
 
-    // 6. Update arcade camera
+    // 7. Update arcade camera
     this.updateCamera(local, originS, originX, originY, dt);
 
     // Keep sky dome centered on camera
@@ -548,7 +762,7 @@ export class WorldRenderer {
   }
 
   private updateRoadRibbons(originS: number, originX: number, originY: number): void {
-    const baseS = Math.floor(originS / SLICE_STEP) * SLICE_STEP - 30.0;
+    const baseS = Math.floor(originS / ROAD_SLICE_SNAP) * ROAD_SLICE_SNAP;
     const uvBaseRoad = Math.floor(originS / 12.0) * 12.0;
     const uvBaseCurb = Math.floor(originS / 4.0) * 4.0;
 
@@ -579,7 +793,7 @@ export class WorldRenderer {
     const terrainFar = 92.0;
 
     for (let i = 0; i < ROAD_SLICES; i++) {
-      const s = baseS + i * SLICE_STEP;
+      const s = baseS + ROAD_SLICE_OFFSETS[i];
       sampleRoadFrame(s, f);
       const cx = f.x - originX;
       const cy = f.y - originY;
@@ -686,7 +900,7 @@ export class WorldRenderer {
       // Guard posts every slot along outer shoulder
       for (let side = -1; side <= 1; side += 2) {
         if (postC < MAX_PROPS_PER_POOL * 2 && (slot % 2 === 0)) {
-          roadToLocalWorld(s, side * (SHOULDER_HALF_WIDTH - 0.4), 0, originS, originX, originY, pos);
+          roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH - 0.4), 0, originS, originX, originY, pos);
           d.position.copy(pos);
           d.rotation.set(0, yaw, 0);
           d.scale.set(1, 1, 1);
@@ -701,7 +915,7 @@ export class WorldRenderer {
         // Street lamps in twilight biome or periodic highway lamps
         if (lampC < MAX_PROPS_PER_POOL && ((biome === 3 && slot % 2 === 0) || slot % 6 === 0)) {
           if ((slot + (side > 0 ? 1 : 0)) % 2 === 0) {
-            roadToLocalWorld(s, side * (SHOULDER_HALF_WIDTH + 0.8), 0, originS, originX, originY, pos);
+            roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH + 0.8), 0, originS, originX, originY, pos);
             d.position.copy(pos);
             d.rotation.set(0, yaw, 0);
             d.scale.set(1, 1, 1);
@@ -713,7 +927,7 @@ export class WorldRenderer {
         // Biome-specific trees & canyon mesas
         if (h < 0.62) {
           const sc = 0.85 + h2 * 0.65;
-          roadToLocalWorld(s, side * dist, -0.3, originS, originX, originY, pos);
+          roadFrameToLocalWorld(f, s, side * dist, -0.3, originS, originX, originY, pos);
           d.position.copy(pos);
           d.rotation.set(0, h * 6.28, 0);
           d.scale.set(sc, sc, sc);
@@ -731,7 +945,7 @@ export class WorldRenderer {
             this.pineInst.setMatrixAt(pineC++, d.matrix);
           }
         } else if (h > 0.84 && rockC < MAX_PROPS_PER_POOL) {
-          roadToLocalWorld(s, side * (dist + 6), -0.4, originS, originX, originY, pos);
+          roadFrameToLocalWorld(f, s, side * (dist + 6), -0.4, originS, originX, originY, pos);
           d.position.copy(pos);
           d.rotation.set(0, h2 * 6.28, 0);
           d.scale.set(0.8 + h2, 0.7 + h2 * 1.3, 0.8 + h2);
@@ -743,7 +957,7 @@ export class WorldRenderer {
       // Retro arcade billboards every 9 slots
       if (slot > 0 && slot % 9 === 3 && bbIdx < this.billboardMeshes.length) {
         const side = (slot % 18 === 3) ? -1 : 1;
-        roadToLocalWorld(s, side * (SHOULDER_HALF_WIDTH + 3.6), 0, originS, originX, originY, pos);
+        roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH + 3.6), 0, originS, originX, originY, pos);
         const bb = this.billboardMeshes[bbIdx++];
         bb.visible = true;
         bb.position.copy(pos);
@@ -776,7 +990,7 @@ export class WorldRenderer {
       const pad = getBoostPadInSlot(bi);
       if (!pad) continue;
       sampleRoadFrame(pad.s, f);
-      roadToLocalWorld(pad.s, pad.x, 0.06, originS, originX, originY, pos);
+      roadFrameToLocalWorld(f, pad.s, pad.x, 0.06, originS, originX, originY, pos);
       this.setRoadBasisQuaternion(f, this._q);
       const pulse = 1.0 + 0.05 * Math.sin(timeSec * 12 + bi);
       this._scale.set(pulse, 1, 1);
@@ -804,30 +1018,234 @@ export class WorldRenderer {
   ): void {
     const f = this._f;
     const pos = this._v1;
+    const subPos = this._v2;
     let used = 0;
+    let sirens = 0;
     const sirenToggle = Math.floor(timeSec * 9) % 2 === 0;
+    const sirenX = sirenToggle ? -0.34 : 0.34;
+    this.carSirenMat.color.setHex(sirenToggle ? 0xff1e42 : 0x00b4ff);
 
     for (let i = 0; i < traffic.length && used < MAX_TRAFFIC_RENDER; i++) {
       const car = traffic[i];
       const ds = car.s - originS;
       if (ds < -26 || ds > 295) continue;
 
-      const vis = this.carPool[used++];
-      vis.group.visible = true;
       sampleRoadFrame(car.s, f);
-      roadToLocalWorld(car.s, car.x + car.bumpOffset, 0, originS, originX, originY, pos);
-      vis.group.position.copy(pos);
-      this.setRoadBasisQuaternion(f, vis.group.quaternion);
+      roadFrameToLocalWorld(f, car.s, car.x + car.bumpOffset, 0, originS, originX, originY, pos);
+      this.setRoadBasisQuaternion(f, this._q);
+
+      // Shared base matrix for body, merged 4-wheels, and merged 4-lights
+      this._scale.set(1, 1, 1);
+      this._m4.compose(pos, this._q, this._scale);
+      this.carBodyInst.setMatrixAt(used, this._m4);
+      this.carWheelsInst.setMatrixAt(used, this._m4);
+      this.carLightsInst.setMatrixAt(used, this._m4);
 
       const isPolice = car.type === 3;
-      vis.bodyMat.color.setHex(isPolice ? 0x1a1e2e : CAR_COLORS[car.colorIdx % CAR_COLORS.length]);
-      vis.cabin.scale.set(1, car.type === 2 ? 0.85 : 1, car.type === 2 ? 0.72 : 1);
-      vis.sirenRed.visible = isPolice && sirenToggle;
-      vis.sirenBlue.visible = isPolice && !sirenToggle;
+      this._tmpColor.setHex(isPolice ? 0x1a1e2e : CAR_COLORS[car.colorIdx % CAR_COLORS.length]);
+      this.carBodyInst.setColorAt(used, this._tmpColor);
+
+      // Cabin with pickup scale support
+      subPos.set(0, 1.38, 0.12).applyQuaternion(this._q).add(pos);
+      if (car.type === 2) {
+        this._scale.set(1, 0.85, 0.72);
+      } else {
+        this._scale.set(1, 1, 1);
+      }
+      this._m4.compose(subPos, this._q, this._scale);
+      this.carCabinInst.setMatrixAt(used, this._m4);
+
+      // Flashing police roof siren (alternates left red / right blue)
+      if (isPolice && sirens < MAX_SIREN_RENDER) {
+        subPos.set(sirenX, 1.82, 0.05).applyQuaternion(this._q).add(pos);
+        this._scale.set(1, 1, 1);
+        this._m4.compose(subPos, this._q, this._scale);
+        this.carSirenInst.setMatrixAt(sirens++, this._m4);
+      }
+
+      used++;
     }
 
-    for (let i = used; i < MAX_TRAFFIC_RENDER; i++) {
-      this.carPool[i].group.visible = false;
+    this.carBodyInst.count = used;
+    this.carCabinInst.count = used;
+    this.carWheelsInst.count = used;
+    this.carLightsInst.count = used;
+    this.carSirenInst.count = sirens;
+
+    if (used > 0 || this.lastTrafficCount > 0) {
+      this.carBodyInst.instanceMatrix.needsUpdate = true;
+      if (this.carBodyInst.instanceColor) {
+        this.carBodyInst.instanceColor.needsUpdate = true;
+      }
+      this.carCabinInst.instanceMatrix.needsUpdate = true;
+      this.carWheelsInst.instanceMatrix.needsUpdate = true;
+      this.carLightsInst.instanceMatrix.needsUpdate = true;
+      this.carSirenInst.instanceMatrix.needsUpdate = true;
+      this.lastTrafficCount = used;
+    }
+  }
+
+  private updateItemVisuals(
+    vis: ItemVisuals,
+    originS: number,
+    originX: number,
+    originY: number,
+    timeSec: number
+  ): void {
+    const f = this._f;
+    const pos = this._v1;
+    const d = this._dummy;
+
+    // 1. Rotating glowing '?' mystery crates
+    let crateC = 0;
+    for (let i = 0; i < vis.crates.length && crateC < 16; i++) {
+      const c = vis.crates[i];
+      const ds = c.s - originS;
+      if (ds < -20 || ds > 260) continue;
+      sampleRoadFrame(c.s, f);
+      const bobY = 0.98 + 0.22 * Math.sin(timeSec * 4.5 + c.slot);
+      roadFrameToLocalWorld(f, c.s, c.x, bobY, originS, originX, originY, pos);
+      d.position.copy(pos);
+      d.rotation.set(0.35 * Math.sin(timeSec * 2.5 + c.slot), timeSec * 2.6 + c.slot, 0.2);
+      d.scale.set(1, 1, 1);
+      d.updateMatrix();
+      this.crateInst.setMatrixAt(crateC++, d.matrix);
+    }
+    this.crateInst.count = crateC;
+    if (crateC > 0 || this.lastCrateCount > 0) {
+      this.crateInst.instanceMatrix.needsUpdate = true;
+      this.lastCrateCount = crateC;
+    }
+
+    // 2. Homing RPG rockets
+    let rocketC = 0;
+    for (let i = 0; i < vis.rockets.length && rocketC < 8; i++) {
+      const r = vis.rockets[i];
+      if (!r.active) continue;
+      sampleRoadFrame(r.s, f);
+      roadFrameToLocalWorld(f, r.s, r.x, r.y, originS, originX, originY, pos);
+      this.setRoadBasisQuaternion(f, this._q);
+      this._scale.set(1, 1, 1);
+      this._m4.compose(pos, this._q, this._scale);
+      this.rocketInst.setMatrixAt(rocketC++, this._m4);
+    }
+    this.rocketInst.count = rocketC;
+    if (rocketC > 0 || this.lastRocketCount > 0) {
+      this.rocketInst.instanceMatrix.needsUpdate = true;
+      this.lastRocketCount = rocketC;
+    }
+
+    // 3. Overhead pixel bomber jets
+    let jetC = 0;
+    for (let i = 0; i < vis.jets.length && jetC < 3; i++) {
+      const j = vis.jets[i];
+      if (!j.active) continue;
+      sampleRoadFrame(j.s, f);
+      roadFrameToLocalWorld(f, j.s, j.x, j.y, originS, originX, originY, pos);
+      this.setRoadBasisQuaternion(f, this._q);
+      this._scale.set(1, 1, 1);
+      this._m4.compose(pos, this._q, this._scale);
+      this.jetInst.setMatrixAt(jetC++, this._m4);
+    }
+    this.jetInst.count = jetC;
+    if (jetC > 0 || this.lastJetCount > 0) {
+      this.jetInst.instanceMatrix.needsUpdate = true;
+      this.lastJetCount = jetC;
+    }
+
+    // 4. Falling airstrike bombs + pulsing red ground warning rings
+    let bombC = 0;
+    for (let i = 0; i < vis.bombs.length && bombC < 16; i++) {
+      const b = vis.bombs[i];
+      if (!b.active) continue;
+      sampleRoadFrame(b.s, f);
+      roadFrameToLocalWorld(f, b.s, b.x, b.y, originS, originX, originY, pos);
+      this.setRoadBasisQuaternion(f, this._q);
+      this._scale.set(1, 1, 1);
+      this._m4.compose(pos, this._q, this._scale);
+      this.bombInst.setMatrixAt(bombC, this._m4);
+
+      roadFrameToLocalWorld(f, b.s, b.x, 0.08, originS, originX, originY, pos);
+      const pulse = 0.72 + 0.42 * (b.fuse / Math.max(0.1, b.maxFuse)) + 0.1 * Math.sin(timeSec * 28);
+      this._scale.set(pulse, 1, pulse);
+      this._m4.compose(pos, this._q, this._scale);
+      this.warningRingInst.setMatrixAt(bombC, this._m4);
+      bombC++;
+    }
+    this.bombInst.count = bombC;
+    this.warningRingInst.count = bombC;
+    if (bombC > 0 || this.lastBombCount > 0) {
+      this.bombInst.instanceMatrix.needsUpdate = true;
+      this.warningRingInst.instanceMatrix.needsUpdate = true;
+      this.lastBombCount = bombC;
+    }
+
+    // 5. Interceptor police cruisers
+    let copC = 0;
+    for (let i = 0; i < vis.interceptors.length && copC < 4; i++) {
+      const cop = vis.interceptors[i];
+      if (!cop.active) continue;
+      const ds = cop.s - originS;
+      if (ds < -35 || ds > 290) continue;
+      sampleRoadFrame(cop.s, f);
+      roadFrameToLocalWorld(f, cop.s, cop.x, 0, originS, originX, originY, pos);
+      this.setRoadBasisQuaternion(f, this._q);
+      this._scale.set(1, 1, 1);
+      this._m4.compose(pos, this._q, this._scale);
+      this.interceptorInst.setMatrixAt(copC++, this._m4);
+    }
+    this.interceptorInst.count = copC;
+    if (copC > 0 || this.lastInterceptorCount > 0) {
+      this.interceptorInst.instanceMatrix.needsUpdate = true;
+      this.lastInterceptorCount = copC;
+    }
+
+    // 6. Road spike traps & banana peels
+    let trapC = 0;
+    let bananaC = 0;
+    for (let i = 0; i < vis.hazards.length; i++) {
+      const h = vis.hazards[i];
+      if (!h.active) continue;
+      const ds = h.s - originS;
+      if (ds < -24 || ds > 260) continue;
+      sampleRoadFrame(h.s, f);
+      roadFrameToLocalWorld(f, h.s, h.x, 0.04, originS, originX, originY, pos);
+      this.setRoadBasisQuaternion(f, this._q);
+      this._scale.set(1, 1, 1);
+      this._m4.compose(pos, this._q, this._scale);
+      if (h.kind === 'trap' && trapC < 16) {
+        this.trapInst.setMatrixAt(trapC++, this._m4);
+      } else if (h.kind === 'banana' && bananaC < 16) {
+        this.bananaInst.setMatrixAt(bananaC++, this._m4);
+      }
+    }
+    this.trapInst.count = trapC;
+    if (trapC > 0 || this.lastTrapCount > 0) {
+      this.trapInst.instanceMatrix.needsUpdate = true;
+      this.lastTrapCount = trapC;
+    }
+    this.bananaInst.count = bananaC;
+    if (bananaC > 0 || this.lastBananaCount > 0) {
+      this.bananaInst.instanceMatrix.needsUpdate = true;
+      this.lastBananaCount = bananaC;
+    }
+
+    // 7. Sniper aiming laser beam
+    const laser = vis.sniperLaser;
+    if (laser.active) {
+      roadToLocalWorld(laser.fromS, laser.fromX, laser.fromY, originS, originX, originY, pos);
+      this.sniperLaserPos[0] = pos.x;
+      this.sniperLaserPos[1] = pos.y;
+      this.sniperLaserPos[2] = pos.z;
+      roadToLocalWorld(laser.toS, laser.toX, laser.toY, originS, originX, originY, pos);
+      this.sniperLaserPos[3] = pos.x;
+      this.sniperLaserPos[4] = pos.y;
+      this.sniperLaserPos[5] = pos.z;
+      this.sniperLaserMat.color.setHex(laser.progress > 0.72 ? 0xff0054 : 0x00f5d4);
+      (this.sniperLaserLine.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      this.sniperLaserLine.visible = true;
+    } else if (this.sniperLaserLine.visible) {
+      this.sniperLaserLine.visible = false;
     }
   }
 
@@ -838,27 +1256,18 @@ export class WorldRenderer {
     originY: number,
     timeSec: number
   ): void {
-    const activeIds = new Set<string>();
+    const activeIds = this.activeRiderIds;
+    activeIds.clear();
     const f = this._f;
     const pos = this._v1;
 
-    for (const r of riders) {
+    for (let i = 0; i < riders.length; i++) {
+      const r = riders[i];
       activeIds.add(r.id);
       let vis = this.bikeMap.get(r.id);
       if (!vis) {
         const palIdx = Math.abs(r.colorIdx);
-        vis = new BikeVisual(
-          {
-            name: r.name,
-            primary: '#e63946',
-            secondary: '#1d1e2c',
-            jacket: '#232533',
-            helmet: '#f1faee',
-            visor: '#00f5d4',
-            accent: '#ffb703',
-          },
-          !r.isLocal
-        );
+        vis = new BikeVisual(BIKE_PALETTES[palIdx % BIKE_PALETTES.length], !r.isLocal);
         vis.setPalette(palIdx, r.isBot);
         this.scene.add(vis.root);
         this.bikeMap.set(r.id, vis);
@@ -871,7 +1280,7 @@ export class WorldRenderer {
       }
       vis.root.visible = true;
       sampleRoadFrame(r.s, f);
-      roadToLocalWorld(r.s, r.x, 0, originS, originX, originY, pos);
+      roadFrameToLocalWorld(f, r.s, r.x, 0, originS, originX, originY, pos);
       vis.root.position.copy(pos);
       this.setRoadBasisQuaternion(f, vis.root.quaternion);
       vis.updateVisuals(r, timeSec);
@@ -921,6 +1330,9 @@ export class WorldRenderer {
       count++;
     }
 
+    if (count === 0 && this.lastParticleCount === 0) return;
+
+    this.lastParticleCount = count;
     this.particleInst.count = count;
     this.particleInst.instanceMatrix.needsUpdate = true;
     if (this.particleInst.instanceColor) {
@@ -983,7 +1395,16 @@ export class WorldRenderer {
     const camS = local.s - backDist;
     sampleRoadFrame(camS, this._fCam);
     const camLat = local.x * (this.cameraMode === 2 ? 1.0 : 0.84);
-    roadToLocalWorld(camS, camLat, camHeight + (this.cameraMode === 2 ? 0 : local.y * 0.35), originS, originX, originY, this._v1);
+    roadFrameToLocalWorld(
+      this._fCam,
+      camS,
+      camLat,
+      camHeight + (this.cameraMode === 2 ? 0 : local.y * 0.35),
+      originS,
+      originX,
+      originY,
+      this._v1
+    );
 
     // Camera shake on impact / nitro roar
     if (this.shakeTime > 0) {

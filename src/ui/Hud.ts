@@ -1,8 +1,32 @@
-import { AVATAR_COUNT, PIXEL_AVATARS, getAvatarDataUrl } from '../game/PixelAvatars';
-import { BIKE_PALETTES, BOT_PALETTE, RiderRenderState, WEAPONS, WeaponType } from '../game/types';
+import {
+  AVATAR_COUNT,
+  PIXEL_AVATARS,
+  getAvatarDataUrl,
+  getAvatarVersion,
+  getCustomAvatarDataUrl,
+  getRiderAvatarDataUrl,
+} from '../game/PixelAvatars';
+import {
+  BIKE_PALETTES,
+  BOT_PALETTE,
+  ITEM_BY_ID,
+  ItemType,
+  RiderRenderState,
+  SniperHudState,
+  WEAPONS,
+  WeaponType,
+} from '../game/types';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline';
 export type ToastAccent = 'gold' | 'cyan' | 'red';
+export type BroadcastAccent = 'gold' | 'cyan' | 'red' | 'green';
+
+export interface SniperCandidate {
+  id: string;
+  name: string;
+  distM: number;
+  avatarIdx: number;
+}
 
 export type TouchInputPatch = Partial<{
   left: boolean;
@@ -17,6 +41,11 @@ export type TouchInputPatch = Partial<{
 export interface HudCallbacks {
   onNameChange(name: string): void;
   onAvatarChange(avatarIdx: number): void;
+  onCustomAvatarUpload(file: File): void;
+  onClearCustomAvatar(): void;
+  onUseItem(): void;
+  onSelectSniperTarget(targetId: string): void;
+  onCancelSniper(): void;
   onEditingName(editing: boolean): void;
   onToggleMute(): boolean;
   onTogglePixelScale(): number;
@@ -30,7 +59,11 @@ const STANDINGS_SLOTS = 5;
 const BAR_SEGMENTS = 12;
 const RADAR_POOL = 16;
 const RADAR_RANGE_M = 40;
-const HUD_UPDATE_INTERVAL = 0.05; // 20Hz DOM refresh cap
+const FEED_SLOTS = 3;
+const FEED_DURATION_MS = 4500;
+const SNIPER_SLOTS = 5;
+const FAST_UPDATE_INTERVAL = 1 / 15; // ~15Hz for speed/nitro/HP/weapons/item/wheelie/KO
+const SLOW_UPDATE_INTERVAL = 0.11; // ~9Hz for standings & radar
 const KEYCAP_FADE_SEC = 7.0;
 const TOAST_DURATION_MS = 1800;
 
@@ -84,17 +117,48 @@ interface StandingRowRefs {
   dist: HTMLSpanElement;
   ko: HTMLSpanElement;
   koVal: HTMLSpanElement;
-  lastKey: string;
+  visible: boolean;
+  lastRank: number;
+  lastOwnerId: string;
+  lastName: string;
+  lastDistTenth: number;
+  lastKos: number;
+  lastBorderColor: string;
   lastAvatarIdx: number;
+  lastAvatarVer: number;
+  lastIsLocal: boolean;
+  lastIsBot: boolean;
 }
 
 interface RadarDotRefs {
   el: HTMLSpanElement;
   visible: boolean;
-  topPx: number;
-  leftPct: number;
+  xPx: number;
+  yPx: number;
   color: string;
   clamped: boolean;
+}
+
+interface FeedEntry {
+  id: number;
+  text: string;
+  accent: BroadcastAccent;
+  fading: boolean;
+  fadeTimer: number;
+  removeTimer: number;
+}
+
+interface SniperCardRefs {
+  btn: HTMLButtonElement;
+  avatar: HTMLImageElement;
+  name: HTMLSpanElement;
+  dist: HTMLSpanElement;
+  targetId: string;
+  visible: boolean;
+  lastName: string;
+  lastDistM: number;
+  lastAvatarIdx: number;
+  lastAvatarVer: number;
 }
 
 function getRiderColor(colorIdx: number, isBot: boolean): string {
@@ -108,13 +172,11 @@ function normalizeAvatarIdx(avatarIdx: number): number {
   return ((Math.floor(avatarIdx) % AVATAR_COUNT) + AVATAR_COUNT) % AVATAR_COUNT;
 }
 
-function formatDistanceKm(meters: number): string {
-  const km = Math.max(0, meters) / 1000;
-  return `${km.toFixed(1)}km`;
+function compareByDistanceDesc(a: RiderRenderState, b: RiderRenderState): number {
+  return b.s - a.s;
 }
 
-function formatDeltaMeters(ds: number): string {
-  const rounded = Math.round(ds);
+function formatDeltaMeters(rounded: number): string {
   if (rounded === 0) return '0m';
   const sign = rounded > 0 ? '+' : '-';
   const abs = Math.abs(rounded);
@@ -142,12 +204,13 @@ export class Hud {
   private readonly callbacks: HudCallbacks;
   private readonly root: HTMLDivElement;
 
-  // Top-left controls
+  // Top-left controls & broadcast feed
   private readonly riderPillEl: HTMLDivElement;
   private readonly avatarBtnEl: HTMLButtonElement;
   private readonly avatarImgEl: HTMLImageElement;
   private readonly avatarPopoverEl: HTMLDivElement;
   private readonly avatarOptEls: HTMLButtonElement[] = [];
+  private avatarResetBtnEl: HTMLButtonElement | null = null;
   private readonly nameplateEl: HTMLDivElement;
   private readonly nameTextEl: HTMLSpanElement;
   private readonly nameInputEl: HTMLInputElement;
@@ -157,20 +220,35 @@ export class Hud {
   private readonly pxBtnEl: HTMLButtonElement;
   private readonly camPips: HTMLSpanElement[] = [];
   private readonly regroupBtnEl: HTMLButtonElement;
+  private readonly feedLines: HTMLDivElement[] = [];
+  private readonly feedEntries: FeedEntry[] = [];
+  private nextFeedId = 1;
 
-  // Top-center toast
+  // Top-center toast, incoming lock warning & sniper UI
   private readonly toastEl: HTMLDivElement;
   private toastRafId: number | null = null;
   private toastHideTimer: number | null = null;
   private toastClearTimer: number | null = null;
+  private readonly dangerLockEl: HTMLDivElement;
+  private readonly sniperPickerEl: HTMLDivElement;
+  private readonly sniperCards: SniperCardRefs[] = [];
+  private readonly scopeLayerEl: HTMLDivElement;
+  private readonly scopeBracketsEl: HTMLDivElement;
+  private readonly scopeTargetEl: HTMLSpanElement;
+  private readonly scopeFillEl: HTMLDivElement;
+  private readonly scopeResultEl: HTMLDivElement;
 
   // Top-right standings & vertical radar
   private readonly standingRows: StandingRowRefs[] = [];
+  private readonly radarTrackEl: HTMLDivElement;
   private readonly radarLocalEl: HTMLSpanElement;
   private readonly radarDots: RadarDotRefs[] = [];
   private readonly radarDeltaEl: HTMLSpanElement;
 
-  // Bottom-right telemetry & weapons
+  // Bottom-right wheelie charge, telemetry, item slot & weapons
+  private readonly wheelieWrapEl: HTMLDivElement;
+  private readonly wheelieTagEl: HTMLSpanElement;
+  private readonly wheelieFillEl: HTMLDivElement;
   private readonly koPillEl: HTMLDivElement;
   private readonly koValEl: HTMLSpanElement;
   private readonly speedValEl: HTMLSpanElement;
@@ -179,6 +257,10 @@ export class Hud {
   private readonly hpTagEl: HTMLSpanElement;
   private readonly hpTrackEl: HTMLDivElement;
   private readonly hpSegs: HTMLSpanElement[] = [];
+  private readonly itemSlotBtnEl: HTMLButtonElement;
+  private readonly itemKeyEl: HTMLSpanElement;
+  private readonly itemIconEl: HTMLSpanElement;
+  private readonly itemNameEl: HTMLSpanElement;
   private readonly weaponChips: HTMLButtonElement[] = [];
 
   // Bottom-left keycaps
@@ -189,8 +271,11 @@ export class Hud {
   private currentName: string;
   private currentColorIdx: number;
   private currentAvatarIdx: number;
+  private localRiderId = '';
+  private lastLocalAvatarVer = -1;
   private editingName = false;
   private avatarPopoverOpen = false;
+  private avatarPopoverBuilt = false;
   private muted = false;
   private pixelScale = 1;
   private cameraMode = 0;
@@ -198,7 +283,8 @@ export class Hud {
   private onlineCount = 1;
   private hasOnlinePeers = false;
 
-  private uiAccum = HUD_UPDATE_INTERVAL;
+  private fastAccum = FAST_UPDATE_INTERVAL;
+  private slowAccum = SLOW_UPDATE_INTERVAL;
   private ridingElapsed = 0;
   private keycapsFaded = false;
   private lastKeyMask = -1;
@@ -212,11 +298,28 @@ export class Hud {
   private lastWeapon: WeaponType = 0;
   private lastSwinging = false;
   private lastKos = -1;
-  private lastLocalRadarLeft = -1;
-  private lastDeltaText = '';
-  private lastDeltaClass = '';
-  private lastDeltaTop = -1;
+  private lastHeldItem: ItemType | null | undefined = undefined;
+  private lastWheeliePct = -1;
+  private lastWheelieTier = 0; // 0 hidden, 1 normal, 2 slam, 3 danger
+  private lastIncomingLockName: string | null = null;
 
+  private lastSniperPhase = '';
+  private lastScopeProgressPct = -1;
+  private lastScopeHot = false;
+  private lastScopeTarget = '';
+  private lastScopeResult = '';
+
+  private radarInnerW = 20;
+  private radarInnerH = 160;
+  private radarOuterH = 164;
+  private radarDimsDirty = true;
+  private lastLocalRadarX = -999;
+  private lastLocalRadarY = -999;
+  private lastDeltaMeters = 999999;
+  private lastDeltaState = 0; // 0 hidden, 1 ahead, 2 even, 3 behind
+  private lastDeltaY = -999;
+
+  // Pre-allocated scratch buffer (ZERO per-frame array allocations)
   private readonly sortedBuf: RiderRenderState[] = [];
 
   private readonly onDocPointerDown = (e: PointerEvent): void => {
@@ -235,6 +338,10 @@ export class Hud {
     }
   };
 
+  private readonly onWindowResize = (): void => {
+    this.radarDimsDirty = true;
+  };
+
   constructor(
     container: HTMLElement,
     initialName: string,
@@ -251,12 +358,14 @@ export class Hud {
     this.root.className = 'vm-hud-root';
 
     // -----------------------------------------------------------------------
-    // 1. TOP-LEFT COMPACT PILL CLUSTER
+    // 1. TOP-LEFT COMPACT PILL CLUSTER + BROADCAST TICKER FEED
     // -----------------------------------------------------------------------
+    const topLeftCol = document.createElement('div');
+    topLeftCol.className = 'vm-top-left-col';
+
     const topLeft = document.createElement('div');
     topLeft.className = 'vm-top-left';
 
-    // Unified Rider Identity Pill: Pixel Avatar Button + Inline Nameplate + 3x3 Avatar Popover
     this.riderPillEl = document.createElement('div');
     this.riderPillEl.className = 'vm-rider-pill';
 
@@ -274,7 +383,7 @@ export class Hud {
     this.avatarImgEl.height = 28;
     this.avatarImgEl.alt = '';
     this.avatarImgEl.draggable = false;
-    this.avatarImgEl.src = getAvatarDataUrl(this.currentAvatarIdx, 2);
+    this.avatarImgEl.src = getAvatarDataUrl(this.currentAvatarIdx, 1);
     this.avatarBtnEl.appendChild(this.avatarImgEl);
 
     this.avatarBtnEl.addEventListener('click', (e: MouseEvent) => {
@@ -286,41 +395,11 @@ export class Hud {
       this.avatarBtnEl.blur();
     });
 
-    // Floating 3x3 pixel avatar grid popover
+    // Empty container populated lazily on first open
     this.avatarPopoverEl = document.createElement('div');
     this.avatarPopoverEl.className = 'vm-slab vm-avatar-popover';
     this.avatarPopoverEl.setAttribute('role', 'listbox');
     this.avatarPopoverEl.setAttribute('aria-label', 'Avatars');
-
-    for (let i = 0; i < AVATAR_COUNT; i++) {
-      const meta = PIXEL_AVATARS[i];
-      const opt = document.createElement('button');
-      opt.type = 'button';
-      opt.className = i === this.currentAvatarIdx ? 'vm-avatar-opt is-active' : 'vm-avatar-opt';
-      opt.setAttribute('role', 'option');
-      opt.setAttribute('aria-selected', String(i === this.currentAvatarIdx));
-      opt.setAttribute('aria-label', meta ? meta.name : `Avatar ${i + 1}`);
-      if (meta) opt.title = meta.name;
-
-      const img = document.createElement('img');
-      img.className = 'hud-avatar-img vm-avatar-opt-img';
-      img.width = 38;
-      img.height = 38;
-      img.alt = '';
-      img.draggable = false;
-      img.src = getAvatarDataUrl(i, 2);
-
-      opt.appendChild(img);
-      opt.addEventListener('click', (e: MouseEvent) => {
-        e.stopPropagation();
-        this.selectAvatar(i, true);
-        this.setAvatarPopoverOpen(false);
-        opt.blur();
-      });
-
-      this.avatarOptEls.push(opt);
-      this.avatarPopoverEl.appendChild(opt);
-    }
 
     // Inline editable nameplate
     this.nameplateEl = document.createElement('div');
@@ -427,13 +506,136 @@ export class Hud {
     actions.append(this.muteBtnEl, this.pxBtnEl, camBtnEl, this.regroupBtnEl);
     topLeft.append(this.riderPillEl, this.netBadgeEl, actions);
 
+    // 3-line pooled broadcast ticker feed
+    const feedEl = document.createElement('div');
+    feedEl.className = 'vm-feed';
+    feedEl.setAttribute('aria-live', 'polite');
+    for (let i = 0; i < FEED_SLOTS; i++) {
+      const line = document.createElement('div');
+      line.className = 'vm-feed-line is-hidden';
+      this.feedLines.push(line);
+      feedEl.appendChild(line);
+    }
+
+    topLeftCol.append(topLeft, feedEl);
+
     // -----------------------------------------------------------------------
-    // 2. TOP-CENTER TRANSIENT TOAST
+    // 2. TOP-CENTER TOAST, INCOMING LOCK WARNING & SNIPER UI
     // -----------------------------------------------------------------------
     this.toastEl = document.createElement('div');
     this.toastEl.className = 'vm-toast';
     this.toastEl.setAttribute('role', 'status');
     this.toastEl.setAttribute('aria-live', 'polite');
+
+    this.dangerLockEl = document.createElement('div');
+    this.dangerLockEl.className = 'vm-danger-lock is-hidden';
+
+    // Sniper Target Selector Strip (5 pooled candidate cards + ESC)
+    this.sniperPickerEl = document.createElement('div');
+    this.sniperPickerEl.className = 'vm-slab vm-sniper-picker is-hidden';
+    for (let i = 0; i < SNIPER_SLOTS; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'vm-sniper-card is-hidden';
+
+      const keyBadge = document.createElement('span');
+      keyBadge.className = 'vm-sniper-key';
+      keyBadge.textContent = String(i + 1);
+
+      const avatar = document.createElement('img');
+      avatar.className = 'vm-sniper-avatar';
+      avatar.width = 18;
+      avatar.height = 18;
+      avatar.alt = '';
+      avatar.draggable = false;
+
+      const name = document.createElement('span');
+      name.className = 'vm-sniper-name';
+
+      const dist = document.createElement('span');
+      dist.className = 'vm-sniper-dist';
+
+      btn.append(keyBadge, avatar, name, dist);
+
+      const cardRef: SniperCardRefs = {
+        btn,
+        avatar,
+        name,
+        dist,
+        targetId: '',
+        visible: false,
+        lastName: '',
+        lastDistM: 999999,
+        lastAvatarIdx: -1,
+        lastAvatarVer: -1,
+      };
+      btn.addEventListener('click', () => {
+        if (cardRef.targetId) {
+          this.callbacks.onSelectSniperTarget(cardRef.targetId);
+        }
+        btn.blur();
+      });
+
+      this.sniperCards.push(cardRef);
+      this.sniperPickerEl.appendChild(btn);
+    }
+
+    const sniperEscBtn = document.createElement('button');
+    sniperEscBtn.type = 'button';
+    sniperEscBtn.className = 'vm-sniper-esc';
+    sniperEscBtn.textContent = 'ESC';
+    sniperEscBtn.addEventListener('click', () => {
+      this.callbacks.onCancelSniper();
+      sniperEscBtn.blur();
+    });
+    this.sniperPickerEl.appendChild(sniperEscBtn);
+
+    // Lightweight Pixel Sniper Crosshair Scope Overlay
+    this.scopeLayerEl = document.createElement('div');
+    this.scopeLayerEl.className = 'vm-scope-layer is-hidden';
+
+    const reticle = document.createElement('div');
+    reticle.className = 'vm-scope-reticle';
+
+    const hline = document.createElement('span');
+    hline.className = 'vm-scope-hline';
+    const vline = document.createElement('span');
+    vline.className = 'vm-scope-vline';
+
+    this.scopeBracketsEl = document.createElement('div');
+    this.scopeBracketsEl.className = 'vm-scope-brackets';
+    const cTL = document.createElement('span');
+    cTL.className = 'vm-scope-corner vm-sc-tl';
+    const cTR = document.createElement('span');
+    cTR.className = 'vm-scope-corner vm-sc-tr';
+    const cBL = document.createElement('span');
+    cBL.className = 'vm-scope-corner vm-sc-bl';
+    const cBR = document.createElement('span');
+    cBR.className = 'vm-scope-corner vm-sc-br';
+    this.scopeBracketsEl.append(cTL, cTR, cBL, cBR);
+
+    const centerDot = document.createElement('span');
+    centerDot.className = 'vm-scope-dot';
+
+    this.scopeResultEl = document.createElement('div');
+    this.scopeResultEl.className = 'vm-scope-result is-hidden';
+
+    reticle.append(hline, vline, this.scopeBracketsEl, centerDot, this.scopeResultEl);
+
+    const scopeMeta = document.createElement('div');
+    scopeMeta.className = 'vm-slab vm-scope-meta';
+
+    this.scopeTargetEl = document.createElement('span');
+    this.scopeTargetEl.className = 'vm-scope-target';
+
+    const scopeBar = document.createElement('div');
+    scopeBar.className = 'vm-scope-bar';
+    this.scopeFillEl = document.createElement('div');
+    this.scopeFillEl.className = 'vm-scope-fill';
+    scopeBar.appendChild(this.scopeFillEl);
+
+    scopeMeta.append(this.scopeTargetEl, scopeBar);
+    this.scopeLayerEl.append(reticle, scopeMeta);
 
     // -----------------------------------------------------------------------
     // 3. TOP-RIGHT PACK STANDINGS + VERTICAL HIGHWAY RADAR
@@ -480,8 +682,17 @@ export class Hud {
         dist,
         ko,
         koVal,
-        lastKey: '',
+        visible: false,
+        lastRank: -1,
+        lastOwnerId: '',
+        lastName: '',
+        lastDistTenth: -1,
+        lastKos: -1,
+        lastBorderColor: '',
         lastAvatarIdx: -1,
+        lastAvatarVer: -1,
+        lastIsLocal: false,
+        lastIsBot: false,
       });
     }
 
@@ -497,22 +708,22 @@ export class Hud {
     capBot.className = 'vm-radar-cap vm-radar-cap-bot';
     capBot.textContent = '-40';
 
-    const radarTrack = document.createElement('div');
-    radarTrack.className = 'vm-radar';
+    this.radarTrackEl = document.createElement('div');
+    this.radarTrackEl.className = 'vm-radar';
 
     this.radarLocalEl = document.createElement('span');
     this.radarLocalEl.className = 'vm-radar-local';
-    radarTrack.appendChild(this.radarLocalEl);
+    this.radarTrackEl.appendChild(this.radarLocalEl);
 
     for (let i = 0; i < RADAR_POOL; i++) {
       const dot = document.createElement('span');
       dot.className = 'vm-radar-dot is-hidden';
-      radarTrack.appendChild(dot);
+      this.radarTrackEl.appendChild(dot);
       this.radarDots.push({
         el: dot,
         visible: false,
-        topPx: -1,
-        leftPct: -1,
+        xPx: -999,
+        yPx: -999,
         color: '',
         clamped: false,
       });
@@ -521,14 +732,34 @@ export class Hud {
     this.radarDeltaEl = document.createElement('span');
     this.radarDeltaEl.className = 'vm-radar-delta is-hidden';
 
-    radarWrap.append(capTop, capBot, this.radarDeltaEl, radarTrack);
+    radarWrap.append(capTop, capBot, this.radarDeltaEl, this.radarTrackEl);
     topRight.append(standingsEl, radarWrap);
 
     // -----------------------------------------------------------------------
-    // 4. BOTTOM-RIGHT SPEED & COMBAT CLUSTER
+    // 4. BOTTOM-RIGHT WHEELIE CHARGE, SPEED, BARS, ITEM SLOT & WEAPONS
     // -----------------------------------------------------------------------
     const bottomRight = document.createElement('div');
     bottomRight.className = 'vm-bottom-right';
+
+    // Wheelie Charge & Over-Flip Danger Bar
+    this.wheelieWrapEl = document.createElement('div');
+    this.wheelieWrapEl.className = 'vm-slab vm-wheelie-wrap';
+
+    this.wheelieTagEl = document.createElement('span');
+    this.wheelieTagEl.className = 'vm-wheelie-tag';
+    this.wheelieTagEl.textContent = 'WHEELIE';
+
+    const wheelieTrack = document.createElement('div');
+    wheelieTrack.className = 'vm-wheelie-track';
+    this.wheelieFillEl = document.createElement('div');
+    this.wheelieFillEl.className = 'vm-wheelie-fill';
+    const markSlam = document.createElement('span');
+    markSlam.className = 'vm-wheelie-mark vm-wheelie-mark-slam';
+    const markFlip = document.createElement('span');
+    markFlip.className = 'vm-wheelie-mark vm-wheelie-mark-flip';
+    wheelieTrack.append(this.wheelieFillEl, markSlam, markFlip);
+
+    this.wheelieWrapEl.append(this.wheelieTagEl, wheelieTrack);
 
     const speedHeader = document.createElement('div');
     speedHeader.className = 'vm-speed-header';
@@ -590,7 +821,36 @@ export class Hud {
 
     gaugesEl.append(nitroRow, hpRow);
 
-    // Weapon selector chips
+    // Combat Bar: Active Powerup Item Slot + Weapon Selector Chips
+    const combatBar = document.createElement('div');
+    combatBar.className = 'vm-combat-bar';
+
+    this.itemSlotBtnEl = document.createElement('button');
+    this.itemSlotBtnEl.type = 'button';
+    this.itemSlotBtnEl.className = 'vm-item-slot';
+    this.itemSlotBtnEl.disabled = true;
+    this.itemSlotBtnEl.title = 'Use Item (R)';
+
+    this.itemKeyEl = document.createElement('span');
+    this.itemKeyEl.className = 'vm-item-key';
+    this.itemKeyEl.textContent = 'R';
+
+    this.itemIconEl = document.createElement('span');
+    this.itemIconEl.className = 'vm-item-icon';
+    this.itemIconEl.textContent = '·';
+
+    this.itemNameEl = document.createElement('span');
+    this.itemNameEl.className = 'vm-item-name';
+    this.itemNameEl.textContent = '--';
+
+    this.itemSlotBtnEl.append(this.itemKeyEl, this.itemIconEl, this.itemNameEl);
+    this.itemSlotBtnEl.addEventListener('click', () => {
+      if (!this.itemSlotBtnEl.disabled) {
+        this.callbacks.onUseItem();
+      }
+      this.itemSlotBtnEl.blur();
+    });
+
     const weaponsEl = document.createElement('div');
     weaponsEl.className = 'vm-weapons';
     for (let i = 0; i < WEAPONS.length; i++) {
@@ -617,7 +877,8 @@ export class Hud {
       weaponsEl.appendChild(chip);
     }
 
-    bottomRight.append(speedHeader, gaugesEl, weaponsEl);
+    combatBar.append(this.itemSlotBtnEl, weaponsEl);
+    bottomRight.append(this.wheelieWrapEl, speedHeader, gaugesEl, combatBar);
 
     // -----------------------------------------------------------------------
     // 5. BOTTOM-LEFT KEYCAP HINTS & TOUCH CONTROLS
@@ -626,8 +887,11 @@ export class Hud {
     const touchLayer = this.buildTouchControls();
 
     this.root.append(
-      topLeft,
+      topLeftCol,
       this.toastEl,
+      this.dangerLockEl,
+      this.sniperPickerEl,
+      this.scopeLayerEl,
       topRight,
       bottomRight,
       this.keycapsEl,
@@ -636,6 +900,8 @@ export class Hud {
 
     container.textContent = '';
     container.appendChild(this.root);
+
+    window.addEventListener('resize', this.onWindowResize, { passive: true });
   }
 
   // -------------------------------------------------------------------------
@@ -655,50 +921,201 @@ export class Hud {
     this.syncRegroupState(status === 'online' && safeCount > 1);
   }
 
+  refreshLocalAvatar(): void {
+    this.lastLocalAvatarVer = this.localRiderId ? getAvatarVersion(this.localRiderId) : -1;
+    this.avatarImgEl.src = this.localRiderId
+      ? getRiderAvatarDataUrl(this.localRiderId, this.currentAvatarIdx, 1)
+      : getAvatarDataUrl(this.currentAvatarIdx, 1);
+    this.syncCustomResetBtn();
+  }
+
+  pushBroadcast(text: string, accent: BroadcastAccent = 'gold'): void {
+    if (!text) return;
+
+    while (this.feedEntries.length >= FEED_SLOTS) {
+      const oldest = this.feedEntries.shift()!;
+      window.clearTimeout(oldest.fadeTimer);
+      window.clearTimeout(oldest.removeTimer);
+    }
+
+    const id = this.nextFeedId++;
+    const entry: FeedEntry = {
+      id,
+      text,
+      accent,
+      fading: false,
+      fadeTimer: window.setTimeout(() => {
+        entry.fading = true;
+        this.renderFeed();
+      }, FEED_DURATION_MS - 300),
+      removeTimer: window.setTimeout(() => {
+        const idx = this.feedEntries.findIndex((e) => e.id === id);
+        if (idx !== -1) {
+          this.feedEntries.splice(idx, 1);
+          this.renderFeed();
+        }
+      }, FEED_DURATION_MS),
+    };
+
+    this.feedEntries.push(entry);
+    this.renderFeed();
+  }
+
+  setSniperState(
+    state: SniperHudState | null,
+    candidates: Array<SniperCandidate>
+  ): void {
+    const phase = state ? state.phase : '';
+
+    if (phase !== this.lastSniperPhase) {
+      this.lastSniperPhase = phase;
+      this.sniperPickerEl.classList.toggle('is-hidden', phase !== 'selecting');
+      const showScope = phase === 'aiming' || phase === 'fired';
+      this.scopeLayerEl.classList.toggle('is-hidden', !showScope);
+      if (!showScope) {
+        this.lastScopeResult = '';
+        this.scopeResultEl.classList.add('is-hidden');
+      }
+    }
+
+    if (phase === 'selecting') {
+      const count = Math.min(SNIPER_SLOTS, candidates.length);
+      for (let i = 0; i < SNIPER_SLOTS; i++) {
+        const ref = this.sniperCards[i];
+        if (i >= count) {
+          if (ref.visible) {
+            ref.visible = false;
+            ref.targetId = '';
+            ref.btn.classList.add('is-hidden');
+          }
+          continue;
+        }
+
+        const c = candidates[i];
+        const avatarIdx = normalizeAvatarIdx(c.avatarIdx);
+        const avatarVer = getAvatarVersion(c.id);
+        const distM = Math.round(c.distM);
+
+        if (!ref.visible) {
+          ref.visible = true;
+          ref.btn.classList.remove('is-hidden');
+        }
+        if (ref.targetId !== c.id || ref.lastAvatarIdx !== avatarIdx || ref.lastAvatarVer !== avatarVer) {
+          ref.targetId = c.id;
+          ref.lastAvatarIdx = avatarIdx;
+          ref.lastAvatarVer = avatarVer;
+          ref.avatar.src = getRiderAvatarDataUrl(c.id, avatarIdx, 1);
+        }
+        if (ref.lastName !== c.name) {
+          ref.lastName = c.name;
+          ref.name.textContent = c.name;
+        }
+        if (ref.lastDistM !== distM) {
+          ref.lastDistM = distM;
+          ref.dist.textContent = formatDeltaMeters(distM);
+        }
+      }
+      return;
+    }
+
+    if (state && (phase === 'aiming' || phase === 'fired')) {
+      const p = Math.max(0, Math.min(1, state.progress));
+      const pPct = Math.round(p * 100);
+      if (pPct !== this.lastScopeProgressPct) {
+        this.lastScopeProgressPct = pPct;
+        const scale = 1.48 - p * 0.48;
+        this.scopeBracketsEl.style.transform = `scale(${scale.toFixed(3)})`;
+        this.scopeFillEl.style.transform = `scaleX(${p.toFixed(3)})`;
+      }
+
+      const hot = phase === 'fired' || p >= 0.78;
+      if (hot !== this.lastScopeHot) {
+        this.lastScopeHot = hot;
+        this.scopeLayerEl.dataset.hot = hot ? '1' : '0';
+      }
+
+      if (state.targetName !== this.lastScopeTarget) {
+        this.lastScopeTarget = state.targetName;
+        this.scopeTargetEl.textContent = `🎯 ${state.targetName}`;
+      }
+
+      const res = phase === 'fired' && state.result ? state.result : '';
+      if (res !== this.lastScopeResult) {
+        this.lastScopeResult = res;
+        if (res) {
+          this.scopeResultEl.classList.remove('is-hidden');
+          this.scopeResultEl.dataset.res = res;
+          this.scopeResultEl.textContent =
+            res === 'HIT' ? 'HIT!' : res === 'DODGED' ? 'DODGED!' : 'MISS';
+        } else {
+          this.scopeResultEl.classList.add('is-hidden');
+        }
+      }
+    }
+  }
+
   update(
     local: RiderRenderState,
     allRiders: RiderRenderState[],
     pressedKeys: Set<string>,
     dt: number
   ): void {
-    // 1. Keycaps: instant bitmask dirty-check (zero DOM work unless keys change)
+    // 1. Keycaps: zero-allocation bitmask check (0 DOM ops when steady)
     this.updateKeycaps(pressedKeys, local.speed, dt);
 
-    // 2. Throttle heavier HUD updates to ~20Hz
-    this.uiAccum += dt;
-    if (this.uiAccum < HUD_UPDATE_INTERVAL) return;
-    this.uiAccum = 0;
+    // 2. Fast cadence (~15Hz): speed, nitro, HP, weapons, item, wheelie, incoming lock, avatar sync
+    this.fastAccum += dt;
+    if (this.fastAccum >= FAST_UPDATE_INTERVAL) {
+      this.fastAccum = 0;
 
-    // Sync local nameplate name/color/avatar if externally updated
-    if (!this.editingName && local.name && local.name !== this.currentName) {
-      this.currentName = local.name.slice(0, 14);
-      this.nameTextEl.textContent = this.currentName;
-    }
-    if (local.colorIdx !== this.currentColorIdx) {
-      this.currentColorIdx = local.colorIdx;
-      this.avatarBtnEl.style.borderColor = getRiderColor(local.colorIdx, false);
-    }
-    const localAvatarIdx = normalizeAvatarIdx(local.avatarIdx);
-    if (localAvatarIdx !== this.currentAvatarIdx) {
-      this.selectAvatar(localAvatarIdx, false);
+      if (local.id && local.id !== this.localRiderId) {
+        this.localRiderId = local.id;
+        this.lastLocalAvatarVer = -1;
+      }
+
+      if (!this.editingName && local.name && local.name !== this.currentName) {
+        this.currentName = local.name.slice(0, 14);
+        this.nameTextEl.textContent = this.currentName;
+      }
+      if (local.colorIdx !== this.currentColorIdx) {
+        this.currentColorIdx = local.colorIdx;
+        this.avatarBtnEl.style.borderColor = getRiderColor(local.colorIdx, false);
+      }
+
+      const localAvatarIdx = normalizeAvatarIdx(local.avatarIdx);
+      const localAvatarVer = local.id ? getAvatarVersion(local.id) : 0;
+      if (localAvatarIdx !== this.currentAvatarIdx || localAvatarVer !== this.lastLocalAvatarVer) {
+        this.lastLocalAvatarVer = localAvatarVer;
+        this.selectAvatar(localAvatarIdx, false);
+        this.syncCustomResetBtn();
+      }
+
+      this.updateSpeedAndBars(local);
+      this.updateItemSlot(local.heldItem);
+      this.updateWheelieBar(local.wheelieCharge);
+      this.updateIncomingLock(local.incomingLockName);
     }
 
-    // Check online peer presence from live riders as well
-    let hasRemotePeer = this.connStatus === 'online' && this.onlineCount > 1;
-    if (!hasRemotePeer) {
-      for (let i = 0; i < allRiders.length; i++) {
-        const r = allRiders[i];
-        if (!r.isLocal && !r.isBot) {
-          hasRemotePeer = true;
-          break;
+    // 3. Slow cadence (~9Hz): standings, vertical highway radar & peer presence
+    this.slowAccum += dt;
+    if (this.slowAccum >= SLOW_UPDATE_INTERVAL) {
+      this.slowAccum = 0;
+
+      let hasRemotePeer = this.connStatus === 'online' && this.onlineCount > 1;
+      if (!hasRemotePeer) {
+        for (let i = 0; i < allRiders.length; i++) {
+          const r = allRiders[i];
+          if (!r.isLocal && !r.isBot) {
+            hasRemotePeer = true;
+            break;
+          }
         }
       }
-    }
-    this.syncRegroupState(hasRemotePeer);
+      this.syncRegroupState(hasRemotePeer);
 
-    this.updateSpeedAndBars(local);
-    this.updateStandings(local, allRiders);
-    this.updateRadar(local, allRiders);
+      this.updateStandings(local, allRiders);
+      this.updateRadar(local, allRiders);
+    }
   }
 
   showToast(text: string, accent: ToastAccent = 'gold'): void {
@@ -719,7 +1136,6 @@ export class Hud {
     this.toastEl.dataset.accent = accent;
     this.toastEl.classList.remove('is-visible', 'is-hiding');
 
-    // Trigger crisp stepped entrance on next frame
     this.toastRafId = window.requestAnimationFrame(() => {
       this.toastRafId = null;
       this.toastEl.classList.add('is-visible');
@@ -760,24 +1176,124 @@ export class Hud {
   // PRIVATE BUILDERS & EVENTS
   // -------------------------------------------------------------------------
 
+  private ensureAvatarPopoverBuilt(): void {
+    if (this.avatarPopoverBuilt) return;
+    this.avatarPopoverBuilt = true;
+
+    const grid = document.createElement('div');
+    grid.className = 'vm-avatar-grid';
+
+    for (let i = 0; i < AVATAR_COUNT; i++) {
+      const meta = PIXEL_AVATARS[i];
+      const opt = document.createElement('button');
+      opt.type = 'button';
+      opt.className = i === this.currentAvatarIdx ? 'vm-avatar-opt is-active' : 'vm-avatar-opt';
+      opt.setAttribute('role', 'option');
+      opt.setAttribute('aria-selected', String(i === this.currentAvatarIdx));
+      opt.setAttribute('aria-label', meta ? meta.name : `Avatar ${i + 1}`);
+      if (meta) opt.title = meta.name;
+
+      const img = document.createElement('img');
+      img.className = 'hud-avatar-img vm-avatar-opt-img';
+      img.width = 38;
+      img.height = 38;
+      img.alt = '';
+      img.draggable = false;
+      img.src = getAvatarDataUrl(i, 1);
+
+      opt.appendChild(img);
+      opt.addEventListener('click', (e: MouseEvent) => {
+        e.stopPropagation();
+        this.selectAvatar(i, true);
+        this.setAvatarPopoverOpen(false);
+        opt.blur();
+      });
+
+      this.avatarOptEls.push(opt);
+      grid.appendChild(opt);
+    }
+
+    // Compact upload & reset action row
+    const uploadRow = document.createElement('div');
+    uploadRow.className = 'vm-avatar-upload-row';
+
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = 'image/*';
+    fileInput.className = 'vm-hidden-file';
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      fileInput.value = '';
+      if (file) {
+        this.callbacks.onCustomAvatarUpload(file);
+        this.setAvatarPopoverOpen(false);
+      }
+    });
+
+    const uploadBtn = document.createElement('button');
+    uploadBtn.type = 'button';
+    uploadBtn.className = 'vm-avatar-upload-btn';
+    uploadBtn.textContent = '📷 上传头像';
+    uploadBtn.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      fileInput.click();
+      uploadBtn.blur();
+    });
+
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className = 'vm-avatar-reset-btn is-hidden';
+    resetBtn.textContent = '↺';
+    resetBtn.title = 'Reset avatar';
+    resetBtn.setAttribute('aria-label', 'Reset custom avatar');
+    resetBtn.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      this.callbacks.onClearCustomAvatar();
+      this.refreshLocalAvatar();
+      this.setAvatarPopoverOpen(false);
+      resetBtn.blur();
+    });
+    this.avatarResetBtnEl = resetBtn;
+
+    uploadRow.append(uploadBtn, resetBtn, fileInput);
+    this.avatarPopoverEl.append(grid, uploadRow);
+    this.syncCustomResetBtn();
+  }
+
+  private syncCustomResetBtn(): void {
+    if (!this.avatarResetBtnEl) return;
+    const hasCustom = Boolean(this.localRiderId && getCustomAvatarDataUrl(this.localRiderId));
+    this.avatarResetBtnEl.classList.toggle('is-hidden', !hasCustom);
+  }
+
   private selectAvatar(avatarIdx: number, notify: boolean): void {
     const nextIdx = normalizeAvatarIdx(avatarIdx);
     this.currentAvatarIdx = nextIdx;
-    this.avatarImgEl.src = getAvatarDataUrl(nextIdx, 2);
 
-    for (let i = 0; i < this.avatarOptEls.length; i++) {
-      const active = i === nextIdx;
-      this.avatarOptEls[i].classList.toggle('is-active', active);
-      this.avatarOptEls[i].setAttribute('aria-selected', String(active));
+    if (this.avatarPopoverBuilt) {
+      for (let i = 0; i < this.avatarOptEls.length; i++) {
+        const active = i === nextIdx;
+        this.avatarOptEls[i].classList.toggle('is-active', active);
+        this.avatarOptEls[i].setAttribute('aria-selected', String(active));
+      }
     }
 
     if (notify) {
       this.callbacks.onAvatarChange(nextIdx);
     }
+
+    this.avatarImgEl.src = this.localRiderId
+      ? getRiderAvatarDataUrl(this.localRiderId, nextIdx, 1)
+      : getAvatarDataUrl(nextIdx, 1);
+    this.syncCustomResetBtn();
   }
 
   private setAvatarPopoverOpen(open: boolean): void {
     if (this.avatarPopoverOpen === open) return;
+    if (open) {
+      this.ensureAvatarPopoverBuilt();
+      this.syncCustomResetBtn();
+    }
     this.avatarPopoverOpen = open;
     this.avatarPopoverEl.classList.toggle('is-open', open);
     this.avatarBtnEl.classList.toggle('is-open', open);
@@ -789,6 +1305,21 @@ export class Hud {
     } else {
       document.removeEventListener('pointerdown', this.onDocPointerDown);
       document.removeEventListener('keydown', this.onDocKeyDown, true);
+    }
+  }
+
+  private renderFeed(): void {
+    const count = this.feedEntries.length;
+    for (let i = 0; i < FEED_SLOTS; i++) {
+      const el = this.feedLines[i];
+      if (i >= count) {
+        el.className = 'vm-feed-line is-hidden';
+        continue;
+      }
+      const entry = this.feedEntries[i];
+      el.dataset.accent = entry.accent;
+      el.textContent = entry.text;
+      el.className = entry.fading ? 'vm-feed-line is-fading' : 'vm-feed-line';
     }
   }
 
@@ -975,7 +1506,7 @@ export class Hud {
   }
 
   // -------------------------------------------------------------------------
-  // PRIVATE THROTTLED & DIRTY-CHECKED UPDATERS
+  // PRIVATE THROTTLED & ZERO-ALLOCATION DIRTY-CHECKED UPDATERS
   // -------------------------------------------------------------------------
 
   private updateKeycaps(pressed: Set<string>, speed: number, dt: number): void {
@@ -1010,8 +1541,75 @@ export class Hud {
     }
   }
 
+  private updateItemSlot(heldItem: ItemType | null): void {
+    if (heldItem === this.lastHeldItem) return;
+    this.lastHeldItem = heldItem;
+
+    if (!heldItem) {
+      this.itemSlotBtnEl.disabled = true;
+      this.itemSlotBtnEl.classList.remove('is-ready');
+      this.itemSlotBtnEl.style.borderColor = '';
+      this.itemKeyEl.style.backgroundColor = '';
+      this.itemIconEl.textContent = '·';
+      this.itemNameEl.textContent = '--';
+      return;
+    }
+
+    const spec = ITEM_BY_ID[heldItem];
+    this.itemSlotBtnEl.disabled = false;
+    this.itemSlotBtnEl.classList.add('is-ready');
+    this.itemSlotBtnEl.style.borderColor = spec.color;
+    this.itemKeyEl.style.backgroundColor = spec.color;
+    this.itemIconEl.textContent = spec.icon;
+    this.itemNameEl.textContent = spec.zhName;
+  }
+
+  private updateWheelieBar(charge: number): void {
+    const c = Math.max(0, Math.min(1, charge || 0));
+    const tier = c <= 0.05 ? 0 : c >= 0.8 ? 3 : c >= 0.32 ? 2 : 1;
+
+    if (tier !== this.lastWheelieTier) {
+      this.lastWheelieTier = tier;
+      if (tier === 0) {
+        this.wheelieWrapEl.classList.remove('is-active');
+        return;
+      }
+      this.wheelieWrapEl.classList.add('is-active');
+      if (tier === 3) {
+        this.wheelieWrapEl.dataset.tier = 'danger';
+        this.wheelieTagEl.textContent = '! FLIP';
+      } else if (tier === 2) {
+        this.wheelieWrapEl.dataset.tier = 'slam';
+        this.wheelieTagEl.textContent = '⚡ SLAM';
+      } else {
+        this.wheelieWrapEl.dataset.tier = 'ok';
+        this.wheelieTagEl.textContent = 'WHEELIE';
+      }
+    }
+
+    if (tier === 0) return;
+
+    const pct = Math.round(c * 100);
+    if (pct !== this.lastWheeliePct) {
+      this.lastWheeliePct = pct;
+      this.wheelieFillEl.style.transform = `scaleX(${(pct / 100).toFixed(2)})`;
+    }
+  }
+
+  private updateIncomingLock(lockName: string | null): void {
+    const next = lockName || null;
+    if (next === this.lastIncomingLockName) return;
+    this.lastIncomingLockName = next;
+
+    if (!next) {
+      this.dangerLockEl.classList.add('is-hidden');
+      return;
+    }
+    this.dangerLockEl.textContent = `🎯 ${next} 瞄准中! SPACE躲避`;
+    this.dangerLockEl.classList.remove('is-hidden');
+  }
+
   private updateSpeedAndBars(local: RiderRenderState): void {
-    // Speed readout
     const kmh = Math.max(0, Math.round(local.speed * 3.6));
     if (kmh !== this.lastSpeedKmh) {
       this.lastSpeedKmh = kmh;
@@ -1030,7 +1628,6 @@ export class Hud {
       this.speedValEl.dataset.tier = speedTier;
     }
 
-    // Nitro segments
     const nitroClamped = Math.max(0, Math.min(100, local.nitro));
     const nitroLit =
       nitroClamped <= 0 ? 0 : Math.min(BAR_SEGMENTS, Math.ceil((nitroClamped / 100) * BAR_SEGMENTS));
@@ -1045,7 +1642,6 @@ export class Hud {
       this.nitroTrackEl.classList.toggle('is-nitro-active', local.nitroActive);
     }
 
-    // HP segments
     const hpClamped = Math.max(0, Math.min(100, local.hp));
     const hpLit =
       hpClamped <= 0 ? 0 : Math.min(BAR_SEGMENTS, Math.ceil((hpClamped / 100) * BAR_SEGMENTS));
@@ -1062,13 +1658,11 @@ export class Hud {
       this.hpTagEl.dataset.tier = hpTier;
     }
 
-    // Active weapon + swing accent
     const swinging = local.attackSide !== 0;
     if (local.weapon !== this.lastWeapon || swinging !== this.lastSwinging) {
       this.applyWeaponHighlight(local.weapon, swinging);
     }
 
-    // KO tally
     const kos = Math.max(0, Math.floor(local.kos));
     if (kos !== this.lastKos) {
       const increased = this.lastKos >= 0 && kos > this.lastKos;
@@ -1109,7 +1703,7 @@ export class Hud {
     }
     if (!hasLocal) buf.push(local);
 
-    buf.sort((a, b) => b.s - a.s);
+    buf.sort(compareByDistanceDesc);
 
     const total = buf.length;
     let localRankIdx = -1;
@@ -1124,57 +1718,99 @@ export class Hud {
     for (let slot = 0; slot < STANDINGS_SLOTS; slot++) {
       const ref = this.standingRows[slot];
       if (slot >= rowCount) {
-        if (ref.lastKey !== 'HIDDEN') {
-          ref.lastKey = 'HIDDEN';
+        if (ref.visible) {
+          ref.visible = false;
           ref.root.classList.add('is-hidden');
         }
         continue;
       }
 
-      // Always keep local player visible in slot 4 if outside top 5
       const riderIdx =
         slot === STANDINGS_SLOTS - 1 && localRankIdx >= STANDINGS_SLOTS ? localRankIdx : slot;
       const rider = buf[riderIdx];
       const rankNum = riderIdx + 1;
       const isLocal = rider.isLocal || rider.id === local.id;
-      const distStr = formatDistanceKm(rider.s);
-      const color = getRiderColor(rider.colorIdx, rider.isBot);
+      const isBot = rider.isBot && !isLocal;
+      const distTenth = Math.round(Math.max(0, rider.s) / 100);
+      const borderColor = isLocal ? '#ffd166' : getRiderColor(rider.colorIdx, rider.isBot);
       const avatarIdx = normalizeAvatarIdx(rider.avatarIdx);
+      const avatarVer = getAvatarVersion(rider.id);
       const kos = Math.max(0, Math.floor(rider.kos));
 
-      const key = `${rankNum}|${rider.name}|${distStr}|${kos}|${color}|${avatarIdx}|${isLocal ? 1 : 0}|${rider.isBot ? 1 : 0}`;
-      if (ref.lastKey === key) continue;
-      ref.lastKey = key;
-
-      ref.root.classList.remove('is-hidden');
-      ref.root.classList.toggle('is-local', isLocal);
-      ref.root.classList.toggle('is-bot', rider.isBot && !isLocal);
-      ref.root.dataset.rank = String(rankNum);
-
-      ref.rank.textContent = `#${rankNum}`;
-      if (ref.lastAvatarIdx !== avatarIdx) {
-        ref.lastAvatarIdx = avatarIdx;
-        ref.avatar.src = getAvatarDataUrl(avatarIdx, 1);
+      if (!ref.visible) {
+        ref.visible = true;
+        ref.root.classList.remove('is-hidden');
       }
-      ref.avatar.style.borderColor = isLocal ? '#ffd166' : color;
-      ref.name.textContent = rider.name;
-      ref.dist.textContent = distStr;
-
-      if (kos > 0) {
-        ref.ko.classList.remove('is-hidden');
-        ref.koVal.textContent = String(kos);
-      } else {
-        ref.ko.classList.add('is-hidden');
+      if (ref.lastIsLocal !== isLocal) {
+        ref.lastIsLocal = isLocal;
+        ref.root.classList.toggle('is-local', isLocal);
+      }
+      if (ref.lastIsBot !== isBot) {
+        ref.lastIsBot = isBot;
+        ref.root.classList.toggle('is-bot', isBot);
+      }
+      if (ref.lastRank !== rankNum) {
+        ref.lastRank = rankNum;
+        ref.root.dataset.rank = String(rankNum);
+        ref.rank.textContent = `#${rankNum}`;
+      }
+      if (
+        ref.lastOwnerId !== rider.id ||
+        ref.lastAvatarIdx !== avatarIdx ||
+        ref.lastAvatarVer !== avatarVer
+      ) {
+        ref.lastOwnerId = rider.id;
+        ref.lastAvatarIdx = avatarIdx;
+        ref.lastAvatarVer = avatarVer;
+        ref.avatar.src = getRiderAvatarDataUrl(rider.id, avatarIdx, 1);
+      }
+      if (ref.lastBorderColor !== borderColor) {
+        ref.lastBorderColor = borderColor;
+        ref.avatar.style.borderColor = borderColor;
+      }
+      if (ref.lastName !== rider.name) {
+        ref.lastName = rider.name;
+        ref.name.textContent = rider.name;
+      }
+      if (ref.lastDistTenth !== distTenth) {
+        ref.lastDistTenth = distTenth;
+        ref.dist.textContent = `${(distTenth / 10).toFixed(1)}km`;
+      }
+      if (ref.lastKos !== kos) {
+        const wasZero = ref.lastKos <= 0;
+        ref.lastKos = kos;
+        if (kos > 0) {
+          if (wasZero) ref.ko.classList.remove('is-hidden');
+          ref.koVal.textContent = String(kos);
+        } else if (!wasZero) {
+          ref.ko.classList.add('is-hidden');
+        }
       }
     }
   }
 
   private updateRadar(local: RiderRenderState, allRiders: RiderRenderState[]): void {
-    // Position local rider horizontally within lane bounds (-9..+9m -> 22%..78%)
-    const localLeft = Math.round(50 + Math.max(-1, Math.min(1, local.x / 9)) * 28);
-    if (localLeft !== this.lastLocalRadarLeft) {
-      this.lastLocalRadarLeft = localLeft;
-      this.radarLocalEl.style.left = `${localLeft}%`;
+    if (this.radarDimsDirty) {
+      this.radarDimsDirty = false;
+      const cw = this.radarTrackEl.clientWidth;
+      const ch = this.radarTrackEl.clientHeight;
+      if (cw > 0 && ch > 0) {
+        this.radarInnerW = cw;
+        this.radarInnerH = ch;
+        this.radarOuterH = ch + 4;
+      }
+    }
+
+    const w = this.radarInnerW;
+    const h = this.radarInnerH;
+
+    const localNormX = Math.max(-1, Math.min(1, local.x / 9));
+    const localX = Math.round((0.5 + localNormX * 0.28) * w - 5);
+    const localY = Math.round(h * 0.5 - 5);
+    if (localX !== this.lastLocalRadarX || localY !== this.lastLocalRadarY) {
+      this.lastLocalRadarX = localX;
+      this.lastLocalRadarY = localY;
+      this.radarLocalEl.style.transform = `translate3d(${localX}px, ${localY}px, 0)`;
     }
 
     let dotIdx = 0;
@@ -1199,9 +1835,12 @@ export class Hud {
 
       const clamped = absDs > RADAR_RANGE_M;
       const dsClamped = Math.max(-RADAR_RANGE_M, Math.min(RADAR_RANGE_M, ds));
-      // 0m -> 50%, +40m -> 6%, -40m -> 94%
-      const topPct = Math.round(50 - (dsClamped / RADAR_RANGE_M) * 44);
-      const leftPct = Math.round(50 + Math.max(-1, Math.min(1, r.x / 9)) * 28);
+      const normY = 0.5 - (dsClamped / RADAR_RANGE_M) * 0.44;
+      const normX = Math.max(-1, Math.min(1, r.x / 9));
+      const halfW = clamped ? 3 : 4;
+      const halfH = clamped ? 2 : 4;
+      const xPx = Math.round((0.5 + normX * 0.28) * w - halfW);
+      const yPx = Math.round(normY * h - halfH);
       const color = getRiderColor(r.colorIdx, r.isBot);
 
       const d = this.radarDots[dotIdx++];
@@ -1209,21 +1848,18 @@ export class Hud {
         d.visible = true;
         d.el.classList.remove('is-hidden');
       }
-      if (d.topPx !== topPct) {
-        d.topPx = topPct;
-        d.el.style.top = `${topPct}%`;
+      if (d.clamped !== clamped) {
+        d.clamped = clamped;
+        d.el.classList.toggle('is-clamped', clamped);
       }
-      if (d.leftPct !== leftPct) {
-        d.leftPct = leftPct;
-        d.el.style.left = `${leftPct}%`;
+      if (d.xPx !== xPx || d.yPx !== yPx) {
+        d.xPx = xPx;
+        d.yPx = yPx;
+        d.el.style.transform = `translate3d(${xPx}px, ${yPx}px, 0)`;
       }
       if (d.color !== color) {
         d.color = color;
         d.el.style.backgroundColor = color;
-      }
-      if (d.clamped !== clamped) {
-        d.clamped = clamped;
-        d.el.classList.toggle('is-clamped', clamped);
       }
     }
 
@@ -1235,37 +1871,35 @@ export class Hud {
       }
     }
 
-    // Closest rival delta tag
     if (!closestRival) {
-      if (this.lastDeltaText !== '') {
-        this.lastDeltaText = '';
+      if (this.lastDeltaState !== 0) {
+        this.lastDeltaState = 0;
         this.radarDeltaEl.classList.add('is-hidden');
       }
       return;
     }
 
-    const deltaText = formatDeltaMeters(closestDs);
-    const dsClamped = Math.max(-RADAR_RANGE_M, Math.min(RADAR_RANGE_M, closestDs));
-    const deltaTop = Math.round(50 - (dsClamped / RADAR_RANGE_M) * 42);
     const rounded = Math.round(closestDs);
-    const deltaClass =
-      rounded === 0
-        ? 'vm-radar-delta is-even'
-        : rounded < 0
-          ? 'vm-radar-delta is-behind'
-          : 'vm-radar-delta';
+    const deltaState = rounded === 0 ? 2 : rounded < 0 ? 3 : 1;
+    if (this.lastDeltaState !== deltaState) {
+      this.lastDeltaState = deltaState;
+      this.radarDeltaEl.className =
+        deltaState === 2
+          ? 'vm-radar-delta is-even'
+          : deltaState === 3
+            ? 'vm-radar-delta is-behind'
+            : 'vm-radar-delta';
+    }
+    if (this.lastDeltaMeters !== rounded) {
+      this.lastDeltaMeters = rounded;
+      this.radarDeltaEl.textContent = formatDeltaMeters(rounded);
+    }
 
-    if (this.lastDeltaText !== deltaText) {
-      this.lastDeltaText = deltaText;
-      this.radarDeltaEl.textContent = deltaText;
-    }
-    if (this.lastDeltaClass !== deltaClass) {
-      this.lastDeltaClass = deltaClass;
-      this.radarDeltaEl.className = deltaClass;
-    }
-    if (this.lastDeltaTop !== deltaTop) {
-      this.lastDeltaTop = deltaTop;
-      this.radarDeltaEl.style.top = `${deltaTop}%`;
+    const dsClamped = Math.max(-RADAR_RANGE_M, Math.min(RADAR_RANGE_M, closestDs));
+    const deltaY = Math.round((0.5 - (dsClamped / RADAR_RANGE_M) * 0.42) * this.radarOuterH - 9);
+    if (this.lastDeltaY !== deltaY) {
+      this.lastDeltaY = deltaY;
+      this.radarDeltaEl.style.transform = `translate3d(0, ${deltaY}px, 0)`;
     }
   }
 }

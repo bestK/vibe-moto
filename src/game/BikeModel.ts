@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { BIKE_PALETTES, BOT_PALETTE, BikePalette, RiderRenderState, WeaponType } from './types';
+import { getAvatarVersion } from './PixelAvatars';
 import { drawNameplateCanvas, getPixelAtlas } from './PixelTextures';
 
 // Shared geometries (allocated once, reused by all players & bots)
@@ -9,6 +10,7 @@ let _sharedGeos: {
   chassis: THREE.BoxGeometry;
   tank: THREE.BoxGeometry;
   nose: THREE.BoxGeometry;
+  stripe: THREE.BoxGeometry;
   windshield: THREE.BoxGeometry;
   seat: THREE.BoxGeometry;
   tail: THREE.BoxGeometry;
@@ -18,13 +20,17 @@ let _sharedGeos: {
   light: THREE.BoxGeometry;
   flame: THREE.ConeGeometry;
   torso: THREE.BoxGeometry;
+  backStripe: THREE.BoxGeometry;
   head: THREE.BoxGeometry;
   visor: THREE.BoxGeometry;
   arm: THREE.BoxGeometry;
   leg: THREE.BoxGeometry;
   batHandle: THREE.BoxGeometry;
   batHead: THREE.BoxGeometry;
+  batSpike: THREE.BoxGeometry;
   chainLink: THREE.BoxGeometry;
+  chainWeight: THREE.BoxGeometry;
+  auraRing: THREE.RingGeometry;
   shadow: THREE.PlaneGeometry;
 } | null = null;
 
@@ -40,12 +46,16 @@ function getSharedGeos() {
   const shadow = new THREE.PlaneGeometry(1.15, 2.35);
   shadow.rotateX(-Math.PI / 2);
 
+  const auraRing = new THREE.RingGeometry(0.95, 1.35, 16);
+  auraRing.rotateX(-Math.PI / 2);
+
   _sharedGeos = {
     wheel,
     tireRim: new THREE.BoxGeometry(0.28, 0.14, 0.14),
     chassis: new THREE.BoxGeometry(0.46, 0.42, 1.38),
     tank: new THREE.BoxGeometry(0.48, 0.26, 0.62),
     nose: new THREE.BoxGeometry(0.44, 0.36, 0.52),
+    stripe: new THREE.BoxGeometry(0.14, 0.38, 0.54),
     windshield: new THREE.BoxGeometry(0.38, 0.24, 0.18),
     seat: new THREE.BoxGeometry(0.38, 0.14, 0.62),
     tail: new THREE.BoxGeometry(0.36, 0.22, 0.48),
@@ -55,16 +65,31 @@ function getSharedGeos() {
     light: new THREE.BoxGeometry(0.28, 0.12, 0.08),
     flame,
     torso: new THREE.BoxGeometry(0.48, 0.58, 0.32),
+    backStripe: new THREE.BoxGeometry(0.16, 0.5, 0.05),
     head: new THREE.BoxGeometry(0.36, 0.36, 0.38),
     visor: new THREE.BoxGeometry(0.34, 0.14, 0.12),
     arm: new THREE.BoxGeometry(0.15, 0.46, 0.15),
     leg: new THREE.BoxGeometry(0.18, 0.52, 0.2),
     batHandle: new THREE.BoxGeometry(0.07, 0.36, 0.07),
     batHead: new THREE.BoxGeometry(0.13, 0.54, 0.13),
+    batSpike: new THREE.BoxGeometry(0.18, 0.08, 0.18),
     chainLink: new THREE.BoxGeometry(0.1, 0.14, 0.1),
+    chainWeight: new THREE.BoxGeometry(0.18, 0.18, 0.18),
+    auraRing,
     shadow,
   };
   return _sharedGeos;
+}
+
+let _sharedWheelMat: THREE.MeshLambertMaterial | null = null;
+function getSharedWheelMat(): THREE.MeshLambertMaterial {
+  if (!_sharedWheelMat) {
+    _sharedWheelMat = new THREE.MeshLambertMaterial({
+      map: getPixelAtlas().wheel,
+      flatShading: true,
+    });
+  }
+  return _sharedWheelMat;
 }
 
 const _shadowMat = new THREE.MeshBasicMaterial({
@@ -92,6 +117,8 @@ export class BikeVisual {
   private readonly flameL: THREE.Mesh;
   private readonly flameR: THREE.Mesh;
   private readonly shadowMesh: THREE.Mesh;
+  private readonly auraMesh: THREE.Mesh;
+  private readonly auraMat: THREE.MeshBasicMaterial;
 
   // Articulated rider
   private readonly riderGroup = new THREE.Group();
@@ -113,19 +140,19 @@ export class BikeVisual {
   private readonly helmetMat: THREE.MeshLambertMaterial;
   private readonly visorMat: THREE.MeshBasicMaterial;
 
-  // Nameplate sprite
-  private readonly plateCanvas: HTMLCanvasElement;
-  private readonly plateTex: THREE.CanvasTexture;
-  private readonly plateSprite: THREE.Sprite;
+  // Nameplate sprite (allocated only when showNameplate is true)
+  private readonly plateCanvas: HTMLCanvasElement | null = null;
+  private readonly plateTex: THREE.CanvasTexture | null = null;
+  private readonly plateSprite: THREE.Sprite | null = null;
   private lastPlateName = '';
   private lastPlateHp = -1;
   private lastPlateAvatar = -1;
+  private lastPlateAvatarVer = -1;
   private lastColorIdx = -1;
   private isBot = false;
 
   constructor(palette: BikePalette, showNameplate: boolean) {
     const geos = getSharedGeos();
-    const atlas = getPixelAtlas();
 
     this.primaryMat = new THREE.MeshLambertMaterial({ color: palette.primary, flatShading: true });
     this.secondaryMat = new THREE.MeshLambertMaterial({ color: palette.secondary, flatShading: true });
@@ -135,12 +162,25 @@ export class BikeVisual {
     this.visorMat = new THREE.MeshBasicMaterial({ color: palette.visor });
     this.brakeLightMat = new THREE.MeshBasicMaterial({ color: 0xff2a44 });
 
-    const wheelMat = new THREE.MeshLambertMaterial({ map: atlas.wheel, flatShading: true });
+    const wheelMat = getSharedWheelMat();
 
     // Ground contact shadow
     this.shadowMesh = new THREE.Mesh(geos.shadow, _shadowMat);
     this.shadowMesh.position.y = 0.04;
     this.root.add(this.shadowMesh);
+
+    // Powerup aura ring (magnet cyan / turbo shield gold)
+    this.auraMat = new THREE.MeshBasicMaterial({
+      color: 0x00f5d4,
+      transparent: true,
+      opacity: 0.72,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    this.auraMesh = new THREE.Mesh(geos.auraRing, this.auraMat);
+    this.auraMesh.position.y = 0.12;
+    this.auraMesh.visible = false;
+    this.root.add(this.auraMesh);
 
     this.root.add(this.bikePivot);
 
@@ -184,7 +224,7 @@ export class BikeVisual {
     nose.rotation.x = 0.16;
     this.bikePivot.add(nose);
 
-    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.38, 0.54), this.accentMat);
+    const stripe = new THREE.Mesh(geos.stripe, this.accentMat);
     stripe.position.set(0, 0.81, -0.68);
     stripe.rotation.x = 0.16;
     this.bikePivot.add(stripe);
@@ -253,7 +293,7 @@ export class BikeVisual {
     this.torsoGroup.add(torso);
 
     // Racing stripe on rider's back
-    const backStripe = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.5, 0.05), this.accentMat);
+    const backStripe = new THREE.Mesh(geos.backStripe, this.accentMat);
     backStripe.position.set(0, 0.28, 0.11);
     backStripe.rotation.x = -0.42;
     this.torsoGroup.add(backStripe);
@@ -316,27 +356,28 @@ export class BikeVisual {
     legR.rotation.x = 0.45;
     this.rightLegPivot.add(legR);
 
-    // Floating crisp pixel nameplate sprite
-    this.plateCanvas = document.createElement('canvas');
-    this.plateCanvas.width = 256;
-    this.plateCanvas.height = 64;
-    this.plateTex = new THREE.CanvasTexture(this.plateCanvas);
-    this.plateTex.magFilter = THREE.NearestFilter;
-    this.plateTex.minFilter = THREE.NearestFilter;
-    this.plateTex.generateMipmaps = false;
-    this.plateTex.colorSpace = THREE.SRGBColorSpace;
+    // Floating crisp pixel nameplate sprite (192x48 saves ~44% VRAM; skipped for local player)
+    if (showNameplate) {
+      this.plateCanvas = document.createElement('canvas');
+      this.plateCanvas.width = 192;
+      this.plateCanvas.height = 48;
+      this.plateTex = new THREE.CanvasTexture(this.plateCanvas);
+      this.plateTex.magFilter = THREE.NearestFilter;
+      this.plateTex.minFilter = THREE.NearestFilter;
+      this.plateTex.generateMipmaps = false;
+      this.plateTex.colorSpace = THREE.SRGBColorSpace;
 
-    const plateMat = new THREE.SpriteMaterial({
-      map: this.plateTex,
-      transparent: true,
-      depthTest: true,
-      depthWrite: false,
-    });
-    this.plateSprite = new THREE.Sprite(plateMat);
-    this.plateSprite.position.set(0, 2.38, 0.1);
-    this.plateSprite.scale.set(2.8, 0.7, 1);
-    this.plateSprite.visible = showNameplate;
-    this.root.add(this.plateSprite);
+      const plateMat = new THREE.SpriteMaterial({
+        map: this.plateTex,
+        transparent: true,
+        depthTest: true,
+        depthWrite: false,
+      });
+      this.plateSprite = new THREE.Sprite(plateMat);
+      this.plateSprite.position.set(0, 2.38, 0.1);
+      this.plateSprite.scale.set(2.8, 0.7, 1);
+      this.root.add(this.plateSprite);
+    }
   }
 
   private createBatMesh(): THREE.Group {
@@ -348,7 +389,7 @@ export class BikeVisual {
     const head = new THREE.Mesh(geos.batHead, _batMat);
     head.position.y = -0.58;
     g.add(head);
-    const spike = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.08, 0.18), _metalMat);
+    const spike = new THREE.Mesh(geos.batSpike, _metalMat);
     spike.position.y = -0.74;
     g.add(spike);
     g.rotation.x = -Math.PI * 0.42;
@@ -364,7 +405,7 @@ export class BikeVisual {
       link.rotation.y = (i % 2) * (Math.PI / 2);
       g.add(link);
     }
-    const weight = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.18), _metalMat);
+    const weight = new THREE.Mesh(geos.chainWeight, _metalMat);
     weight.position.y = -1.1;
     g.add(weight);
     g.rotation.x = -Math.PI * 0.45;
@@ -411,12 +452,25 @@ export class BikeVisual {
     // Brake light intensifies on braking
     this.brakeLightMat.color.setHex(state.braking ? 0xff4d6d : 0x991b2b);
 
+    // Powerup aura ring (turbo shield gold takes priority over magnet cyan)
+    if (!state.crashed && (state.turboShieldTimer > 0 || state.magnetTimer > 0)) {
+      this.auraMesh.visible = true;
+      const isTurbo = state.turboShieldTimer > 0;
+      this.auraMat.color.setHex(isTurbo ? 0xffd166 : 0x00f5d4);
+      const pulse = 1.0 + 0.14 * Math.sin(timeSec * (isTurbo ? 24 : 16));
+      this.auraMesh.scale.set(pulse, 1, pulse);
+      this.auraMesh.rotation.y = timeSec * (isTurbo ? 8 : 5);
+      this.auraMesh.position.y = 0.12 + state.y;
+    } else {
+      this.auraMesh.visible = false;
+    }
+
     // Nitro exhaust flames
-    const showFlames = state.nitroActive && !state.crashed;
+    const showFlames = (state.nitroActive || state.turboShieldTimer > 0) && !state.crashed;
     this.flameL.visible = showFlames;
     this.flameR.visible = showFlames;
     if (showFlames) {
-      const flicker = 0.8 + 0.45 * Math.sin(timeSec * 48);
+      const flicker = (state.turboShieldTimer > 0 ? 1.35 : 0.8) + 0.45 * Math.sin(timeSec * 48);
       this.flameL.scale.set(1, 1, flicker);
       this.flameR.scale.set(1, 1, flicker * 0.94);
     }
@@ -436,11 +490,14 @@ export class BikeVisual {
       this.riderGroup.rotation.set(-t * 1.8, 0, t * 2.4);
     } else {
       this.bikePivot.position.set(0, state.y, 0);
-      this.bikePivot.rotation.y = 0;
+      // Banana slip 360° spinout
+      this.bikePivot.rotation.y =
+        state.spinOutTimer > 0 ? state.spinOutTimer * Math.PI * 3.8 : 0;
       // Right lean > 0 => negative Z rotation
       this.bikePivot.rotation.z = -state.lean;
-      // Wheelie pitches nose up (+X rotation)
-      this.bikePivot.rotation.x = state.wheelie * 0.42;
+      // Progressive wheelie pitch (+X rotation; dramatic near-vertical raise near flip!)
+      const wheeliePitch = Math.max(state.wheelie * 0.42, state.wheelieCharge * 0.92);
+      this.bikePivot.rotation.x = wheeliePitch;
 
       // Rider hangs slightly further into corner & tucks at high speed
       const speedTuck = Math.min(1, state.speed / 58);
@@ -451,19 +508,30 @@ export class BikeVisual {
       this.updateCombatLimbs(state.weapon, state.attackSide, state.attackPhase);
     }
 
-    // Update nameplate sprite only when name, rounded HP, or avatar changes
-    if (this.plateSprite.visible) {
+    // Update nameplate sprite only when name, rounded HP, avatar index, or custom avatar version changes
+    if (this.plateSprite && this.plateCanvas && this.plateTex) {
       const hpBucket = Math.round(state.hp / 4) * 4;
+      const avatarVer = getAvatarVersion(state.id);
       if (
         state.name !== this.lastPlateName ||
         hpBucket !== this.lastPlateHp ||
-        state.avatarIdx !== this.lastPlateAvatar
+        state.avatarIdx !== this.lastPlateAvatar ||
+        avatarVer !== this.lastPlateAvatarVer
       ) {
         this.lastPlateName = state.name;
         this.lastPlateHp = hpBucket;
         this.lastPlateAvatar = state.avatarIdx;
+        this.lastPlateAvatarVer = avatarVer;
         const p = state.isBot ? BOT_PALETTE : BIKE_PALETTES[Math.abs(state.colorIdx) % BIKE_PALETTES.length];
-        drawNameplateCanvas(this.plateCanvas, state.name, state.hp, p.primary, state.isBot, state.avatarIdx);
+        drawNameplateCanvas(
+          this.plateCanvas,
+          state.name,
+          state.hp,
+          p.primary,
+          state.isBot,
+          state.avatarIdx,
+          state.id
+        );
         this.plateTex.needsUpdate = true;
       }
       this.plateSprite.position.y = 2.38 + state.y;
@@ -528,7 +596,12 @@ export class BikeVisual {
     this.helmetMat.dispose();
     this.visorMat.dispose();
     this.brakeLightMat.dispose();
-    this.plateTex.dispose();
-    (this.plateSprite.material as THREE.SpriteMaterial).dispose();
+    this.auraMat.dispose();
+    if (this.plateTex) {
+      this.plateTex.dispose();
+    }
+    if (this.plateSprite) {
+      (this.plateSprite.material as THREE.SpriteMaterial).dispose();
+    }
   }
 }

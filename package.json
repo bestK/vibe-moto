@@ -9,7 +9,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "mqtt": "^5.10.3",
     "three": "^0.174.0"
   },
   "devDependencies": {

@@ -33,6 +33,15 @@ export interface PlayerCallbacks {
     knockX: number,
     ko: boolean
   ): void;
+  onWheelieSlam?(charge: number, hitsCount: number): void;
+  onWheelieSlamHit?(
+    target: RiderRenderState,
+    dmg: number,
+    knockX: number,
+    ko: boolean,
+    charge: number
+  ): void;
+  onWheelieFlip?(): void;
   onBoostPad(): void;
   onNearMiss(): void;
   onCrash(): void;
@@ -48,7 +57,10 @@ export interface PlayerCallbacks {
 const TOP_SPEED_NORMAL = 58.0; // ~209 km/h
 const TOP_SPEED_NITRO = 74.0; // ~266 km/h
 const TOP_SPEED_BOOST = 78.0;
+const TOP_SPEED_TURBO_SHIELD = 84.0; // ~302 km/h overdrive shield
 const TOP_SPEED_OFFROAD = 37.0;
+const WHEELIE_SPEED_BONUS = 8.5;
+const WHEELIE_CHARGE_RATE = 1 / 1.55; // 0 -> 1.0 over ~1.55s
 const WHEEL_RADIUS = 0.35;
 const WIPEOUT_DURATION = 1.8;
 const REMOUNT_INVULN = 1.8;
@@ -98,6 +110,7 @@ export class PlayerPhysics {
   private vy = 0;
   private hopCooldown = 0;
   private prevWheelieKey = false;
+  private wheelieHoldTime = 0;
   private attackTimer = 0;
   private attackCooldown = 0;
   private pendingSwingSide: 0 | 1 | 2 = 0;
@@ -135,6 +148,12 @@ export class PlayerPhysics {
       invulnTimer: 0,
       wheelAngle: 0,
       kos: 0,
+      heldItem: null,
+      wheelieCharge: 0,
+      magnetTimer: 0,
+      turboShieldTimer: 0,
+      spinOutTimer: 0,
+      incomingLockName: null,
     };
   }
 
@@ -180,16 +199,51 @@ export class PlayerPhysics {
     st.attackPhase = 0;
     st.nitroActive = false;
     st.wheelie = 0;
+    st.wheelieCharge = 0;
+    st.spinOutTimer = 0;
     st.braking = false;
 
     this.vy = 0;
     this.hopCooldown = 0;
+    this.wheelieHoldTime = 0;
     this.attackTimer = 0;
     this.attackCooldown = 0;
     this.pendingSwingSide = 0;
     this.boostPadTimer = 0;
     this.lastBoostSlot = -999;
     this.hitIdsThisSwing.clear();
+  }
+
+  activateTurboShield(duration = 3.5): void {
+    this.state.nitro = 100;
+    this.state.turboShieldTimer = Math.max(this.state.turboShieldTimer, duration);
+    this.state.spinOutTimer = 0;
+  }
+
+  activateMagnet(duration = 5.0): void {
+    this.state.magnetTimer = Math.max(this.state.magnetTimer, duration);
+  }
+
+  applySpinOut(duration = 1.3, dmg = 22): boolean {
+    const st = this.state;
+    if (st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
+    st.spinOutTimer = Math.max(st.spinOutTimer, duration);
+    st.wheelieCharge = 0;
+    st.wheelie = 0;
+    st.speed = Math.max(10, st.speed * 0.62);
+    st.hp = Math.max(0, st.hp - dmg);
+    if (st.hp <= 0) {
+      this.startCrash(st.vx >= 0 ? 8 : -8);
+      return true;
+    }
+    return false;
+  }
+
+  applyPoliceDrag(dt: number, shoveX: number): void {
+    const st = this.state;
+    if (st.crashed || st.turboShieldTimer > 0) return;
+    st.speed = Math.max(11, st.speed * Math.exp(-1.55 * dt));
+    st.vx = clamp(st.vx + shoveX * dt, -16, 16);
   }
 
   triggerAttack(side: 0 | 1 | 2, targets: RiderRenderState[]): void {
@@ -240,7 +294,7 @@ export class PlayerPhysics {
 
   applyExternalHit(dmg: number, knockX: number, forceKo: boolean): boolean {
     const st = this.state;
-    if (st.crashed || st.invulnTimer > 0) return false;
+    if (st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
 
     st.hp = Math.max(0, st.hp - dmg);
     st.vx = clamp(st.vx + knockX, -24, 24);
@@ -260,11 +314,14 @@ export class PlayerPhysics {
     st.hp = 0;
     st.nitroActive = false;
     st.wheelie = 0;
+    st.wheelieCharge = 0;
+    st.spinOutTimer = 0;
     st.braking = false;
     st.attackSide = 0;
     st.attackPhase = 0;
     st.vx = clamp(knockX !== 0 ? knockX : st.vx >= 0 ? 6.5 : -6.5, -18, 18);
     this.vy = 0;
+    this.wheelieHoldTime = 0;
     this.attackTimer = 0;
     this.pendingSwingSide = 0;
     this.boostPadTimer = 0;
@@ -283,6 +340,16 @@ export class PlayerPhysics {
 
     if (st.invulnTimer > 0) {
       st.invulnTimer = Math.max(0, st.invulnTimer - step);
+    }
+    if (st.magnetTimer > 0) {
+      st.magnetTimer = Math.max(0, st.magnetTimer - step);
+    }
+    if (st.turboShieldTimer > 0) {
+      st.turboShieldTimer = Math.max(0, st.turboShieldTimer - step);
+      st.nitro = 100;
+    }
+    if (st.spinOutTimer > 0) {
+      st.spinOutTimer = Math.max(0, st.spinOutTimer - step);
     }
     if (this.attackCooldown > 0) {
       this.attackCooldown = Math.max(0, this.attackCooldown - step);
@@ -366,13 +433,74 @@ export class PlayerPhysics {
       st.nitro = Math.min(100, st.nitro + 2.2 * step);
     }
 
-    // Wheelie / hop (Space)
-    const wheeliePressed = inp.wheelie;
+    // Wheelie charge boost + charge-slam + over-wheelie flip + short-tap hop (Space)
+    const wheeliePressed = inp.wheelie && st.spinOutTimer <= 0;
     const grounded = st.y <= 0.001 && this.vy <= 0;
-    if (wheeliePressed && !this.prevWheelieKey && grounded && this.hopCooldown <= 0) {
-      this.vy = HOP_VELOCITY;
-      st.y = 0.01;
-      st.speed = Math.min(TOP_SPEED_NITRO, st.speed + 2.2);
+
+    if (wheeliePressed && grounded && !inp.brake && st.speed > 7.5) {
+      this.wheelieHoldTime += step;
+      st.wheelieCharge = Math.min(1.0, st.wheelieCharge + WHEELIE_CHARGE_RATE * step);
+      if (st.turboShieldTimer > 0 && st.wheelieCharge > 0.94) {
+        st.wheelieCharge = 0.94;
+      }
+      st.wheelie += (Math.max(0.45, st.wheelieCharge) - st.wheelie) * Math.min(1, step * 12);
+
+      // Over-wheelie flip crash if held past 100%!
+      if (st.wheelieCharge >= 1.0) {
+        this.prevWheelieKey = false;
+        this.startCrash(st.vx >= 0 ? 5.5 : -5.5);
+        cb.onWheelieFlip?.();
+        cb.onCrash();
+        cb.onParticles('crash', st.s, st.x, 0.85, st.speed * 0.32);
+        return;
+      }
+    } else if (!wheeliePressed && this.prevWheelieKey) {
+      if (this.wheelieHoldTime < 0.2 && grounded && this.hopCooldown <= 0 && st.spinOutTimer <= 0) {
+        // Short tap Space (< 0.2s) -> crisp hop to dodge bananas/traps/snipers!
+        this.vy = HOP_VELOCITY;
+        st.y = 0.01;
+        st.speed = Math.min(TOP_SPEED_TURBO_SHIELD, st.speed + 2.2);
+        st.wheelieCharge = 0;
+      } else if (st.wheelieCharge >= 0.32 && grounded) {
+        // Charge-Slam Attack! Slam front wheel down violently
+        const charge = st.wheelieCharge;
+        st.wheelieCharge = 0;
+        st.wheelie = 0;
+        this.hopCooldown = 0.2;
+
+        cb.onParticles('spark', st.s + 1.0, st.x - 1.2, 0.2, st.speed * 0.45);
+        cb.onParticles('spark', st.s + 1.0, st.x + 1.2, 0.2, st.speed * 0.45);
+
+        let slamHits = 0;
+        for (let i = 0; i < targets.length; i++) {
+          const t = targets[i];
+          if (t.id === st.id || t.crashed || t.invulnTimer > 0) continue;
+          const ds = t.s - st.s;
+          if (ds < -2.2 || ds > 4.4) continue;
+          if (Math.abs(t.x - st.x) >= 2.9) continue;
+
+          const dmg = Math.round(28 + charge * 34);
+          const knockDir = t.x >= st.x ? 1 : -1;
+          const knockX = knockDir * (12.0 + charge * 8.0);
+          const ko = charge > 0.78 || t.hp - dmg <= 0;
+          if (ko) {
+            st.kos += 1;
+            st.nitro = Math.min(100, st.nitro + 32);
+          } else {
+            st.nitro = Math.min(100, st.nitro + 12);
+          }
+          slamHits++;
+          cb.onWheelieSlamHit?.(t, dmg, knockX, ko, charge);
+          cb.onParticles('spark', t.s, t.x, 0.85, st.speed * 0.45);
+        }
+        cb.onWheelieSlam?.(charge, slamHits);
+      } else {
+        st.wheelieCharge = 0;
+      }
+      this.wheelieHoldTime = 0;
+    } else if (!wheeliePressed) {
+      this.wheelieHoldTime = 0;
+      st.wheelieCharge = Math.max(0, st.wheelieCharge - step * 3.5);
     }
     this.prevWheelieKey = wheeliePressed;
 
@@ -389,44 +517,50 @@ export class PlayerPhysics {
       }
       const airPitch = this.vy > 0 ? 1.0 : clamp(st.y / 1.1, 0.15, 0.85);
       st.wheelie += (airPitch - st.wheelie) * Math.min(1, step * 14);
-    } else {
-      const targetWheelie = wheeliePressed && st.speed > 10 ? 0.68 : 0;
-      st.wheelie += (targetWheelie - st.wheelie) * Math.min(1, step * 10);
+    } else if (!wheeliePressed) {
+      st.wheelie += (0 - st.wheelie) * Math.min(1, step * 12);
     }
 
-    // Longitudinal acceleration / braking / off-road drag
+    // Longitudinal acceleration / braking / off-road drag / wheelie boost / turbo shield
     const onShoulder = Math.abs(st.x) > ROAD_HALF_WIDTH && st.y < 0.2;
-    const wheelieBonus = st.wheelie > 0.25 && !onShoulder ? 2.5 : 0;
+    const wheelieBoosting = st.wheelieCharge > 0.12 && !onShoulder;
+    const wheelieBonus = wheelieBoosting ? WHEELIE_SPEED_BONUS : 0;
     let topSpeed = TOP_SPEED_NORMAL + wheelieBonus;
-    if (this.boostPadTimer > 0) {
-      topSpeed = TOP_SPEED_BOOST;
+    if (st.turboShieldTimer > 0) {
+      topSpeed = TOP_SPEED_TURBO_SHIELD;
+    } else if (this.boostPadTimer > 0) {
+      topSpeed = TOP_SPEED_BOOST + wheelieBonus * 0.5;
     } else if (st.nitroActive) {
-      topSpeed = TOP_SPEED_NITRO;
+      topSpeed = TOP_SPEED_NITRO + wheelieBonus * 0.5;
     } else if (onShoulder) {
       topSpeed = TOP_SPEED_OFFROAD;
+    }
+    if (st.spinOutTimer > 0) {
+      topSpeed = Math.min(topSpeed, 22.0);
     }
 
     st.braking = inp.brake && st.speed > 0.5;
 
-    if (inp.brake) {
+    if (st.spinOutTimer > 0) {
+      st.speed = Math.max(10, st.speed - 22.0 * step);
+    } else if (inp.brake) {
       st.speed = Math.max(0, st.speed - 44.0 * step);
-    } else if (inp.throttle || st.nitroActive || this.boostPadTimer > 0) {
+    } else if (inp.throttle || st.nitroActive || this.boostPadTimer > 0 || st.turboShieldTimer > 0) {
       const speedRatio = clamp(st.speed / topSpeed, 0, 1.2);
-      // Punchy low-end torque tapering gracefully at top speed
       let accel = 28.0 * (1.08 - 0.68 * Math.min(1, speedRatio));
+      if (wheelieBoosting) accel *= 1.18;
       if (st.nitroActive) accel += 20.0;
       if (this.boostPadTimer > 0) accel += 26.0;
-      if (onShoulder && !st.nitroActive) accel *= 0.55;
+      if (st.turboShieldTimer > 0) accel += 36.0;
+      if (onShoulder && !st.nitroActive && st.turboShieldTimer <= 0) accel *= 0.55;
 
       if (st.speed < topSpeed) {
         st.speed = Math.min(topSpeed, st.speed + accel * step);
       } else {
-        // Excess speed decays smoothly back to cap
         const decay = onShoulder ? 22.0 : 9.5;
         st.speed = Math.max(topSpeed, st.speed - decay * step);
       }
     } else {
-      // Natural coasting drag
       const coastDrag = onShoulder ? 16.0 : st.speed > 18 ? 6.5 : 2.8;
       st.speed = Math.max(0, st.speed - coastDrag * step);
     }
@@ -435,12 +569,14 @@ export class PlayerPhysics {
     const steer = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
     const speedAuthority = clamp(st.speed / 12.0, 0, 1);
     const airFactor = st.y > 0.15 ? 0.48 : 1.0;
-    const steerAccel = steer * 45.0 * (0.45 + 0.72 * speedAuthority) * airFactor;
+    const spinFactor = st.spinOutTimer > 0 ? 0.35 : 1.0;
+    const steerAccel = steer * 45.0 * (0.45 + 0.72 * speedAuthority) * airFactor * spinFactor;
+    const spinWobble = st.spinOutTimer > 0 ? Math.sin(st.spinOutTimer * 22) * 14.0 : 0;
 
     // Positive curvature => road bends right => centrifugal force pushes left (-x)
     const centrifugal = -this._frame.curvature * st.speed * st.speed * 0.46;
 
-    st.vx += (steerAccel + centrifugal) * step;
+    st.vx += (steerAccel + centrifugal + spinWobble) * step;
     const latDamp = steer !== 0 ? 5.6 : 8.8;
     st.vx *= Math.exp(-latDamp * step);
 
@@ -527,6 +663,14 @@ export class PlayerPhysics {
 
         const relSpeed = st.speed - car.speed;
         const pushDir = dx >= 0 ? 1 : -1;
+
+        // Turbo overdrive shield blasts traffic aside without slowing or crashing!
+        if (st.turboShieldTimer > 0) {
+          car.bumpVel += -pushDir * 8.5;
+          st.x = clamp(carX + pushDir * 1.5, -MAX_LATERAL, MAX_LATERAL);
+          cb.onParticles('spark', st.s, (st.x + carX) * 0.5, 0.6, st.speed * 0.5);
+          continue;
+        }
 
         // Hard rear-end slam => wipeout!
         if (st.invulnTimer <= 0 && ds > 0.7 && absDx < 1.02 && relSpeed > 18.0) {
@@ -642,10 +786,16 @@ export class PlayerPhysics {
       }
     }
 
-    // Periodic exhaust / shoulder dust / brake smoke particles
+    // Periodic exhaust / shoulder dust / brake smoke / over-wheelie danger sparks
     this.particleTimer += step;
     if (this.particleTimer >= 0.045) {
-      if (st.nitroActive || this.boostPadTimer > 0) {
+      if (st.wheelieCharge > 0.72) {
+        this.particleTimer = 0;
+        cb.onParticles('spark', st.s - 0.9, st.x, 0.16, st.speed * 0.35);
+      } else if (st.spinOutTimer > 0) {
+        this.particleTimer = 0;
+        cb.onParticles('smoke', st.s - 0.6, st.x, 0.16, st.speed * 0.2);
+      } else if (st.nitroActive || this.boostPadTimer > 0 || st.turboShieldTimer > 0) {
         this.particleTimer = 0;
         cb.onParticles('nitro', st.s - 1.15, st.x, st.y + 0.45, st.speed * 0.25);
       } else if (onShoulder && st.speed > 12) {
