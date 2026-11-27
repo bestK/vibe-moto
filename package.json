@@ -1,0 +1,20 @@
+{
+  "name": "vibe-moto",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.3",
+    "three": "^0.174.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.174.0",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0"
+  }
+}
