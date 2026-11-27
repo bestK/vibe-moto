@@ -667,4 +667,154 @@ export class RetroAudio {
     g.connect(this.masterGain);
     src.start(now, Math.random() * 0.4, 0.9);
   }
+
+  playRageRoar(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    osc1.type = 'sawtooth';
+    osc2.type = 'square';
+    osc1.frequency.setValueAtTime(160, now);
+    osc1.frequency.linearRampToValueAtTime(310, now + 0.16);
+    osc1.frequency.linearRampToValueAtTime(125, now + 0.44);
+    osc2.frequency.setValueAtTime(440, now);
+    osc2.frequency.setValueAtTime(554, now + 0.12);
+    osc2.frequency.setValueAtTime(440, now + 0.24);
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(1500, now);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(0.32, now + 0.03);
+    g.gain.setValueAtTime(0.28, now + 0.32);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.48);
+
+    osc1.connect(lp);
+    osc2.connect(lp);
+    lp.connect(g);
+    g.connect(this.masterGain);
+
+    osc1.start(now);
+    osc2.start(now);
+    osc1.stop(now + 0.5);
+    osc2.stop(now + 0.5);
+  }
+
+  playAnimalSound(species: 'cow' | 'sheep' | 'dog' | 'boar' | 'goose'): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+
+    if (species === 'cow') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(145, now);
+      osc.frequency.linearRampToValueAtTime(118, now + 0.42);
+      g.gain.setValueAtTime(0.001, now);
+      g.gain.linearRampToValueAtTime(0.24, now + 0.06);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.46);
+    } else if (species === 'sheep') {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(390, now);
+      osc.frequency.setValueAtTime(340, now + 0.08);
+      osc.frequency.setValueAtTime(410, now + 0.16);
+      osc.frequency.linearRampToValueAtTime(310, now + 0.34);
+      g.gain.setValueAtTime(0.001, now);
+      g.gain.linearRampToValueAtTime(0.22, now + 0.03);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
+    } else if (species === 'dog') {
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(480, now);
+      osc.frequency.exponentialRampToValueAtTime(220, now + 0.11);
+      osc.frequency.setValueAtTime(520, now + 0.15);
+      osc.frequency.exponentialRampToValueAtTime(240, now + 0.27);
+      g.gain.setValueAtTime(0.2, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.29);
+    } else if (species === 'boar') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(190, now);
+      osc.frequency.exponentialRampToValueAtTime(92, now + 0.25);
+      g.gain.setValueAtTime(0.28, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+    } else {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(660, now);
+      osc.frequency.linearRampToValueAtTime(520, now + 0.18);
+      g.gain.setValueAtTime(0.22, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+    }
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 1400;
+    osc.connect(lp);
+    lp.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.48);
+  }
+
+  playFuelChime(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const notes = [659.25, 880, 1174.66, 1318.5];
+    for (let i = 0; i < notes.length; i++) {
+      const t = now + i * 0.05;
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(notes[i], t);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.001, t);
+      g.gain.linearRampToValueAtTime(0.22, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+      osc.connect(g);
+      g.connect(this.masterGain);
+      osc.start(t);
+      osc.stop(t + 0.17);
+    }
+  }
+
+  playTruckCrash(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.masterGain || !this.noiseBuffer) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    const hornA = ctx.createOscillator();
+    const hornB = ctx.createOscillator();
+    hornA.type = 'sawtooth';
+    hornB.type = 'sawtooth';
+    hornA.frequency.setValueAtTime(185, now);
+    hornB.frequency.setValueAtTime(233, now);
+    const hg = ctx.createGain();
+    hg.gain.setValueAtTime(0.24, now);
+    hg.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    hornA.connect(hg);
+    hornB.connect(hg);
+    hg.connect(this.masterGain);
+    hornA.start(now);
+    hornB.start(now);
+    hornA.stop(now + 0.44);
+    hornB.stop(now + 0.44);
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(1500, now);
+    lp.frequency.exponentialRampToValueAtTime(160, now + 0.48);
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.45, now);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.52);
+    src.connect(lp);
+    lp.connect(ng);
+    ng.connect(this.masterGain);
+    src.start(now, Math.random() * 0.5, 0.54);
+  }
 }

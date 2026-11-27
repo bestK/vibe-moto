@@ -134,6 +134,7 @@ interface StandingRowRefs {
   rank: HTMLSpanElement;
   avatar: HTMLImageElement;
   name: HTMLSpanElement;
+  fire: HTMLSpanElement;
   dist: HTMLSpanElement;
   ko: HTMLSpanElement;
   koVal: HTMLSpanElement;
@@ -149,6 +150,7 @@ interface StandingRowRefs {
   lastAvatarVer: number;
   lastIsLocal: boolean;
   lastIsBot: boolean;
+  lastEnraged: boolean;
 }
 
 interface RadarDotRefs {
@@ -272,6 +274,7 @@ export class Hud {
   private toastHideTimer: number | null = null;
   private toastClearTimer: number | null = null;
   private readonly dangerLockEl: HTMLDivElement;
+  private readonly enragedWarnEl: HTMLDivElement;
   private readonly sniperPickerEl: HTMLDivElement;
   private readonly sniperCards: SniperCardRefs[] = [];
   private readonly scopeLayerEl: HTMLDivElement;
@@ -353,6 +356,7 @@ export class Hud {
   private lastWheeliePct = -1;
   private lastWheelieTier = 0; // 0 hidden, 1 normal, 2 slam, 3 danger
   private lastIncomingLockName: string | null = null;
+  private lastEnragedHunter: string | null = null;
 
   private lastSniperPhase = '';
   private lastScopeProgressPct = -1;
@@ -660,8 +664,16 @@ export class Hud {
     this.toastEl.setAttribute('role', 'status');
     this.toastEl.setAttribute('aria-live', 'polite');
 
+    const alertStack = document.createElement('div');
+    alertStack.className = 'vm-alert-stack';
+
     this.dangerLockEl = document.createElement('div');
     this.dangerLockEl.className = 'vm-danger-lock is-hidden';
+
+    this.enragedWarnEl = document.createElement('div');
+    this.enragedWarnEl.className = 'vm-enraged-warn is-hidden';
+
+    alertStack.append(this.dangerLockEl, this.enragedWarnEl);
 
     // Sniper Target Selector Strip (5 pooled candidate cards + ESC)
     this.sniperPickerEl = document.createElement('div');
@@ -793,8 +805,17 @@ export class Hud {
       avatar.alt = '';
       avatar.draggable = false;
 
+      const nameCell = document.createElement('span');
+      nameCell.className = 'vm-row-name-cell';
+
       const name = document.createElement('span');
       name.className = 'vm-row-name';
+
+      const fire = document.createElement('span');
+      fire.className = 'vm-row-fire is-hidden';
+      fire.textContent = '🔥';
+
+      nameCell.append(name, fire);
 
       const dist = document.createElement('span');
       dist.className = 'vm-row-dist';
@@ -805,13 +826,14 @@ export class Hud {
       const koVal = document.createElement('span');
       ko.appendChild(koVal);
 
-      row.append(rank, avatar, name, dist, ko);
+      row.append(rank, avatar, nameCell, dist, ko);
       standingsEl.appendChild(row);
       this.standingRows.push({
         root: row,
         rank,
         avatar,
         name,
+        fire,
         dist,
         ko,
         koVal,
@@ -827,6 +849,7 @@ export class Hud {
         lastAvatarVer: -1,
         lastIsLocal: false,
         lastIsBot: false,
+        lastEnraged: false,
       });
     }
 
@@ -1065,7 +1088,7 @@ export class Hud {
       this.tapFlashRightEl,
       topLeftCol,
       this.toastEl,
-      this.dangerLockEl,
+      alertStack,
       this.sniperPickerEl,
       this.scopeLayerEl,
       topRight,
@@ -1346,6 +1369,19 @@ export class Hud {
 
   isEditingName(): boolean {
     return this.editingName;
+  }
+
+  setEnragedWarning(hunterName: string | null): void {
+    const next = hunterName ? hunterName.trim() : null;
+    if (next === this.lastEnragedHunter) return;
+    this.lastEnragedHunter = next;
+
+    if (!next) {
+      this.enragedWarnEl.classList.add('is-hidden');
+      return;
+    }
+    this.enragedWarnEl.textContent = `💢 ${next} 狂暴追杀中!`;
+    this.enragedWarnEl.classList.remove('is-hidden');
   }
 
   flashTapAttack(side: 'left' | 'right'): void {
@@ -2124,9 +2160,18 @@ export class Hud {
       const rankNum = riderIdx + 1;
       const isLocal = rider.isLocal || rider.id === local.id;
       const isBot = rider.isBot && !isLocal;
+      const enraged = Boolean(rider.enraged);
+      const role = rider.deliveryRole;
       const lap = getLapNumber(rider.s);
       const distTenth = Math.round(Math.max(0, rider.s) / 100);
-      const borderColor = isLocal ? '#ffd166' : getRiderColor(rider.colorIdx, rider.isBot);
+      const borderColor =
+        role === 'meituan'
+          ? '#ffc300'
+          : role === 'eleme'
+            ? '#0091ff'
+            : isLocal
+              ? '#ffd166'
+              : getRiderColor(rider.colorIdx, rider.isBot);
       const avatarIdx = normalizeAvatarIdx(rider.avatarIdx);
       const avatarVer = getAvatarVersion(rider.id);
       const kos = Math.max(0, Math.floor(rider.kos));
@@ -2142,6 +2187,11 @@ export class Hud {
       if (ref.lastIsBot !== isBot) {
         ref.lastIsBot = isBot;
         ref.root.classList.toggle('is-bot', isBot);
+      }
+      if (ref.lastEnraged !== enraged) {
+        ref.lastEnraged = enraged;
+        ref.root.classList.toggle('is-enraged', enraged);
+        ref.fire.classList.toggle('is-hidden', !enraged);
       }
       if (ref.lastRank !== rankNum) {
         ref.lastRank = rankNum;
@@ -2236,7 +2286,13 @@ export class Hud {
       const halfH = clamped ? 2 : 4;
       const xPx = Math.round((0.5 + normX * 0.28) * w - halfW);
       const yPx = Math.round(normY * h - halfH);
-      const color = getRiderColor(r.colorIdx, r.isBot);
+      const color = r.enraged
+        ? '#ff3b1f'
+        : r.deliveryRole === 'meituan'
+          ? '#ffc300'
+          : r.deliveryRole === 'eleme'
+            ? '#0091ff'
+            : getRiderColor(r.colorIdx, r.isBot);
 
       const d = this.radarDots[dotIdx++];
       if (!d.visible) {

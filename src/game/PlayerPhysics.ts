@@ -7,7 +7,7 @@ import {
   signedTrackDelta,
 } from './RoadMath';
 import { AVATAR_COUNT } from './PixelAvatars';
-import { RiderRenderState, TrafficCar, WEAPONS, WeaponType } from './types';
+import { FallenCargo, RiderRenderState, TrafficCar, WEAPONS, WeaponType } from './types';
 
 export interface InputState {
   throttle: boolean;
@@ -336,7 +336,8 @@ export class PlayerPhysics {
     dt: number,
     targets: RiderRenderState[],
     traffic: TrafficCar[],
-    cb: PlayerCallbacks
+    cb: PlayerCallbacks,
+    fallenCargo?: readonly FallenCargo[]
   ): void {
     const step = dt > 0.05 ? 0.05 : dt < 0.0001 ? 0.0001 : dt;
     const st = this.state;
@@ -642,20 +643,25 @@ export class PlayerPhysics {
       cb.onParticles('nitro', st.s, st.x, 0.3, st.speed * 0.5);
     }
 
-    // Traffic collisions & near-miss nitro refill (cyclic across 2400m seam)
+    // Traffic collisions & near-miss nitro refill (cyclic across 2400m seam, including long cargo trucks!)
     for (let i = 0; i < traffic.length; i++) {
       const car = traffic[i];
+      const isTruck = car.type === 4;
+      const maxCheckDs = isTruck ? 6.2 : 4.2;
       const ds = signedTrackDelta(car.s, st.s);
-      if (ds < -4.2 || ds > 4.2) continue;
+      if (ds < -maxCheckDs || ds > maxCheckDs) continue;
 
       const carX = car.x + car.bumpOffset;
       const dx = st.x - carX;
       const absDs = Math.abs(ds);
       const absDx = Math.abs(dx);
 
-      // Collision envelope (car half-len 2.25 + bike 0.65, car half-width 1.08 + bike 0.34)
-      if (absDs < 2.85 && absDx < 1.42) {
-        if (st.y > 1.12) {
+      const hitLen = isTruck ? 4.9 : 2.85;
+      const hitWid = isTruck ? 1.95 : 1.42;
+      const clearY = isTruck ? 2.8 : 1.12;
+
+      if (absDs < hitLen && absDx < hitWid) {
+        if (st.y > clearY) {
           // Hopped cleanly over the car!
           if (!car.nearMissed) {
             car.nearMissed = true;
@@ -671,15 +677,20 @@ export class PlayerPhysics {
 
         // Turbo overdrive shield blasts traffic aside without slowing or crashing!
         if (st.turboShieldTimer > 0) {
-          car.bumpVel += -pushDir * 8.5;
-          st.x = clamp(carX + pushDir * 1.5, -MAX_LATERAL, MAX_LATERAL);
+          car.bumpVel += -pushDir * (isTruck ? 5.5 : 8.5);
+          st.x = clamp(carX + pushDir * (hitWid + 0.12), -MAX_LATERAL, MAX_LATERAL);
           cb.onParticles('spark', st.s, (st.x + carX) * 0.5, 0.6, st.speed * 0.5);
           continue;
         }
 
         // Hard rear-end slam => wipeout!
-        if (st.invulnTimer <= 0 && ds > 0.7 && absDx < 1.02 && relSpeed > 18.0) {
-          car.bumpVel += -pushDir * 3.2;
+        if (
+          st.invulnTimer <= 0 &&
+          ds > (isTruck ? 1.2 : 0.7) &&
+          absDx < (isTruck ? 1.45 : 1.02) &&
+          relSpeed > (isTruck ? 15.0 : 18.0)
+        ) {
+          car.bumpVel += -pushDir * (isTruck ? 2.0 : 3.2);
           this.startCrash(pushDir * 7.5);
           cb.onCrash();
           cb.onParticles('crash', st.s, st.x, 0.75, st.speed * 0.35);
@@ -687,14 +698,14 @@ export class PlayerPhysics {
         }
 
         // Side-swipe or low-delta shove
-        st.x = clamp(carX + pushDir * 1.52, -MAX_LATERAL, MAX_LATERAL);
+        st.x = clamp(carX + pushDir * (hitWid + 0.12), -MAX_LATERAL, MAX_LATERAL);
         st.vx = pushDir * Math.max(6.5, Math.abs(st.vx) + 4.2);
         st.speed = Math.max(car.speed * 0.85, st.speed * 0.84);
-        car.bumpVel += -pushDir * 2.8;
+        car.bumpVel += -pushDir * (isTruck ? 1.6 : 2.8);
         cb.onParticles('spark', st.s, (st.x + carX) * 0.5, 0.55, st.speed * 0.4);
 
         if (st.invulnTimer <= 0 && relSpeed > 12.0) {
-          st.hp = Math.max(0, st.hp - 12);
+          st.hp = Math.max(0, st.hp - (isTruck ? 16 : 12));
           if (st.hp <= 0) {
             this.startCrash(pushDir * 7.0);
             cb.onCrash();
@@ -705,19 +716,48 @@ export class PlayerPhysics {
         continue;
       }
 
-      // Near-miss bonus: passing traffic within 2.1m clearance at >35 m/s
+      // Near-miss bonus: passing traffic within close clearance at >35 m/s
+      const nearMaxX = isTruck ? 2.85 : 2.35;
       if (
         !car.nearMissed &&
         st.speed > 35.0 &&
-        ds < 1.4 &&
-        ds > -2.6 &&
-        absDx >= 1.38 &&
-        absDx <= 2.35
+        ds < (isTruck ? 2.8 : 1.4) &&
+        ds > -(isTruck ? 4.4 : 2.6) &&
+        absDx >= hitWid - 0.04 &&
+        absDx <= nearMaxX
       ) {
         car.nearMissed = true;
         st.nitro = Math.min(100, st.nitro + 14);
         cb.onNearMiss();
         cb.onParticles('nitro', st.s, st.x, 0.4, st.speed * 0.4);
+      }
+    }
+
+    // Scattered fallen truck cargo debris (dodgeable or jumpable with Space!)
+    if (fallenCargo) {
+      for (let i = 0; i < fallenCargo.length; i++) {
+        const box = fallenCargo[i];
+        if (!box.active || box.y > 1.2) continue;
+        if (Math.abs(signedTrackDelta(box.s, st.s)) < 1.25 && Math.abs(box.x - st.x) < 1.05) {
+          if (st.y > 0.65) {
+            st.nitro = Math.min(100, st.nitro + 4);
+            continue;
+          }
+          const pushDir = st.x >= box.x ? 1 : -1;
+          box.active = false;
+          cb.onParticles('spark', box.s, box.x, 0.5, st.speed * 0.4);
+          if (st.turboShieldTimer <= 0 && st.invulnTimer <= 0) {
+            st.vx = clamp(st.vx + pushDir * 7.5, -20, 20);
+            st.speed = Math.max(12, st.speed * 0.8);
+            st.hp = Math.max(0, st.hp - 14);
+            if (st.hp <= 0) {
+              this.startCrash(pushDir * 7.0);
+              cb.onCrash();
+              cb.onParticles('crash', st.s, st.x, 0.7, st.speed * 0.35);
+              return;
+            }
+          }
+        }
       }
     }
 

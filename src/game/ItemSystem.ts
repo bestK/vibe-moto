@@ -8,7 +8,9 @@ import {
   MULTI_ITEM_TTL,
   RiderRenderState,
   SniperHudState,
+  TrafficCar,
 } from './types';
+import type { CarItemEffectKind } from './TrafficSystem';
 
 export interface RoadCrateVisual {
   slot: number;
@@ -118,6 +120,7 @@ export interface ItemCallbacks {
     spinOut: boolean
   ): void;
   onPoliceDragRival(target: RiderRenderState, dt: number, shoveX: number): void;
+  onAffectTraffic?(car: TrafficCar, kind: CarItemEffectKind, dirX: number): void;
   onLocalDamage(dmg: number, knockX: number, ko: boolean, sourceLabel: string, popup: string): void;
   onLocalSpinOut(duration: number, dmg: number, sourceLabel: string): void;
   onLocalPoliceDrag(dt: number, shoveX: number): void;
@@ -274,6 +277,9 @@ export class ItemSystem {
 
   private timeSec = 0;
   private smokeAccum = 0;
+  private magnetTruckCooldown = 0;
+  private policeTruckCooldown = 0;
+  private latestTraffic: TrafficCar[] = [];
 
   constructor() {
     for (let i = 0; i < 16; i++) {
@@ -417,14 +423,20 @@ export class ItemSystem {
     }
     if (slotIdx < 0) return false;
 
-    const target = this.findRiderById(targetId, rivals);
-    if (!target || target.id === local.id) return false;
+    const isTruckTarget = targetId.startsWith('truck-');
+    const truckId = isTruckTarget ? Number.parseInt(targetId.slice(6), 10) : -1;
+    const truckCar = isTruckTarget ? this.findTrafficById(truckId, this.latestTraffic) : null;
+    const target = isTruckTarget ? null : this.findRiderById(targetId, rivals);
+    if (!target && !truckCar) return false;
+    if (target && target.id === local.id) return false;
+
+    const targetName = truckCar ? '满载大货车' : target!.name;
 
     // Consume sniper rifle from its exact inventory slot and begin 1.15s scope lock
     consumeHeldItemAt(local, slotIdx);
     this.sniperPhase = 'aiming';
-    this.sniperTargetId = target.id;
-    this.sniperTargetName = target.name;
+    this.sniperTargetId = targetId;
+    this.sniperTargetName = targetName;
     this.sniperTimer = 0;
     this.sniperResult = undefined;
     this.sniperHudState.lockQuality = 0.85;
@@ -433,12 +445,12 @@ export class ItemSystem {
     cb.onPublishNetEvent({
       t: 'item_use',
       item: 'sniper',
-      to: target.id,
-      toName: target.name,
+      to: target?.id,
+      toName: targetName,
       s: local.s,
       x: local.x,
     });
-    cb.onBroadcast(`🎯 ${local.name} 对 ${target.name} 使用了 狙击枪`, 'cyan');
+    cb.onBroadcast(`🎯 ${local.name} 对 ${targetName} 使用了 狙击枪`, 'cyan');
     return true;
   }
 
@@ -717,11 +729,15 @@ export class ItemSystem {
     local: RiderRenderState,
     rivals: RiderRenderState[],
     allRiders: RiderRenderState[],
-    cb: ItemCallbacks
+    cb: ItemCallbacks,
+    traffic: TrafficCar[] = []
   ): void {
     const step = dt > 0.05 ? 0.05 : dt < 0 ? 0 : dt;
     this.timeSec += step;
     this.smokeAccum += step;
+    this.latestTraffic = traffic;
+    if (this.magnetTruckCooldown > 0) this.magnetTruckCooldown = Math.max(0, this.magnetTruckCooldown - step);
+    if (this.policeTruckCooldown > 0) this.policeTruckCooldown = Math.max(0, this.policeTruckCooldown - step);
 
     // 0. Multi-item 30s TTL countdown (single item never expires; >=2 items count down 30s)
     tickHeldItemsTtl(local, step);
@@ -740,13 +756,26 @@ export class ItemSystem {
     // 3. AI bot tactical item usage + bot sniper execution
     this.updateBotItems(step, local, rivals, allRiders, cb);
 
-    // 4. Magnet rival lateral pull
+    // 4. Magnet rival lateral pull + tug nearby cargo trucks sideways with sparks!
     if (local.magnetTimer > 0 && !local.crashed) {
       const closest = this.findNearestRival(local, rivals, 26);
       if (closest && !closest.crashed && Math.abs(closest.x - local.x) > 1.35) {
         const pullDir = local.x > closest.x ? 1 : -1;
         if (closest.isBot) {
           closest.vx = clamp(closest.vx + pullDir * 14.0 * step, -14, 14);
+        }
+      }
+      if (this.magnetTruckCooldown <= 0) {
+        for (let i = 0; i < traffic.length; i++) {
+          const car = traffic[i];
+          if (car.type !== 4) continue;
+          if (Math.abs(signedTrackDelta(car.s, local.s)) < 16 && Math.abs(car.x - local.x) < 9) {
+            const pullDir = local.x >= car.x ? 1 : -1;
+            cb.onAffectTraffic?.(car, 'magnet', pullDir);
+            cb.onParticles('spark', car.s, car.x + car.bumpOffset, 1.0, car.speed * 0.4);
+            this.magnetTruckCooldown = 0.65;
+            break;
+          }
         }
       }
     }
@@ -792,11 +821,11 @@ export class ItemSystem {
       }
     }
 
-    // 7. Active projectiles, bomber jets, bombs, police interceptors & road hazards
-    this.updateRockets(step, local, rivals, cb);
-    this.updateJetsAndBombs(step, local, rivals, cb);
-    this.updateInterceptors(step, local, rivals, allRiders, cb);
-    this.updateHazards(step, local, rivals, cb);
+    // 7. Active projectiles, bomber jets, bombs, police interceptors & road hazards (all affect cargo trucks!)
+    this.updateRockets(step, local, rivals, traffic, cb);
+    this.updateJetsAndBombs(step, local, rivals, traffic, cb);
+    this.updateInterceptors(step, local, rivals, allRiders, traffic, cb);
+    this.updateHazards(step, local, rivals, traffic, cb);
   }
 
   private updateCrates(
@@ -1107,9 +1136,25 @@ export class ItemSystem {
 
     if (this.sniperPhase === 'aiming') {
       this.sniperTimer += dt;
-      const target = this.sniperTargetId ? this.findRiderById(this.sniperTargetId, rivals) : null;
+      const isTruckTarget = Boolean(this.sniperTargetId?.startsWith('truck-'));
+      const truckCar =
+        isTruckTarget && this.sniperTargetId
+          ? this.findTrafficById(Number.parseInt(this.sniperTargetId.slice(6), 10), this.latestTraffic)
+          : null;
+      const target =
+        !isTruckTarget && this.sniperTargetId ? this.findRiderById(this.sniperTargetId, rivals) : null;
 
-      if (target) {
+      if (truckCar) {
+        this.sniperLaser.active = true;
+        this.sniperLaser.fromS = local.s;
+        this.sniperLaser.fromX = local.x;
+        this.sniperLaser.fromY = local.y + 1.35;
+        this.sniperLaser.toS = truckCar.s;
+        this.sniperLaser.toX = truckCar.x + truckCar.bumpOffset;
+        this.sniperLaser.toY = 1.4;
+        this.sniperLaser.progress = clamp(this.sniperTimer / SNIPER_AIM_SEC, 0, 1);
+        this.sniperHudState.lockQuality = 0.98;
+      } else if (target) {
         this.sniperTargetName = target.name;
         this.sniperLaser.active = true;
         this.sniperLaser.fromS = local.s;
@@ -1134,7 +1179,16 @@ export class ItemSystem {
         cb.onSfx('sniperShot');
         cb.onShake(0.32, 0.2);
 
-        if (!target || Math.abs(signedTrackDelta(target.s, local.s)) > SNIPER_MAX_RANGE) {
+        if (isTruckTarget) {
+          if (truckCar && Math.abs(signedTrackDelta(truckCar.s, local.s)) <= SNIPER_MAX_RANGE) {
+            this.sniperResult = 'HIT';
+            cb.onPopup('SNIPED', truckCar.s, truckCar.x + truckCar.bumpOffset, 2.2);
+            cb.onParticles('spark', truckCar.s, truckCar.x + truckCar.bumpOffset, 0.8, truckCar.speed * 0.4);
+            cb.onAffectTraffic?.(truckCar, 'sniper', truckCar.x >= local.x ? 1 : -1);
+          } else {
+            this.sniperResult = 'MISS';
+          }
+        } else if (!target || Math.abs(signedTrackDelta(target.s, local.s)) > SNIPER_MAX_RANGE) {
           this.sniperResult = 'MISS';
           cb.onBroadcast(`💨 ${this.sniperTargetName || '目标'} 脱离了 ${local.name} 的射程!`, 'cyan');
           cb.onPublishNetEvent({
@@ -1204,6 +1258,7 @@ export class ItemSystem {
     dt: number,
     local: RiderRenderState,
     rivals: RiderRenderState[],
+    traffic: TrafficCar[],
     cb: ItemCallbacks
   ): void {
     const emitSmoke = this.smokeAccum >= 0.04;
@@ -1233,6 +1288,28 @@ export class ItemSystem {
       if (emitSmoke) {
         cb.onParticles('smoke', r.s - 0.8, r.x, r.y, r.speed * 0.2);
       }
+
+      // Check impact against traffic & overloaded Chinese cargo trucks!
+      let hitTraffic = false;
+      for (let tIdx = 0; tIdx < traffic.length; tIdx++) {
+        const car = traffic[tIdx];
+        const isTruck = car.type === 4;
+        const carX = car.x + car.bumpOffset;
+        if (
+          Math.abs(signedTrackDelta(car.s, r.s)) < (isTruck ? 5.0 : 2.9) &&
+          Math.abs(carX - r.x) < (isTruck ? 2.1 : 1.5)
+        ) {
+          r.active = false;
+          hitTraffic = true;
+          cb.onSfx('explosion');
+          cb.onShake(isTruck ? 0.52 : 0.32, 0.28);
+          cb.onParticles('crash', car.s, carX, 1.4, car.speed * 0.35);
+          cb.onPopup('BOOM', car.s, carX, 2.3);
+          cb.onAffectTraffic?.(car, 'blast', carX >= r.x ? 1 : -1);
+          break;
+        }
+      }
+      if (hitTraffic) continue;
 
       // Check impact against rivals (only owner triggers authoritative damage to avoid double-hits)
       if (r.ownerId === local.id) {
@@ -1284,6 +1361,7 @@ export class ItemSystem {
     dt: number,
     local: RiderRenderState,
     rivals: RiderRenderState[],
+    traffic: TrafficCar[],
     cb: ItemCallbacks
   ): void {
     for (let i = 0; i < this.jets.length; i++) {
@@ -1355,6 +1433,18 @@ export class ItemSystem {
           const knockX = local.x >= b.x ? 15 : -15;
           cb.onLocalDamage(60, knockX, true, `${b.ownerName} 空中支援`, 'BOOM');
         }
+
+        // Bomb blasts scatter overloaded cargo trucks in blast radius!
+        for (let k = 0; k < traffic.length; k++) {
+          const car = traffic[k];
+          const carX = car.x + car.bumpOffset;
+          if (
+            Math.abs(signedTrackDelta(car.s, b.s)) < (car.type === 4 ? 7.5 : 5.5) &&
+            Math.abs(carX - b.x) < 3.8
+          ) {
+            cb.onAffectTraffic?.(car, 'blast', carX >= b.x ? 1 : -1);
+          }
+        }
       }
     }
   }
@@ -1364,6 +1454,7 @@ export class ItemSystem {
     local: RiderRenderState,
     rivals: RiderRenderState[],
     allRiders: RiderRenderState[],
+    traffic: TrafficCar[],
     cb: ItemCallbacks
   ): void {
     for (let i = 0; i < this.interceptors.length; i++) {
@@ -1407,6 +1498,22 @@ export class ItemSystem {
       } else {
         cop.s += cop.speed * dt;
       }
+
+      // Police interceptor also slows cargo trucks it pulls alongside
+      if (this.policeTruckCooldown <= 0) {
+        for (let k = 0; k < traffic.length; k++) {
+          const car = traffic[k];
+          if (car.type !== 4) continue;
+          if (
+            Math.abs(signedTrackDelta(car.s, cop.s)) < 6.5 &&
+            Math.abs(car.x - cop.x) < 3.8
+          ) {
+            cb.onAffectTraffic?.(car, 'police', car.x >= cop.x ? 1 : -1);
+            this.policeTruckCooldown = 1.8;
+            break;
+          }
+        }
+      }
     }
   }
 
@@ -1414,6 +1521,7 @@ export class ItemSystem {
     dt: number,
     local: RiderRenderState,
     rivals: RiderRenderState[],
+    traffic: TrafficCar[],
     cb: ItemCallbacks
   ): void {
     for (let i = 0; i < this.hazards.length; i++) {
@@ -1489,6 +1597,24 @@ export class ItemSystem {
           break;
         }
       }
+      if (!h.active) continue;
+
+      // Traffic & overloaded Chinese cargo trucks trigger banana peels & spike traps!
+      for (let k = 0; k < traffic.length; k++) {
+        const car = traffic[k];
+        const isTruck = car.type === 4;
+        const carX = car.x + car.bumpOffset;
+        if (
+          Math.abs(signedTrackDelta(car.s, h.s)) < (isTruck ? 4.4 : 2.3) &&
+          Math.abs(carX - h.x) < (isTruck ? 2.0 : 1.45)
+        ) {
+          h.active = false;
+          cb.onParticles('spark', car.s, carX, 0.55, car.speed * 0.4);
+          cb.onPopup(h.kind === 'banana' ? 'SLIP' : 'BONK', car.s, carX, 2.0);
+          cb.onAffectTraffic?.(car, h.kind, carX >= h.x ? 1 : -1);
+          break;
+        }
+      }
     }
   }
 
@@ -1510,6 +1636,36 @@ export class ItemSystem {
     if (this.sniperCandidates.length > 5) {
       this.sniperCandidates.length = 5;
     }
+
+    // Also allow sniping the nearest overloaded cargo truck ahead if a slot is available!
+    if (this.sniperCandidates.length < 5) {
+      let bestTruck: TrafficCar | null = null;
+      let bestDist = Infinity;
+      for (let i = 0; i < this.latestTraffic.length; i++) {
+        const c = this.latestTraffic[i];
+        if (c.type !== 4) continue;
+        const ds = signedTrackDelta(c.s, local.s);
+        if (ds > 6 && ds < SNIPER_MAX_RANGE && ds < bestDist) {
+          bestDist = ds;
+          bestTruck = c;
+        }
+      }
+      if (bestTruck) {
+        this.sniperCandidates.push({
+          id: `truck-${bestTruck.id}`,
+          name: '🚛 满载大货车',
+          distM: Math.round(bestDist),
+          avatarIdx: 4,
+        });
+      }
+    }
+  }
+
+  private findTrafficById(carId: number, traffic: TrafficCar[]): TrafficCar | null {
+    for (let i = 0; i < traffic.length; i++) {
+      if (traffic[i].id === carId) return traffic[i];
+    }
+    return null;
   }
 
   private findRiderById(id: string, list: RiderRenderState[]): RiderRenderState | null {

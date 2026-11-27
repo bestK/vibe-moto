@@ -25,6 +25,7 @@ interface BotProfile {
   waveFreq: number;
   wavePhase: number;
   aggression: number;
+  deliveryRole?: 'meituan' | 'eleme' | null;
 }
 
 interface BotAgent {
@@ -38,8 +39,11 @@ interface BotAgent {
   duelTimer: number;
   duelSide: -1 | 1;
   laneTimer: number;
+  rageTimer: number;
+  enragedKoCount: number;
 }
 
+// 3 pack bots (yield as real players join) + 2 permanent Chinese delivery riders (always cruising!)
 const BOT_PROFILES: readonly BotProfile[] = [
   {
     id: 'bot-viper',
@@ -52,6 +56,7 @@ const BOT_PROFILES: readonly BotProfile[] = [
     waveFreq: 0.34,
     wavePhase: 0.0,
     aggression: 0.78,
+    deliveryRole: null,
   },
   {
     id: 'bot-spike',
@@ -64,6 +69,7 @@ const BOT_PROFILES: readonly BotProfile[] = [
     waveFreq: 0.27,
     wavePhase: 2.1,
     aggression: 0.85,
+    deliveryRole: null,
   },
   {
     id: 'bot-axel',
@@ -76,8 +82,38 @@ const BOT_PROFILES: readonly BotProfile[] = [
     waveFreq: 0.31,
     wavePhase: 4.3,
     aggression: 0.68,
+    deliveryRole: null,
+  },
+  {
+    id: 'bot-meituan',
+    name: '美团·小哥',
+    colorIdx: 3,
+    avatarIdx: 0,
+    weapon: 0,
+    baseOffsetS: 34,
+    prefLane: 3,
+    waveFreq: 0.22,
+    wavePhase: 1.2,
+    aggression: 0.25,
+    deliveryRole: 'meituan',
+  },
+  {
+    id: 'bot-eleme',
+    name: '饿了么·骑士',
+    colorIdx: 5,
+    avatarIdx: 2,
+    weapon: 0,
+    baseOffsetS: -26,
+    prefLane: 0,
+    waveFreq: 0.25,
+    wavePhase: 3.7,
+    aggression: 0.25,
+    deliveryRole: 'eleme',
   },
 ] as const;
+
+const REGULAR_BOT_COUNT = 3;
+const DELIVERY_RAGE_DURATION = 18.0;
 
 const WHEEL_RADIUS = 0.35;
 const BOT_CRASH_DURATION = 2.1;
@@ -107,6 +143,7 @@ export class AiRivals {
     bank: 0,
   };
   private time = 0;
+  private onDeliveryEnrageCb: ((riderName: string, role: 'meituan' | 'eleme') => void) | null = null;
 
   constructor() {
     for (let i = 0; i < BOT_PROFILES.length; i++) {
@@ -121,6 +158,8 @@ export class AiRivals {
         duelTimer: 0,
         duelSide: i % 2 === 0 ? -1 : 1,
         laneTimer: 0.3 + i * 0.2,
+        rageTimer: 0,
+        enragedKoCount: 0,
         state: {
           id: p.id,
           name: p.name,
@@ -131,7 +170,7 @@ export class AiRivals {
           s: 20 + p.baseOffsetS,
           x: LANE_CENTERS[p.prefLane],
           y: 0,
-          speed: 18,
+          speed: p.deliveryRole ? 44 : 18,
           vx: 0,
           lean: 0,
           hp: 100,
@@ -154,9 +193,43 @@ export class AiRivals {
           turboShieldTimer: 0,
           spinOutTimer: 0,
           incomingLockName: null,
+          deliveryRole: p.deliveryRole ?? null,
+          enraged: false,
+          enragedTargetId: null,
         },
       });
     }
+  }
+
+  setOnDeliveryEnrage(cb: (riderName: string, role: 'meituan' | 'eleme') => void): void {
+    this.onDeliveryEnrageCb = cb;
+  }
+
+  isAnyDeliveryEnraged(): string | null {
+    for (let i = 0; i < this.bots.length; i++) {
+      const b = this.bots[i];
+      if (b.active && b.profile.deliveryRole && b.state.enraged) {
+        return b.state.name;
+      }
+    }
+    return null;
+  }
+
+  triggerDeliveryRage(botId: string): boolean {
+    for (let i = 0; i < this.bots.length; i++) {
+      const bot = this.bots[i];
+      if (bot.state.id !== botId || !bot.profile.deliveryRole) continue;
+      const wasEnraged = Boolean(bot.state.enraged);
+      bot.state.enraged = true;
+      bot.state.enragedTargetId = 'local';
+      bot.rageTimer = DELIVERY_RAGE_DURATION;
+      if (!wasEnraged) {
+        bot.enragedKoCount = 0;
+        this.onDeliveryEnrageCb?.(bot.state.name, bot.profile.deliveryRole);
+      }
+      return true;
+    }
+    return false;
   }
 
   update(
@@ -171,16 +244,18 @@ export class AiRivals {
     this.time += step;
     this.activeList.length = 0;
 
-    const targetBotCount = Math.max(0, 3 - nearbyRealCount);
+    const targetBotCount = Math.max(0, REGULAR_BOT_COUNT - nearbyRealCount);
 
     for (let i = 0; i < this.bots.length; i++) {
       const bot = this.bots[i];
-      if (i >= targetBotCount) {
+      const isDelivery = Boolean(bot.profile.deliveryRole);
+      if (!isDelivery && i >= targetBotCount) {
         bot.active = false;
         continue;
       }
 
-      if (!bot.active || Math.abs(signedTrackDelta(bot.state.s, local.s)) > 155) {
+      const maxRoamDist = isDelivery && !bot.state.enraged ? 380 : 165;
+      if (!bot.active || (!isDelivery && Math.abs(signedTrackDelta(bot.state.s, local.s)) > maxRoamDist)) {
         this.spawnBotNear(bot, local);
         bot.active = true;
       }
@@ -199,13 +274,17 @@ export class AiRivals {
       const st = bot.state;
       if (!bot.active || st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
 
+      if (bot.profile.deliveryRole) {
+        this.triggerDeliveryRage(botId);
+      }
+
       st.hp = Math.max(0, st.hp - dmg);
       st.vx = clamp(st.vx + knockX, -22, 22);
       st.speed = Math.max(12, st.speed * 0.87);
       st.attackSide = 0;
       st.attackPhase = 0;
       bot.attackTimer = 0;
-      bot.attackCooldown = Math.max(bot.attackCooldown, 0.85);
+      bot.attackCooldown = Math.max(bot.attackCooldown, st.enraged ? 0.38 : 0.85);
 
       if (st.hp <= 0) {
         st.crashed = true;
@@ -213,6 +292,14 @@ export class AiRivals {
         st.nitroActive = false;
         st.braking = false;
         st.spinOutTimer = 0;
+        if (st.enraged) {
+          bot.enragedKoCount++;
+          if (bot.enragedKoCount >= 2) {
+            st.enraged = false;
+            st.enragedTargetId = null;
+            bot.rageTimer = 0;
+          }
+        }
         return true;
       }
       return false;
@@ -226,6 +313,9 @@ export class AiRivals {
       if (bot.state.id !== botId) continue;
       const st = bot.state;
       if (!bot.active || st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
+      if (bot.profile.deliveryRole) {
+        this.triggerDeliveryRage(botId);
+      }
       st.spinOutTimer = Math.max(st.spinOutTimer, duration);
       st.speed = Math.max(10, st.speed * 0.62);
       st.hp = Math.max(0, st.hp - dmg);
@@ -233,6 +323,14 @@ export class AiRivals {
         st.crashed = true;
         st.crashTimer = 0;
         st.spinOutTimer = 0;
+        if (st.enraged) {
+          bot.enragedKoCount++;
+          if (bot.enragedKoCount >= 2) {
+            st.enraged = false;
+            st.enragedTargetId = null;
+            bot.rageTimer = 0;
+          }
+        }
         return true;
       }
       return false;
@@ -244,6 +342,9 @@ export class AiRivals {
     for (let i = 0; i < this.bots.length; i++) {
       const bot = this.bots[i];
       if (bot.state.id !== botId || !bot.active || bot.state.crashed) continue;
+      if (bot.profile.deliveryRole && !bot.state.enraged) {
+        this.triggerDeliveryRage(botId);
+      }
       const st = bot.state;
       st.speed = Math.max(11, st.speed * Math.exp(-1.5 * dt));
       st.vx = clamp(st.vx + shoveX * dt, -14, 14);
@@ -313,6 +414,14 @@ export class AiRivals {
       bot.attackCooldown = Math.max(0, bot.attackCooldown - dt);
     }
 
+    if (bot.rageTimer > 0) {
+      bot.rageTimer = Math.max(0, bot.rageTimer - dt);
+      if (bot.rageTimer <= 0) {
+        st.enraged = false;
+        st.enragedTargetId = null;
+      }
+    }
+
     sampleRoadFrame(st.s, this._frame);
 
     // Handle bot wipeout slide & recovery
@@ -323,11 +432,12 @@ export class AiRivals {
       st.s += (st.speed / this._frame.tangentLen) * dt;
       st.x = clamp(st.x + st.vx * dt, -MAX_LATERAL, MAX_LATERAL);
 
-      if (st.crashTimer >= BOT_CRASH_DURATION) {
+      const remountTime = st.enraged ? 1.35 : BOT_CRASH_DURATION;
+      if (st.crashTimer >= remountTime) {
         st.crashed = false;
         st.crashTimer = 0;
         st.hp = 100;
-        st.invulnTimer = 1.6;
+        st.invulnTimer = st.enraged ? 1.1 : 1.6;
         st.vx = 0;
         st.lean = 0;
         st.x = clamp(st.x, -ROAD_HALF_WIDTH + 1.2, ROAD_HALF_WIDTH - 1.2);
@@ -335,61 +445,79 @@ export class AiRivals {
         if (signedTrackDelta(st.s, local.s) < -34) {
           st.s = Math.max(0, local.s - 22);
         }
-        st.speed = Math.max(20, local.speed * 0.92);
+        st.speed = Math.max(st.enraged ? 45 : 20, local.speed * (st.enraged ? 1.08 : 0.92));
       }
       return;
     }
 
-    // Periodic duel engagement when racing near player
+    const isDelivery = Boolean(p.deliveryRole);
+    const isEnraged = Boolean(st.enraged);
+
+    // Periodic duel engagement (enraged delivery riders relentlessly hunt local player!)
     bot.duelTimer -= dt;
     if (bot.duelTimer <= -3.5) {
       bot.duelTimer = 3.2 + p.aggression * 2.5;
       bot.duelSide = st.x >= local.x ? 1 : -1;
     }
-    const inDuel = bot.duelTimer > 0 && !local.crashed && local.speed > 18;
+    const inDuel = isEnraged
+      ? !local.crashed
+      : !isDelivery && bot.duelTimer > 0 && !local.crashed && local.speed > 18;
 
     // Smooth rubber-banding longitudinal target (cyclic across 2400m circuit!)
     const wave = Math.sin(this.time * p.waveFreq + p.wavePhase) * 14.0;
-    const desiredOffset = inDuel ? 0.5 : p.baseOffsetS + wave;
+    const desiredOffset = isEnraged ? 0.3 : inDuel ? 0.5 : p.baseOffsetS + wave;
     const errS = signedTrackDelta(local.s + desiredOffset, st.s);
 
     let desiredSpeed: number;
     if (st.turboShieldTimer > 0) {
       desiredSpeed = 80.0;
+    } else if (isEnraged) {
+      // Fierce rubberband surge up to 69 m/s to hunt player across laps!
+      desiredSpeed = clamp(local.speed + errS * 1.45, 34.0, 69.0);
+    } else if (isDelivery) {
+      // Calm Chinese delivery rider cruising 42..49 m/s minding their order
+      const calmBase = 44.5 + Math.sin(this.time * 0.4 + p.wavePhase) * 3.5;
+      desiredSpeed = clamp(calmBase + clamp(errS * 0.08, -3, 5), 41.0, 49.0);
     } else if (local.speed < 6) {
-      // Let bots cruise calmly past if player stops, then wait gently ahead
+      // Let regular bots cruise calmly past if player stops, then wait gently ahead
       desiredSpeed = errS < -45 ? 12.0 : 20.0;
     } else {
       desiredSpeed = clamp(local.speed + errS * 0.92, 16.0, 67.0);
     }
 
     const speedDiff = desiredSpeed - st.speed;
-    const accel = speedDiff >= 0 ? Math.min(34.0, speedDiff * 2.6) : Math.max(-34.0, speedDiff * 3.0);
+    const maxAccel = isEnraged ? 44.0 : 34.0;
+    const accel = speedDiff >= 0 ? Math.min(maxAccel, speedDiff * 2.8) : Math.max(-34.0, speedDiff * 3.0);
     st.speed = Math.max(10.0, st.speed + accel * dt);
     st.braking = speedDiff < -7.0;
-    st.nitroActive = st.turboShieldTimer > 0 || (errS > 24.0 && local.speed > 34.0 && st.speed > 44.0);
+    st.nitroActive =
+      st.turboShieldTimer > 0 ||
+      isEnraged ||
+      (errS > 24.0 && local.speed > 34.0 && st.speed > 44.0);
 
     // Lane selection & traffic weaving (plus gentle bias toward road '?' crates!)
     bot.laneTimer -= dt;
     if (bot.laneTimer <= 0) {
-      bot.laneTimer = 0.16;
+      bot.laneTimer = isEnraged ? 0.1 : 0.16;
       bot.targetX = this.chooseBestLateralX(bot, local, traffic, inDuel, crates);
     }
 
-    // Check immediate traffic evasion override (cyclic across 2400m seam)
+    // Check immediate traffic evasion override (cyclic across 2400m seam, respecting long cargo trucks!)
     for (let i = 0; i < traffic.length; i++) {
       const car = traffic[i];
+      const isTruck = car.type === 4;
       const ds = signedTrackDelta(car.s, st.s);
-      if (ds < -2.2 || ds > 26.0) continue;
+      if (ds < (isTruck ? -4.5 : -2.2) || ds > (isTruck ? 32.0 : 26.0)) continue;
       const carX = car.x + car.bumpOffset;
-      if (Math.abs(carX - st.x) < 1.85) {
-        // Swerve cleanly toward open side
+      const avoidWidth = isTruck ? 2.35 : 1.85;
+      if (Math.abs(carX - st.x) < avoidWidth) {
+        const stepX = isTruck ? 3.8 : 3.3;
         if (carX > 3.5) {
-          bot.targetX = carX - 3.3;
+          bot.targetX = carX - stepX;
         } else if (carX < -3.5) {
-          bot.targetX = carX + 3.3;
+          bot.targetX = carX + stepX;
         } else {
-          bot.targetX = st.x >= carX ? carX + 3.3 : carX - 3.3;
+          bot.targetX = st.x >= carX ? carX + stepX : carX - stepX;
         }
         bot.targetX = clamp(bot.targetX, -ROAD_HALF_WIDTH + 1.1, ROAD_HALF_WIDTH - 1.1);
         break;
@@ -398,8 +526,9 @@ export class AiRivals {
 
     // PD lateral steering controller
     const latErr = bot.targetX - st.x;
-    const desiredVx = clamp(latErr * 4.4, -8.5, 8.5);
-    st.vx += (desiredVx - st.vx) * Math.min(1, dt * 7.5);
+    const maxLatV = isEnraged ? 11.5 : 8.5;
+    const desiredVx = clamp(latErr * (isEnraged ? 5.6 : 4.4), -maxLatV, maxLatV);
+    st.vx += (desiredVx - st.vx) * Math.min(1, dt * (isEnraged ? 9.5 : 7.5));
 
     // Avoid overlapping local player's body
     if (!local.crashed && Math.abs(signedTrackDelta(st.s, local.s)) < 2.2) {
@@ -431,33 +560,45 @@ export class AiRivals {
     st.lean += (targetLean - st.lean) * Math.min(1, dt * 10.0);
     st.wheelAngle = (st.wheelAngle + (st.speed / WHEEL_RADIUS) * dt) % (Math.PI * 2);
 
-    // Traffic side-bump protection for bots
+    // Traffic side-bump protection for bots (including cargo trucks)
     for (let i = 0; i < traffic.length; i++) {
       const car = traffic[i];
+      const isTruck = car.type === 4;
       const ds = signedTrackDelta(car.s, st.s);
-      if (ds < -2.7 || ds > 2.7) continue;
+      const halfL = isTruck ? 4.8 : 2.7;
+      if (ds < -halfL || ds > halfL) continue;
       const carX = car.x + car.bumpOffset;
       const dx = st.x - carX;
-      if (Math.abs(dx) < 1.38) {
+      const halfW = isTruck ? 1.88 : 1.38;
+      if (Math.abs(dx) < halfW) {
         const push = dx >= 0 ? 1 : -1;
-        st.x = clamp(carX + push * 1.48, -MAX_LATERAL, MAX_LATERAL);
+        st.x = clamp(carX + push * (halfW + 0.12), -MAX_LATERAL, MAX_LATERAL);
         st.vx = push * 5.0;
         st.speed = Math.max(car.speed * 0.9, st.speed * 0.88);
       }
     }
 
     // Melee attacks when riding side-by-side with player
+    // Calm delivery riders NEVER start fights; enraged delivery riders swing every 0.55s with 30 dmg!
+    const canAttack = !isDelivery || isEnraged;
     const spec = WEAPONS[st.weapon];
-    if (st.attackSide === 0 && bot.attackCooldown <= 0 && !local.crashed && local.invulnTimer <= 0) {
+    const effectiveReach = isEnraged ? 2.95 : spec.reach;
+    if (
+      canAttack &&
+      st.attackSide === 0 &&
+      bot.attackCooldown <= 0 &&
+      !local.crashed &&
+      local.invulnTimer <= 0
+    ) {
       const dsPlayer = Math.abs(signedTrackDelta(st.s, local.s));
       const dxPlayer = local.x - st.x;
       const absDx = Math.abs(dxPlayer);
-      if (dsPlayer < 2.6 && absDx >= 0.75 && absDx <= spec.reach - 0.1) {
+      if (dsPlayer < (isEnraged ? 3.2 : 2.6) && absDx >= 0.7 && absDx <= effectiveReach - 0.05) {
         st.attackSide = dxPlayer < 0 ? 1 : 2;
         st.attackPhase = 0;
         bot.attackTimer = 0;
         bot.didHitThisSwing = false;
-        bot.attackCooldown = 1.9 + (1.0 - p.aggression) * 1.4;
+        bot.attackCooldown = isEnraged ? 0.55 : 1.9 + (1.0 - p.aggression) * 1.4;
       }
     }
 
@@ -465,21 +606,21 @@ export class AiRivals {
       bot.attackTimer += dt;
       st.attackPhase = Math.min(1, bot.attackTimer / spec.duration);
 
-      if (!bot.didHitThisSwing && st.attackPhase >= 0.38 && st.attackPhase <= 0.66) {
+      if (!bot.didHitThisSwing && st.attackPhase >= 0.36 && st.attackPhase <= 0.68) {
         const side = st.attackSide;
         const sideDist = side === 1 ? st.x - local.x : local.x - st.x;
         if (
           !local.crashed &&
           local.invulnTimer <= 0 &&
-          Math.abs(signedTrackDelta(st.s, local.s)) < 3.0 &&
-          Math.abs(local.y - st.y) < 1.05 &&
+          Math.abs(signedTrackDelta(st.s, local.s)) < (isEnraged ? 3.4 : 3.0) &&
+          Math.abs(local.y - st.y) < 1.1 &&
           sideDist >= 0.45 &&
-          sideDist <= spec.reach
+          sideDist <= effectiveReach
         ) {
           bot.didHitThisSwing = true;
           const knockDir = side === 1 ? -1 : 1;
-          const dmg = Math.round(spec.damage * 0.65);
-          const knockX = knockDir * spec.knockback * 0.8;
+          const dmg = isEnraged ? 30 : Math.round(spec.damage * 0.65);
+          const knockX = knockDir * (isEnraged ? 15.0 : spec.knockback * 0.8);
           onBotHitPlayer(dmg, knockX, st.name);
         }
       }

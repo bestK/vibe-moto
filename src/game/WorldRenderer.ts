@@ -16,9 +16,11 @@ import {
   signedTrackDelta,
 } from './RoadMath';
 import { getPixelAtlas } from './PixelTextures';
+import { getChinaAtlas } from './ChinaTextures';
+import { CrossingAnimal } from './AnimalSystem';
 import { BikeVisual } from './BikeModel';
 import { ItemVisuals } from './ItemSystem';
-import { BIKE_PALETTES, RiderRenderState, TrafficCar } from './types';
+import { BIKE_PALETTES, FallenCargo, RiderRenderState, TrafficCar } from './types';
 
 // Progressive road LOD slices: 3m near camera (-24m..+108m), 6m far (+114m..+324m)
 // Snapping baseS to 6m (LCM of 3 & 6) eliminates vertex shimmer while cutting ~30% road verts & trig calls.
@@ -33,8 +35,16 @@ const ROAD_SLICES = ROAD_SLICE_OFFSETS.length; // 81 slices (down from 116)
 const MAX_PARTICLES = 140;
 const MAX_PROPS_PER_POOL = 96;
 const MAX_TRAFFIC_RENDER = 26;
+const MAX_TRUCK_RENDER = 10;
+const MAX_FALLEN_CARGO_RENDER = 20;
+const MAX_ANIMAL_RENDER = 16;
 const MAX_SIREN_RENDER = 12;
 const MAX_POPUPS = 14;
+
+const CARGO_DEBRIS_COLORS = [0x3b82f6, 0xc68642, 0x52b788, 0xe9c46a, 0xd62828, 0x8d99ae] as const;
+const TRUCK_CARGO_TINTS = [0xffffff, 0xd8a47f, 0x80ed99] as const;
+const GAS_STATION_STOPS = [420, 1620] as const;
+const DINER_STOPS = [900, 2100] as const;
 
 interface BoxPartSpec {
   w: number;
@@ -175,6 +185,8 @@ export class WorldRenderer {
   private readonly boostInst: THREE.InstancedMesh;
   private readonly billboardMeshes: THREE.Mesh[] = [];
   private readonly lapArchGroup: THREE.Group;
+  private readonly gasStationGroup: THREE.Group;
+  private readonly dinerGroup: THREE.Group;
 
   // Particle pool
   private readonly particles: Particle[] = [];
@@ -192,6 +204,20 @@ export class WorldRenderer {
   private readonly carSirenInst: THREE.InstancedMesh;
   private readonly carSirenMat: THREE.MeshBasicMaterial;
   private lastTrafficCount = 0;
+
+  // Instanced Chinese overloaded cargo trucks (3 draw calls) + fallen cargo debris (1 draw call)
+  private readonly truckCabInst: THREE.InstancedMesh;
+  private readonly truckRearInst: THREE.InstancedMesh;
+  private readonly truckCargoInst: THREE.InstancedMesh;
+  private readonly fallenCargoInst: THREE.InstancedMesh;
+  private lastTruckCount = 0;
+  private lastFallenCargoCount = 0;
+
+  // Instanced crossing animals (3 draw calls total for entire herd!)
+  private readonly animalBodyInst: THREE.InstancedMesh;
+  private readonly animalHeadInst: THREE.InstancedMesh;
+  private readonly animalLegsInst: THREE.InstancedMesh;
+  private lastAnimalCount = 0;
 
   // Instanced powerup & hazard visuals (0 draw calls when inactive!)
   private readonly crateInst: THREE.InstancedMesh;
@@ -245,6 +271,8 @@ export class WorldRenderer {
   private readonly _vB = new THREE.Vector3();
   private readonly _m4 = new THREE.Matrix4();
   private readonly _q = new THREE.Quaternion();
+  private readonly _q2 = new THREE.Quaternion();
+  private readonly _euler = new THREE.Euler();
   private readonly _scale = new THREE.Vector3();
   private readonly _dummy = new THREE.Object3D();
   private readonly _tmpColor = new THREE.Color();
@@ -406,6 +434,18 @@ export class WorldRenderer {
     this.lapArchGroup.visible = false;
     this.scene.add(this.lapArchGroup);
 
+    const china = getChinaAtlas();
+
+    // Chinese Roadside Gas Station ("中国加油") pooled voxel group (placed at s=420m & 1620m, x=+17.5m)
+    this.gasStationGroup = this.buildGasStationGroup(china);
+    this.gasStationGroup.visible = false;
+    this.scene.add(this.gasStationGroup);
+
+    // Chinese National Highway Restaurant ("国道饭店") pooled voxel group (placed at s=900m & 2100m, x=-17.5m)
+    this.dinerGroup = this.buildDinerGroup(china);
+    this.dinerGroup.visible = false;
+    this.scene.add(this.dinerGroup);
+
     // Instanced traffic meshes (all cars rendered in 4-5 draw calls total)
     const carBodyGeo = new THREE.BoxGeometry(2.15, 0.85, 4.5);
     carBodyGeo.translate(0, 0.68, 0);
@@ -455,6 +495,92 @@ export class WorldRenderer {
     const carSirenGeo = new THREE.BoxGeometry(0.55, 0.22, 0.28);
     this.carSirenMat = new THREE.MeshBasicMaterial({ color: 0xff1e42 });
     this.carSirenInst = this.makeInstanced(carSirenGeo, this.carSirenMat, MAX_SIREN_RENDER);
+
+    // Chinese Overloaded Cargo Trucks (3 dedicated InstancedMeshes + 1 FallenCargo debris pool)
+    const truckCabGeo = mergeBoxGeometries(
+      [
+        // Vivid Chinese freight blue flat-nose cab + glowing cyan windshield + headlights
+        { w: 2.45, h: 2.1, d: 2.25, x: 0, y: 1.55, z: -3.25, colorHex: 0x0068b7 },
+        { w: 2.15, h: 0.78, d: 0.14, x: 0, y: 1.98, z: -4.38, colorHex: 0x4cc9f0 },
+        { w: 2.52, h: 0.48, d: 8.8, x: 0, y: 0.88, z: 0.0, colorHex: 0x2b2d42 },
+        { w: 0.44, h: 0.24, d: 0.12, x: -0.82, y: 0.88, z: -4.42, colorHex: 0xfff3b0 },
+        { w: 0.44, h: 0.24, d: 0.12, x: 0.82, y: 0.88, z: -4.42, colorHex: 0xfff3b0 },
+        // 6 heavy truck tires
+        { w: 0.42, h: 0.88, d: 0.92, x: -1.24, y: 0.44, z: -3.1, colorHex: 0x15171e },
+        { w: 0.42, h: 0.88, d: 0.92, x: 1.24, y: 0.44, z: -3.1, colorHex: 0x15171e },
+        { w: 0.42, h: 0.88, d: 0.92, x: -1.24, y: 0.44, z: 1.6, colorHex: 0x15171e },
+        { w: 0.42, h: 0.88, d: 0.92, x: 1.24, y: 0.44, z: 1.6, colorHex: 0x15171e },
+        { w: 0.42, h: 0.88, d: 0.92, x: -1.24, y: 0.44, z: 3.1, colorHex: 0x15171e },
+        { w: 0.42, h: 0.88, d: 0.92, x: 1.24, y: 0.44, z: 3.1, colorHex: 0x15171e },
+      ],
+      true
+    );
+    this.truckCabInst = this.makeInstanced(
+      truckCabGeo,
+      new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
+      MAX_TRUCK_RENDER
+    );
+
+    const truckRearGeo = new THREE.BoxGeometry(2.5, 1.32, 0.22);
+    truckRearGeo.translate(0, 1.5, 4.38);
+    this.truckRearInst = this.makeInstanced(
+      truckRearGeo,
+      new THREE.MeshBasicMaterial({ map: china.truckRear }),
+      MAX_TRUCK_RENDER
+    );
+
+    const truckCargoGeo = new THREE.BoxGeometry(2.62, 2.35, 6.25);
+    truckCargoGeo.translate(0, 1.18, 0);
+    this.truckCargoInst = this.makeInstanced(
+      truckCargoGeo,
+      new THREE.MeshLambertMaterial({ map: china.truckTarp, color: 0xffffff, flatShading: true }),
+      MAX_TRUCK_RENDER
+    );
+    this._tmpColor.setHex(0xffffff);
+    this.truckCargoInst.setColorAt(0, this._tmpColor);
+    this.truckCargoInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+
+    const fallenCargoGeo = new THREE.BoxGeometry(0.88, 0.72, 0.88);
+    this.fallenCargoInst = this.makeInstanced(
+      fallenCargoGeo,
+      new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+      MAX_FALLEN_CARGO_RENDER
+    );
+    this.fallenCargoInst.setColorAt(0, this._tmpColor);
+    this.fallenCargoInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+
+    // Crossing animal herd InstancedMeshes (body, head, animated legs -> 3 draw calls total!)
+    const animalBodyGeo = new THREE.BoxGeometry(1.0, 0.65, 0.6);
+    this.animalBodyInst = this.makeInstanced(
+      animalBodyGeo,
+      new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+      MAX_ANIMAL_RENDER
+    );
+    this.animalBodyInst.setColorAt(0, this._tmpColor);
+    this.animalBodyInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+
+    const animalHeadGeo = new THREE.BoxGeometry(0.45, 0.42, 0.42);
+    this.animalHeadInst = this.makeInstanced(
+      animalHeadGeo,
+      new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+      MAX_ANIMAL_RENDER
+    );
+    this.animalHeadInst.setColorAt(0, this._tmpColor);
+    this.animalHeadInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+
+    const animalLegsGeo = mergeBoxGeometries([
+      { w: 0.16, h: 0.5, d: 0.16, x: -0.32, y: 0.25, z: -0.18 },
+      { w: 0.16, h: 0.5, d: 0.16, x: -0.32, y: 0.25, z: 0.18 },
+      { w: 0.16, h: 0.5, d: 0.16, x: 0.32, y: 0.25, z: -0.18 },
+      { w: 0.16, h: 0.5, d: 0.16, x: 0.32, y: 0.25, z: 0.18 },
+    ]);
+    this.animalLegsInst = this.makeInstanced(
+      animalLegsGeo,
+      new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+      MAX_ANIMAL_RENDER
+    );
+    this.animalLegsInst.setColorAt(0, this._tmpColor);
+    this.animalLegsInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
 
     // Instanced powerup crates, projectiles, bomber jets, bombs, police interceptors & road hazards
     const crateGeo = new THREE.BoxGeometry(1.18, 1.18, 1.18);
@@ -630,6 +756,106 @@ export class WorldRenderer {
     return inst;
   }
 
+  private buildGasStationGroup(china: ReturnType<typeof getChinaAtlas>): THREE.Group {
+    const g = new THREE.Group();
+    const structGeo = mergeBoxGeometries(
+      [
+        // Iconic red cantilevered canopy roof
+        { w: 10.6, h: 1.25, d: 15.0, x: 0, y: 5.55, z: 0, colorHex: 0xd62828 },
+        { w: 10.8, h: 0.25, d: 15.2, x: 0, y: 4.92, z: 0, colorHex: 0xf8f9fa },
+        // Warm glowing ceiling light strips
+        { w: 6.4, h: 0.14, d: 11.0, x: -0.6, y: 4.84, z: 0, colorHex: 0xfff3b0 },
+        // 4 crisp white steel support pillars
+        { w: 0.55, h: 5.0, d: 0.55, x: -3.2, y: 2.5, z: -4.6, colorHex: 0xedf2f4 },
+        { w: 0.55, h: 5.0, d: 0.55, x: 2.2, y: 2.5, z: -4.6, colorHex: 0xedf2f4 },
+        { w: 0.55, h: 5.0, d: 0.55, x: -3.2, y: 2.5, z: 4.6, colorHex: 0xedf2f4 },
+        { w: 0.55, h: 5.0, d: 0.55, x: 2.2, y: 2.5, z: 4.6, colorHex: 0xedf2f4 },
+        // 2 red-white fuel dispenser islands
+        { w: 1.15, h: 1.85, d: 2.2, x: -1.6, y: 0.92, z: -2.6, colorHex: 0xe63946 },
+        { w: 1.18, h: 0.72, d: 1.9, x: -1.6, y: 1.48, z: -2.6, colorHex: 0xf8f9fa },
+        { w: 1.15, h: 1.85, d: 2.2, x: -1.6, y: 0.92, z: 2.6, colorHex: 0xe63946 },
+        { w: 1.18, h: 0.72, d: 1.9, x: -1.6, y: 1.48, z: 2.6, colorHex: 0xf8f9fa },
+        // Concrete apron slab
+        { w: 11.4, h: 0.14, d: 16.2, x: 0, y: 0.05, z: 0, colorHex: 0x6c757d },
+      ],
+      true
+    );
+    g.add(new THREE.Mesh(structGeo, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })));
+
+    // Road-facing & approach-facing "中国加油 92# 95#" signboards
+    const signMat = new THREE.MeshBasicMaterial({ map: china.gasSign, side: THREE.DoubleSide });
+    const frontSign = new THREE.Mesh(new THREE.PlaneGeometry(10.2, 2.2), signMat);
+    frontSign.position.set(0, 5.65, 7.62);
+    g.add(frontSign);
+    const sideSign = new THREE.Mesh(new THREE.PlaneGeometry(13.8, 2.1), signMat);
+    sideSign.position.set(-5.42, 5.65, 0);
+    sideSign.rotation.y = -Math.PI / 2;
+    g.add(sideSign);
+
+    // 24H convenience store booth behind pumps
+    const store = new THREE.Mesh(
+      new THREE.BoxGeometry(5.2, 4.0, 11.2),
+      new THREE.MeshLambertMaterial({ map: china.gasStore, flatShading: true })
+    );
+    store.position.set(5.4, 2.0, 0);
+    g.add(store);
+
+    return g;
+  }
+
+  private buildDinerGroup(china: ReturnType<typeof getChinaAtlas>): THREE.Group {
+    const g = new THREE.Group();
+
+    // White ceramic-tiled national highway restaurant building
+    const building = new THREE.Mesh(
+      new THREE.BoxGeometry(8.0, 4.6, 13.6),
+      new THREE.MeshLambertMaterial({ map: china.dinerFacade, flatShading: true })
+    );
+    building.position.set(-2.4, 2.3, 0);
+    g.add(building);
+
+    // Blue roadside awning, outdoor tables/stools, and roof frame
+    const propsGeo = mergeBoxGeometries(
+      [
+        { w: 4.2, h: 0.34, d: 13.8, x: 3.4, y: 3.55, z: 0, colorHex: 0x1d4ed8 },
+        { w: 0.25, h: 3.5, d: 0.25, x: 5.2, y: 1.75, z: -6.2, colorHex: 0x94a3b8 },
+        { w: 0.25, h: 3.5, d: 0.25, x: 5.2, y: 1.75, z: 6.2, colorHex: 0x94a3b8 },
+        // Roadside plastic dining tables & crimson stools
+        { w: 1.4, h: 0.82, d: 1.4, x: 3.4, y: 0.42, z: -3.2, colorHex: 0xf8f9fa },
+        { w: 0.45, h: 0.5, d: 0.45, x: 2.3, y: 0.25, z: -3.2, colorHex: 0xe63946 },
+        { w: 0.45, h: 0.5, d: 0.45, x: 4.5, y: 0.25, z: -3.2, colorHex: 0xe63946 },
+        { w: 1.4, h: 0.82, d: 1.4, x: 3.4, y: 0.42, z: 3.2, colorHex: 0xf8f9fa },
+        { w: 0.45, h: 0.5, d: 0.45, x: 2.3, y: 0.25, z: 3.2, colorHex: 0xe63946 },
+        { w: 0.45, h: 0.5, d: 0.45, x: 4.5, y: 0.25, z: 3.2, colorHex: 0xe63946 },
+        // Concrete patio
+        { w: 12.8, h: 0.14, d: 15.2, x: 0.4, y: 0.05, z: 0, colorHex: 0x7a7d85 },
+      ],
+      true
+    );
+    g.add(new THREE.Mesh(propsGeo, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })));
+
+    // Bold crimson/gold rooftop signboard ("国道饭店 · 司机之家")
+    const signMat = new THREE.MeshBasicMaterial({ map: china.dinerSign, side: THREE.DoubleSide });
+    const frontSign = new THREE.Mesh(new THREE.PlaneGeometry(11.0, 2.7), signMat);
+    frontSign.position.set(0.2, 6.0, 6.7);
+    g.add(frontSign);
+    const sideSign = new THREE.Mesh(new THREE.PlaneGeometry(13.2, 2.7), signMat);
+    sideSign.position.set(1.72, 6.0, 0);
+    sideSign.rotation.y = Math.PI / 2;
+    g.add(sideSign);
+
+    // 4 glowing red pixel lanterns hanging under the blue awning
+    const lanternGeo = mergeBoxGeometries([
+      { w: 0.52, h: 0.68, d: 0.52, x: 5.0, y: 3.05, z: -4.8 },
+      { w: 0.52, h: 0.68, d: 0.52, x: 5.0, y: 3.05, z: -1.6 },
+      { w: 0.52, h: 0.68, d: 0.52, x: 5.0, y: 3.05, z: 1.6 },
+      { w: 0.52, h: 0.68, d: 0.52, x: 5.0, y: 3.05, z: 4.8 },
+    ]);
+    g.add(new THREE.Mesh(lanternGeo, new THREE.MeshBasicMaterial({ map: china.lantern })));
+
+    return g;
+  }
+
   private createRibbonGeometry(slices: number): THREE.BufferGeometry {
     const vertCount = slices * 2;
     const positions = new Float32Array(vertCount * 3);
@@ -751,7 +977,9 @@ export class WorldRenderer {
     traffic: TrafficCar[],
     dt: number,
     timeSec: number,
-    itemVisuals?: ItemVisuals
+    itemVisuals?: ItemVisuals,
+    fallenCargo?: readonly FallenCargo[],
+    animals?: readonly CrossingAnimal[]
   ): void {
     const originS = local.s;
     const originX = roadX(originS);
@@ -767,18 +995,25 @@ export class WorldRenderer {
     // 1. Update sliding road & terrain ribbons
     this.updateRoadRibbons(originS, originX, originY);
 
-    // 2. Update deterministic instanced roadside props + boost pads
+    // 2. Update deterministic instanced roadside props + boost pads + Chinese landmarks
     this.updateProps(originS, originX, originY, timeSec);
+    this.updateRoadsideLandmarks(originS, originX, originY);
 
-    // 3. Update traffic car meshes
+    // 3. Update traffic car meshes (sedans/police + Chinese overloaded cargo trucks)
     this.updateTrafficVisuals(traffic, originS, originX, originY, timeSec);
 
-    // 4. Update instanced powerups, projectiles, jets, bombs, interceptors, hazards & sniper laser
+    // 4. Update instanced powerups, fallen truck cargo & crossing animals
     if (itemVisuals) {
       this.updateItemVisuals(itemVisuals, originS, originX, originY, timeSec);
     }
+    if (fallenCargo) {
+      this.updateFallenCargoVisuals(fallenCargo, originS, originX, originY, timeSec);
+    }
+    if (animals) {
+      this.updateAnimalVisuals(animals, originS, originX, originY);
+    }
 
-    // 5. Sync & update all motorcycle visuals (local + remote players + bots)
+    // 5. Sync & update all motorcycle visuals (local + remote players + bots + delivery riders)
     this.updateRiders(allRiders, originS, originX, originY, timeSec);
 
     // 6. Update particles & 3D hit popups
@@ -1067,19 +1302,49 @@ export class WorldRenderer {
     const pos = this._v1;
     const subPos = this._v2;
     let used = 0;
+    let trucks = 0;
     let sirens = 0;
     const sirenToggle = Math.floor(timeSec * 9) % 2 === 0;
     const sirenX = sirenToggle ? -0.34 : 0.34;
     this.carSirenMat.color.setHex(sirenToggle ? 0xff1e42 : 0x00b4ff);
 
-    for (let i = 0; i < traffic.length && used < MAX_TRAFFIC_RENDER; i++) {
+    for (let i = 0; i < traffic.length; i++) {
       const car = traffic[i];
       const ds = signedTrackDelta(car.s, originS);
-      if (ds < -26 || ds > 295) continue;
+      if (ds < -32 || ds > 295) continue;
 
       sampleRoadFrame(car.s, f);
       roadFrameToLocalWorld(f, car.s, car.x + car.bumpOffset, 0, originS, originX, originY, pos);
       this.setRoadBasisQuaternion(f, this._q);
+
+      // Apply dynamic spinout fishtail & blast tilt when affected by items
+      const spinT = car.spinTimer ?? 0;
+      const tilt = car.hitTilt ?? 0;
+      if (spinT > 0 || tilt !== 0) {
+        const yawSpin = spinT > 0 ? Math.sin(spinT * 7.5) * 0.65 : 0;
+        this._euler.set(0, yawSpin, tilt);
+        this._q2.setFromEuler(this._euler);
+        this._q.multiply(this._q2);
+      }
+
+      if (car.type === 4) {
+        if (trucks >= MAX_TRUCK_RENDER) continue;
+        this._scale.set(1, 1, 1);
+        this._m4.compose(pos, this._q, this._scale);
+        this.truckCabInst.setMatrixAt(trucks, this._m4);
+        this.truckRearInst.setMatrixAt(trucks, this._m4);
+
+        subPos.set(0, 1.12, 0.92).applyQuaternion(this._q).add(pos);
+        this._scale.set(1, car.cargoDropped ? 0.45 : 1.0, 1);
+        this._m4.compose(subPos, this._q, this._scale);
+        this.truckCargoInst.setMatrixAt(trucks, this._m4);
+        this._tmpColor.setHex(TRUCK_CARGO_TINTS[(car.cargoStyle ?? 0) % TRUCK_CARGO_TINTS.length]);
+        this.truckCargoInst.setColorAt(trucks, this._tmpColor);
+        trucks++;
+        continue;
+      }
+
+      if (used >= MAX_TRAFFIC_RENDER) continue;
 
       // Shared base matrix for body, merged 4-wheels, and merged 4-lights
       this._scale.set(1, 1, 1);
@@ -1129,6 +1394,207 @@ export class WorldRenderer {
       this.carLightsInst.instanceMatrix.needsUpdate = true;
       this.carSirenInst.instanceMatrix.needsUpdate = true;
       this.lastTrafficCount = used;
+    }
+
+    this.truckCabInst.count = trucks;
+    this.truckRearInst.count = trucks;
+    this.truckCargoInst.count = trucks;
+    if (trucks > 0 || this.lastTruckCount > 0) {
+      this.truckCabInst.instanceMatrix.needsUpdate = true;
+      this.truckRearInst.instanceMatrix.needsUpdate = true;
+      this.truckCargoInst.instanceMatrix.needsUpdate = true;
+      if (this.truckCargoInst.instanceColor) {
+        this.truckCargoInst.instanceColor.needsUpdate = true;
+      }
+      this.lastTruckCount = trucks;
+    }
+  }
+
+  private updateRoadsideLandmarks(originS: number, originX: number, originY: number): void {
+    const f = this._f;
+    const pos = this._v1;
+
+    // Nearest Chinese Gas Station ("中国加油") at cyclic s = 420m or 1620m, right side x = +17.5m
+    let gasVisible = false;
+    for (let i = 0; i < GAS_STATION_STOPS.length; i++) {
+      const stopS = GAS_STATION_STOPS[i];
+      const ds = signedTrackDelta(stopS, originS);
+      if (ds >= -45 && ds <= 320) {
+        sampleRoadFrame(stopS, f);
+        roadFrameToLocalWorld(f, stopS, 17.5, 0, originS, originX, originY, pos);
+        this.gasStationGroup.position.copy(pos);
+        this.setRoadBasisQuaternion(f, this.gasStationGroup.quaternion);
+        gasVisible = true;
+        break;
+      }
+    }
+    this.gasStationGroup.visible = gasVisible;
+
+    // Nearest National Highway Restaurant ("国道饭店") at cyclic s = 900m or 2100m, left side x = -17.5m
+    let dinerVisible = false;
+    for (let i = 0; i < DINER_STOPS.length; i++) {
+      const stopS = DINER_STOPS[i];
+      const ds = signedTrackDelta(stopS, originS);
+      if (ds >= -45 && ds <= 320) {
+        sampleRoadFrame(stopS, f);
+        roadFrameToLocalWorld(f, stopS, -17.5, 0, originS, originX, originY, pos);
+        this.dinerGroup.position.copy(pos);
+        this.setRoadBasisQuaternion(f, this.dinerGroup.quaternion);
+        dinerVisible = true;
+        break;
+      }
+    }
+    this.dinerGroup.visible = dinerVisible;
+  }
+
+  private updateFallenCargoVisuals(
+    cargo: readonly FallenCargo[],
+    originS: number,
+    originX: number,
+    originY: number,
+    timeSec: number
+  ): void {
+    const d = this._dummy;
+    const pos = this._v1;
+    let count = 0;
+
+    for (let i = 0; i < cargo.length && count < MAX_FALLEN_CARGO_RENDER; i++) {
+      const c = cargo[i];
+      if (!c.active) continue;
+      const ds = signedTrackDelta(c.s, originS);
+      if (ds < -26 || ds > 260) continue;
+      roadToLocalWorld(c.s, c.x, c.y, originS, originX, originY, pos);
+      d.position.copy(pos);
+      const tumble = c.y > 0.36 ? timeSec * 7 + i : i * 0.7;
+      d.rotation.set(tumble, tumble * 0.8, 0);
+      d.scale.set(1, 1, 1);
+      d.updateMatrix();
+      this.fallenCargoInst.setMatrixAt(count, d.matrix);
+      this._tmpColor.setHex(CARGO_DEBRIS_COLORS[c.colorIdx % CARGO_DEBRIS_COLORS.length]);
+      this.fallenCargoInst.setColorAt(count, this._tmpColor);
+      count++;
+    }
+
+    this.fallenCargoInst.count = count;
+    if (count > 0 || this.lastFallenCargoCount > 0) {
+      this.fallenCargoInst.instanceMatrix.needsUpdate = true;
+      if (this.fallenCargoInst.instanceColor) {
+        this.fallenCargoInst.instanceColor.needsUpdate = true;
+      }
+      this.lastFallenCargoCount = count;
+    }
+  }
+
+  private updateAnimalVisuals(
+    animals: readonly CrossingAnimal[],
+    originS: number,
+    originX: number,
+    originY: number
+  ): void {
+    const f = this._f;
+    const pos = this._v1;
+    const subPos = this._v2;
+    let count = 0;
+
+    for (let i = 0; i < animals.length && count < MAX_ANIMAL_RENDER; i++) {
+      const a = animals[i];
+      if (!a.active) continue;
+      const ds = signedTrackDelta(a.s, originS);
+      if (ds < -28 || ds > 260) continue;
+
+      sampleRoadFrame(a.s, f);
+      const bob = Math.abs(Math.sin(a.phase)) * 0.14 * a.size;
+      roadFrameToLocalWorld(f, a.s, a.x, bob, originS, originX, originY, pos);
+      this.setRoadBasisQuaternion(f, this._q);
+
+      // Face left (-X) or right (+X) along crossing direction
+      this._euler.set(0, a.dir > 0 ? 0 : Math.PI, Math.sin(a.phase) * 0.08);
+      this._q2.setFromEuler(this._euler);
+      this._q.multiply(this._q2);
+
+      let bodyHex = 0xf1faee;
+      let headHex = 0x22242e;
+      let legHex = 0x22242e;
+      let sx = 1.0;
+      let sy = 1.0;
+      let sz = 1.0;
+      if (a.species === 'cow') {
+        bodyHex = 0xf1faee;
+        headHex = 0x1d1e2c;
+        legHex = 0x1d1e2c;
+        sx = 1.45;
+        sy = 1.15;
+        sz = 1.15;
+      } else if (a.species === 'sheep') {
+        bodyHex = 0xf8f9fa;
+        headHex = 0x3d405b;
+        legHex = 0x3d405b;
+        sx = 0.96;
+        sy = 0.88;
+        sz = 0.95;
+      } else if (a.species === 'dog') {
+        bodyHex = 0xe09f3e;
+        headHex = 0xc97d20;
+        legHex = 0x9e5a14;
+        sx = 0.9;
+        sy = 0.65;
+        sz = 0.68;
+      } else if (a.species === 'boar') {
+        bodyHex = 0x4a3728;
+        headHex = 0x2f2118;
+        legHex = 0x231710;
+        sx = 1.1;
+        sy = 0.82;
+        sz = 0.92;
+      } else {
+        // white goose!
+        bodyHex = 0xffffff;
+        headHex = 0xff9f1c;
+        legHex = 0xff9f1c;
+        sx = 0.62;
+        sy = 0.66;
+        sz = 0.68;
+      }
+
+      const sc = a.size;
+
+      // Body
+      subPos.set(0, 0.72 * sy * sc, 0).applyQuaternion(this._q).add(pos);
+      this._scale.set(sx * sc, sy * sc, sz * sc);
+      this._m4.compose(subPos, this._q, this._scale);
+      this.animalBodyInst.setMatrixAt(count, this._m4);
+      this._tmpColor.setHex(bodyHex);
+      this.animalBodyInst.setColorAt(count, this._tmpColor);
+
+      // Head (in front along +X local after facing dir)
+      subPos.set(0.62 * sx * sc, 0.96 * sy * sc, 0).applyQuaternion(this._q).add(pos);
+      this._scale.set(sx * 0.85 * sc, sy * 0.9 * sc, sz * 0.85 * sc);
+      this._m4.compose(subPos, this._q, this._scale);
+      this.animalHeadInst.setMatrixAt(count, this._m4);
+      this._tmpColor.setHex(headHex);
+      this.animalHeadInst.setColorAt(count, this._tmpColor);
+
+      // Legs
+      this._scale.set(sx * sc, sy * sc, sz * sc);
+      this._m4.compose(pos, this._q, this._scale);
+      this.animalLegsInst.setMatrixAt(count, this._m4);
+      this._tmpColor.setHex(legHex);
+      this.animalLegsInst.setColorAt(count, this._tmpColor);
+
+      count++;
+    }
+
+    this.animalBodyInst.count = count;
+    this.animalHeadInst.count = count;
+    this.animalLegsInst.count = count;
+    if (count > 0 || this.lastAnimalCount > 0) {
+      this.animalBodyInst.instanceMatrix.needsUpdate = true;
+      this.animalHeadInst.instanceMatrix.needsUpdate = true;
+      this.animalLegsInst.instanceMatrix.needsUpdate = true;
+      if (this.animalBodyInst.instanceColor) this.animalBodyInst.instanceColor.needsUpdate = true;
+      if (this.animalHeadInst.instanceColor) this.animalHeadInst.instanceColor.needsUpdate = true;
+      if (this.animalLegsInst.instanceColor) this.animalLegsInst.instanceColor.needsUpdate = true;
+      this.lastAnimalCount = count;
     }
   }
 

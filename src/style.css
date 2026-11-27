@@ -612,12 +612,22 @@ body {
   display: none;
 }
 
-/* Incoming Sniper Lock Warning Pill */
-.vm-danger-lock {
+/* Top-Center Danger Alert Stack (Sniper Lock + Enraged Delivery Hunter) */
+.vm-alert-stack {
   position: absolute;
   top: max(92px, calc(env(safe-area-inset-top) + 80px));
   left: 50%;
   transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 26;
+  contain: layout style;
+}
+
+.vm-danger-lock {
   padding: 6px 14px;
   background: rgba(34, 6, 16, 0.96);
   border: 3px solid var(--vm-crimson);
@@ -630,7 +640,6 @@ body {
   text-shadow: 2px 2px 0 var(--vm-ink);
   white-space: nowrap;
   pointer-events: none;
-  z-index: 26;
   animation: vm-danger-blink 0.36s steps(2, end) infinite;
 }
 
@@ -638,8 +647,28 @@ body {
   display: none;
 }
 
+.vm-enraged-warn {
+  padding: 6px 14px;
+  background: rgba(38, 10, 6, 0.96);
+  border: 3px solid var(--vm-crimson);
+  box-shadow: 4px 4px 0 var(--vm-ink), inset 0 0 0 2px var(--vm-gold);
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--vm-gold);
+  text-shadow: 2px 2px 0 var(--vm-ink);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: vm-danger-blink 0.42s steps(2, end) infinite;
+}
+
+.vm-enraged-warn.is-hidden {
+  display: none;
+}
+
 @media (min-width: 1024px) {
-  .vm-danger-lock {
+  .vm-alert-stack {
     top: max(56px, calc(env(safe-area-inset-top) + 44px));
   }
 }
@@ -1042,6 +1071,12 @@ body {
   border-left-color: var(--vm-gold);
 }
 
+.vm-row.is-enraged {
+  background: rgba(255, 64, 24, 0.24);
+  border-left-color: #ff4500;
+  box-shadow: inset 0 0 0 1px rgba(255, 110, 32, 0.45);
+}
+
 .vm-row-rank {
   font-family: var(--vm-font-ui);
   font-weight: 700;
@@ -1067,7 +1102,7 @@ body {
   height: 18px;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
-  border: 1px solid var(--vm-ink);
+  border: 2px solid var(--vm-ink);
   background: var(--vm-bg-deep);
   flex-shrink: 0;
 }
@@ -1076,12 +1111,35 @@ body {
   border-color: var(--vm-gold);
 }
 
+.vm-row-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .vm-row-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--vm-text);
   font-weight: 400;
+}
+
+.vm-row-fire {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.vm-row-fire.is-hidden {
+  display: none;
+}
+
+.vm-row.is-enraged .vm-row-name {
+  color: #ffe08a;
+  font-weight: 700;
 }
 
 .vm-row.is-local .vm-row-name {
@@ -2134,6 +2192,7 @@ body {
   .vm-item-slot,
   .vm-item-ttl,
   .vm-danger-lock,
+  .vm-enraged-warn,
   .vm-wheelie-tag,
   .vm-wheelie-fill {
     animation: none !important;

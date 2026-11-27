@@ -155,6 +155,9 @@ export interface RiderRenderState {
   turboShieldTimer: number;
   spinOutTimer: number;
   incomingLockName: string | null;
+  deliveryRole?: 'meituan' | 'eleme' | null;
+  enraged?: boolean;
+  enragedTargetId?: string | null;
 }
 
 export interface CombatHitEvent {
@@ -178,10 +181,27 @@ export interface TrafficCar {
   s: number;
   x: number;
   speed: number;
-  type: 0 | 1 | 2 | 3; // 0 sedan, 1 muscle, 2 pickup, 3 police
+  type: 0 | 1 | 2 | 3 | 4; // 0 sedan, 1 muscle, 2 pickup, 3 police, 4 overloaded cargo truck
   colorIdx: number;
   bumpOffset: number;
   bumpVel: number;
   honked: boolean;
   nearMissed: boolean;
+  cargoStyle?: number; // 0 tarp, 1 timber logs, 2 melon crates
+  spinTimer?: number;
+  slowTimer?: number;
+  hitTilt?: number;
+  cargoDropped?: boolean;
+}
+
+export interface FallenCargo {
+  active: boolean;
+  s: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  vs: number;
+  life: number;
+  colorIdx: number;
 }

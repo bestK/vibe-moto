@@ -1,6 +1,7 @@
 import './style.css';
 import { RetroAudio } from './audio/RetroAudio';
 import { AiRivals } from './game/AiRivals';
+import { AnimalCallbacks, AnimalSpecies, AnimalSystem, CrossingAnimal } from './game/AnimalSystem';
 import { ItemCallbacks, ItemSystem } from './game/ItemSystem';
 import {
   AVATAR_COUNT,
@@ -11,13 +12,14 @@ import {
 } from './game/PixelAvatars';
 import { InputState, ParticleKind, PlayerCallbacks, PlayerPhysics } from './game/PlayerPhysics';
 import { getLapNumber, signedTrackDelta } from './game/RoadMath';
-import { TrafficSystem } from './game/TrafficSystem';
+import { CarItemEffectKind, TrafficSystem } from './game/TrafficSystem';
 import {
   BIKE_PALETTES,
   CombatHitEvent,
   ItemNetEvent,
   ItemType,
   RiderRenderState,
+  TrafficCar,
   WeaponType,
 } from './game/types';
 import { CameraMode, WorldRenderer } from './game/WorldRenderer';
@@ -113,6 +115,10 @@ const audio = new RetroAudio();
 const traffic = new TrafficSystem();
 const ai = new AiRivals();
 const items = new ItemSystem();
+const animals = new AnimalSystem();
+
+const GAS_STATION_STOPS = [420, 1620] as const;
+let gasRefillCooldown = 0;
 
 const pressedKeys = new Set<string>();
 const touchState = {
@@ -438,6 +444,23 @@ itemCallbacks = {
       ai.applyPoliceDrag(target.id, dt, shoveX);
     }
   },
+  onAffectTraffic(car: TrafficCar, kind: CarItemEffectKind, dirX: number) {
+    const res = traffic.applyItemEffectToCar(car.id, kind, dirX);
+    if (!res.hit) return;
+    if (res.isTruck) {
+      if (kind === 'banana') {
+        audio.playBananaSlip();
+      } else if (kind === 'blast' || kind === 'trap' || kind === 'sniper') {
+        audio.playTruckCrash();
+      }
+      world.triggerShake(kind === 'blast' ? 0.45 : 0.25, 0.22);
+    }
+    if (res.broadcastText) {
+      const accent = kind === 'banana' ? 'gold' : 'red';
+      hud.pushBroadcast(res.broadcastText, accent);
+      hud.showToast(res.broadcastText, accent);
+    }
+  },
   onLocalDamage(dmg, knockX, ko, sourceLabel, popup) {
     const causedKo = player.applyExternalHit(dmg, knockX, ko);
     const isKo = causedKo || (ko && player.state.crashed);
@@ -632,6 +655,42 @@ const playerCallbacks: PlayerCallbacks = {
     hud.showToast('WIPEOUT!', 'red');
   },
   onParticles: spawnParticlePreset,
+};
+
+ai.setOnDeliveryEnrage((riderName, role) => {
+  audio.playRageRoar();
+  world.triggerShake(0.36, 0.26);
+  const line =
+    role === 'meituan'
+      ? `💢 ${riderName} 狂暴了！「影响送餐超时扣钱！别想跑！」`
+      : `💢 ${riderName} 狂暴了！「外卖洒汤了！给我站住！」`;
+  hud.pushBroadcast(line, 'red');
+  hud.showToast(`💢 ${riderName} 狂暴追杀!`, 'red');
+});
+
+const animalCallbacks: AnimalCallbacks = {
+  onWarn(text: string, species: AnimalSpecies) {
+    audio.playAnimalSound(species);
+    hud.pushBroadcast(text, 'gold');
+    hud.showToast(text, 'gold');
+  },
+  onPlayerHit(species: AnimalSpecies, x: number) {
+    audio.playAnimalSound(species);
+    const knockDir = player.state.x >= x ? 1 : -1;
+    const causedKo = player.applyExternalHit(24, knockDir * 11, false);
+    if (causedKo) {
+      audio.playCrash();
+    }
+    world.triggerShake(causedKo ? 0.62 : 0.42, 0.28);
+    spawnParticlePreset('crash', player.state.s, player.state.x, 0.7, player.state.speed * 0.35);
+    world.spawnHitPopup(causedKo ? 'KO' : 'BONK', player.state.s, player.state.x, 1.7);
+    hud.showToast(causedKo ? '撞飞翻车!' : '撞到过路动物!', 'red');
+  },
+  onAnimalDodged(species: AnimalSpecies) {
+    player.state.nitro = Math.min(100, player.state.nitro + 12);
+    audio.playAnimalSound(species);
+    hud.showToast('跃过动物 +12 N2O!', 'cyan');
+  },
 };
 
 function handleBotHitPlayer(dmg: number, knockX: number, botName: string): void {
@@ -844,6 +903,7 @@ let perfWindowStartMs = prevPerfMs;
 let perfFrameCount = 0;
 let currentTraffic = traffic.update(player.state.s, Date.now() / 1000, 0);
 let currentBots: RiderRenderState[] = [];
+let currentAnimals: readonly CrossingAnimal[] = [];
 let rafId: number | null = null;
 let bgHeartbeatId: number | null = null;
 let isPageHidden = document.hidden;
@@ -941,7 +1001,43 @@ function frame(nowPerfMs: number): void {
       combatTargets.push(currentBots[i]);
     }
 
-    player.update(dt, combatTargets, currentTraffic, playerCallbacks);
+    player.update(
+      dt,
+      combatTargets,
+      currentTraffic,
+      playerCallbacks,
+      traffic.getFallenCargo()
+    );
+
+    // Crossing village animals on the Chinese National Highway
+    currentAnimals = animals.update(
+      dt,
+      player.state.s,
+      player.state.x,
+      player.state.y,
+      player.state.speed,
+      player.state.crashed,
+      player.state.invulnTimer > 0,
+      player.state.turboShieldTimer > 0,
+      animalCallbacks
+    );
+
+    // Chinese Gas Station ("中国加油") drive-by right-shoulder nitro bonus (+25% N2O, 12s cooldown)
+    if (gasRefillCooldown > 0) {
+      gasRefillCooldown = Math.max(0, gasRefillCooldown - dt);
+    } else if (!player.state.crashed && player.state.x > 5.2) {
+      for (let i = 0; i < GAS_STATION_STOPS.length; i++) {
+        if (Math.abs(signedTrackDelta(GAS_STATION_STOPS[i], player.state.s)) < 12.0) {
+          gasRefillCooldown = 12.0;
+          player.state.nitro = Math.min(100, player.state.nitro + 25);
+          audio.playFuelChime();
+          spawnParticlePreset('nitro', player.state.s, player.state.x, 0.7, player.state.speed * 0.4);
+          hud.showToast('⛽ 中国加油 +25% N2O', 'cyan');
+          hud.pushBroadcast(`⛽ ${player.state.name} 路过中国加油站，氮气 +25%!`, 'cyan');
+          break;
+        }
+      }
+    }
 
     // Detect lap completion across 2400m cyclic circuit
     const curLap = getLapNumber(player.state.s);
@@ -953,7 +1049,7 @@ function frame(nowPerfMs: number): void {
     }
   }
 
-  // 3. Assemble render list (local + live remote peers + local bots)
+  // 3. Assemble render list (local + live remote peers + local bots + delivery riders)
   allRiders.length = 0;
   allRiders.push(player.state);
   for (let i = 0; i < remoteRiders.length; i++) {
@@ -963,19 +1059,29 @@ function frame(nowPerfMs: number): void {
     allRiders.push(currentBots[i]);
   }
 
-  // 4. Update 8 powerup items, projectiles, bomber jets, sniper scope & hazards
+  // 4. Update 8 powerup items, projectiles, bomber jets, sniper scope, hazards & cargo truck reactions
   if (hitstopTimer <= 0) {
-    items.update(dt, player.state, combatTargets, allRiders, itemCallbacks);
+    items.update(dt, player.state, combatTargets, allRiders, itemCallbacks, currentTraffic);
   }
 
-  // 5. Engine audio, 3D HD-pixel frame, sniper HUD & throttled HUD refresh
+  // 5. Engine audio, 3D HD-pixel frame, enraged delivery hunter & sniper HUD, and throttled HUD refresh
   audio.updateEngine(
     player.state.speed,
     player.state.nitroActive || player.state.turboShieldTimer > 0,
     player.state.crashed,
     dt
   );
-  world.renderFrame(player.state, allRiders, currentTraffic, dt, timeSec, items.visuals);
+  world.renderFrame(
+    player.state,
+    allRiders,
+    currentTraffic,
+    dt,
+    timeSec,
+    items.visuals,
+    traffic.getFallenCargo(),
+    currentAnimals
+  );
+  hud.setEnragedWarning(ai.isAnyDeliveryEnraged());
   hud.setSniperState(items.getSniperHudState(), items.getSniperCandidates());
   hud.update(player.state, allRiders, pressedKeys, dt);
 

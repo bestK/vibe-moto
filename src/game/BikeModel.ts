@@ -1,7 +1,28 @@
 import * as THREE from 'three';
 import { BIKE_PALETTES, BOT_PALETTE, BikePalette, RiderRenderState, WeaponType } from './types';
+import { getChinaAtlas } from './ChinaTextures';
 import { getAvatarVersion } from './PixelAvatars';
 import { drawNameplateCanvas, getPixelAtlas } from './PixelTextures';
+
+const MEITUAN_PALETTE: BikePalette = {
+  name: 'MEITUAN',
+  primary: '#ffc300',
+  secondary: '#181920',
+  jacket: '#ffc300',
+  helmet: '#ffc300',
+  visor: '#00f5d4',
+  accent: '#181920',
+};
+
+const ELEME_PALETTE: BikePalette = {
+  name: 'ELEME',
+  primary: '#0091ff',
+  secondary: '#edf2f4',
+  jacket: '#0091ff',
+  helmet: '#0091ff',
+  visor: '#ffd166',
+  accent: '#ffffff',
+};
 
 // Shared geometries (allocated once, reused by all players & bots)
 let _sharedGeos: {
@@ -30,6 +51,9 @@ let _sharedGeos: {
   batSpike: THREE.BoxGeometry;
   chainLink: THREE.BoxGeometry;
   chainWeight: THREE.BoxGeometry;
+  deliveryBox: THREE.BoxGeometry;
+  kangarooEar: THREE.BoxGeometry;
+  helmetWing: THREE.BoxGeometry;
   auraRing: THREE.RingGeometry;
   shadow: THREE.PlaneGeometry;
 } | null = null;
@@ -75,6 +99,9 @@ function getSharedGeos() {
     batSpike: new THREE.BoxGeometry(0.18, 0.08, 0.18),
     chainLink: new THREE.BoxGeometry(0.1, 0.14, 0.1),
     chainWeight: new THREE.BoxGeometry(0.18, 0.18, 0.18),
+    deliveryBox: new THREE.BoxGeometry(0.56, 0.56, 0.56),
+    kangarooEar: new THREE.BoxGeometry(0.08, 0.24, 0.08),
+    helmetWing: new THREE.BoxGeometry(0.24, 0.12, 0.07),
     auraRing,
     shadow,
   };
@@ -91,6 +118,26 @@ function getSharedWheelMat(): THREE.MeshLambertMaterial {
   }
   return _sharedWheelMat;
 }
+
+let _meituanBoxMat: THREE.MeshLambertMaterial | null = null;
+let _elemeBoxMat: THREE.MeshLambertMaterial | null = null;
+function getDeliveryBoxMat(role: 'meituan' | 'eleme'): THREE.MeshLambertMaterial {
+  const atlas = getChinaAtlas();
+  if (role === 'meituan') {
+    if (!_meituanBoxMat) {
+      _meituanBoxMat = new THREE.MeshLambertMaterial({ map: atlas.meituanBox, flatShading: true });
+    }
+    return _meituanBoxMat;
+  }
+  if (!_elemeBoxMat) {
+    _elemeBoxMat = new THREE.MeshLambertMaterial({ map: atlas.elemeBox, flatShading: true });
+  }
+  return _elemeBoxMat;
+}
+
+const _meituanEarMat = new THREE.MeshLambertMaterial({ color: 0xffc300, flatShading: true });
+const _elemeWingMat = new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true });
+const _rageFlameOuterMat = new THREE.MeshBasicMaterial({ color: 0xff2a54, transparent: true, opacity: 0.92 });
 
 const _shadowMat = new THREE.MeshBasicMaterial({
   color: 0x090b14,
@@ -119,6 +166,9 @@ export class BikeVisual {
   private readonly shadowMesh: THREE.Mesh;
   private readonly auraMesh: THREE.Mesh;
   private readonly auraMat: THREE.MeshBasicMaterial;
+  private readonly deliveryBoxMesh: THREE.Mesh;
+  private readonly meituanEars: THREE.Group;
+  private readonly elemeWings: THREE.Group;
 
   // Articulated rider
   private readonly riderGroup = new THREE.Group();
@@ -148,8 +198,10 @@ export class BikeVisual {
   private lastPlateHp = -1;
   private lastPlateAvatar = -1;
   private lastPlateAvatarVer = -1;
+  private lastPlateEnraged = false;
   private lastColorIdx = -1;
   private isBot = false;
+  private deliveryRole: 'meituan' | 'eleme' | null = null;
 
   constructor(palette: BikePalette, showNameplate: boolean) {
     const geos = getSharedGeos();
@@ -243,6 +295,12 @@ export class BikeVisual {
     tail.rotation.x = -0.18;
     this.bikePivot.add(tail);
 
+    // Rear insulated delivery box (shown only for Meituan / Ele.me delivery riders)
+    this.deliveryBoxMesh = new THREE.Mesh(geos.deliveryBox, _darkMat);
+    this.deliveryBoxMesh.position.set(0, 1.18, 0.86);
+    this.deliveryBoxMesh.visible = false;
+    this.bikePivot.add(this.deliveryBoxMesh);
+
     // Dual chrome exhaust pipes
     const exhL = new THREE.Mesh(geos.exhaust, _metalMat);
     exhL.position.set(-0.26, 0.44, 0.76);
@@ -305,6 +363,32 @@ export class BikeVisual {
     const visor = new THREE.Mesh(geos.visor, this.visorMat);
     visor.position.set(0, 0.72, -0.39);
     this.torsoGroup.add(visor);
+
+    // Cute Meituan helmet kangaroo ears (hidden unless deliveryRole === 'meituan')
+    this.meituanEars = new THREE.Group();
+    this.meituanEars.position.set(0, 0.94, -0.2);
+    const earL = new THREE.Mesh(geos.kangarooEar, _meituanEarMat);
+    earL.position.set(-0.12, 0.06, 0);
+    earL.rotation.z = 0.24;
+    const earR = new THREE.Mesh(geos.kangarooEar, _meituanEarMat);
+    earR.position.set(0.12, 0.06, 0);
+    earR.rotation.z = -0.24;
+    this.meituanEars.add(earL, earR);
+    this.meituanEars.visible = false;
+    this.torsoGroup.add(this.meituanEars);
+
+    // Cute Ele.me helmet side wings (hidden unless deliveryRole === 'eleme')
+    this.elemeWings = new THREE.Group();
+    this.elemeWings.position.set(0, 0.78, -0.2);
+    const wingL = new THREE.Mesh(geos.helmetWing, _elemeWingMat);
+    wingL.position.set(-0.24, 0.04, 0.02);
+    wingL.rotation.z = 0.32;
+    const wingR = new THREE.Mesh(geos.helmetWing, _elemeWingMat);
+    wingR.position.set(0.24, 0.04, 0.02);
+    wingR.rotation.z = -0.32;
+    this.elemeWings.add(wingL, wingR);
+    this.elemeWings.visible = false;
+    this.torsoGroup.add(this.elemeWings);
 
     // Arms + melee weapons
     this.leftArmPivot.position.set(-0.29, 0.48, -0.14);
@@ -412,23 +496,67 @@ export class BikeVisual {
     return g;
   }
 
-  setPalette(colorIdx: number, isBot: boolean): void {
-    if (this.lastColorIdx === colorIdx && this.isBot === isBot) return;
+  setPalette(colorIdx: number, isBot: boolean, deliveryRole: 'meituan' | 'eleme' | null = null): void {
+    if (
+      this.lastColorIdx === colorIdx &&
+      this.isBot === isBot &&
+      this.deliveryRole === deliveryRole
+    ) {
+      return;
+    }
     this.lastColorIdx = colorIdx;
     this.isBot = isBot;
-    const p = isBot ? BOT_PALETTE : BIKE_PALETTES[Math.abs(colorIdx) % BIKE_PALETTES.length];
+    this.deliveryRole = deliveryRole;
+
+    const p =
+      deliveryRole === 'meituan'
+        ? MEITUAN_PALETTE
+        : deliveryRole === 'eleme'
+          ? ELEME_PALETTE
+          : isBot
+            ? BOT_PALETTE
+            : BIKE_PALETTES[Math.abs(colorIdx) % BIKE_PALETTES.length];
+
     this.primaryMat.color.set(p.primary);
     this.secondaryMat.color.set(p.secondary);
     this.accentMat.color.set(p.accent);
     this.jacketMat.color.set(p.jacket);
     this.helmetMat.color.set(p.helmet);
     this.visorMat.color.set(p.visor);
+
+    if (deliveryRole === 'meituan') {
+      this.deliveryBoxMesh.visible = true;
+      this.deliveryBoxMesh.material = getDeliveryBoxMat('meituan');
+      this.meituanEars.visible = true;
+      this.elemeWings.visible = false;
+    } else if (deliveryRole === 'eleme') {
+      this.deliveryBoxMesh.visible = true;
+      this.deliveryBoxMesh.material = getDeliveryBoxMat('eleme');
+      this.meituanEars.visible = false;
+      this.elemeWings.visible = true;
+    } else {
+      this.deliveryBoxMesh.visible = false;
+      this.meituanEars.visible = false;
+      this.elemeWings.visible = false;
+    }
+
     // Force nameplate refresh
     this.lastPlateHp = -1;
   }
 
   updateVisuals(state: RiderRenderState, timeSec: number): void {
-    this.setPalette(state.colorIdx, state.isBot);
+    const role = state.deliveryRole ?? null;
+    this.setPalette(state.colorIdx, state.isBot, role);
+    const enraged = Boolean(state.enraged);
+
+    // Enraged glowing red visor vs normal palette visor
+    if (enraged) {
+      this.visorMat.color.setHex(Math.floor(timeSec * 12) % 2 === 0 ? 0xff1e42 : 0xff9f1c);
+    } else if (role === 'meituan') {
+      this.visorMat.color.set(MEITUAN_PALETTE.visor);
+    } else if (role === 'eleme') {
+      this.visorMat.color.set(ELEME_PALETTE.visor);
+    }
 
     // Invulnerability blink after crash recovery
     if (state.invulnTimer > 0) {
@@ -452,25 +580,31 @@ export class BikeVisual {
     // Brake light intensifies on braking
     this.brakeLightMat.color.setHex(state.braking ? 0xff4d6d : 0x991b2b);
 
-    // Powerup aura ring (turbo shield gold takes priority over magnet cyan)
-    if (!state.crashed && (state.turboShieldTimer > 0 || state.magnetTimer > 0)) {
+    // Powerup & enraged aura ring (rage crimson > turbo gold > magnet cyan)
+    if (!state.crashed && (enraged || state.turboShieldTimer > 0 || state.magnetTimer > 0)) {
       this.auraMesh.visible = true;
       const isTurbo = state.turboShieldTimer > 0;
-      this.auraMat.color.setHex(isTurbo ? 0xffd166 : 0x00f5d4);
-      const pulse = 1.0 + 0.14 * Math.sin(timeSec * (isTurbo ? 24 : 16));
+      this.auraMat.color.setHex(enraged ? 0xff2a54 : isTurbo ? 0xffd166 : 0x00f5d4);
+      const pulse = 1.0 + 0.16 * Math.sin(timeSec * (enraged ? 28 : isTurbo ? 24 : 16));
       this.auraMesh.scale.set(pulse, 1, pulse);
-      this.auraMesh.rotation.y = timeSec * (isTurbo ? 8 : 5);
+      this.auraMesh.rotation.y = timeSec * (enraged ? 10 : isTurbo ? 8 : 5);
       this.auraMesh.position.y = 0.12 + state.y;
     } else {
       this.auraMesh.visible = false;
     }
 
-    // Nitro exhaust flames
-    const showFlames = (state.nitroActive || state.turboShieldTimer > 0) && !state.crashed;
+    // Nitro / enraged exhaust flames
+    const showFlames = (enraged || state.nitroActive || state.turboShieldTimer > 0) && !state.crashed;
     this.flameL.visible = showFlames;
     this.flameR.visible = showFlames;
     if (showFlames) {
-      const flicker = (state.turboShieldTimer > 0 ? 1.35 : 0.8) + 0.45 * Math.sin(timeSec * 48);
+      const targetMat = enraged ? _rageFlameOuterMat : _flameOuterMat;
+      if (this.flameL.material !== targetMat) {
+        this.flameL.material = targetMat;
+        this.flameR.material = targetMat;
+      }
+      const flicker =
+        (enraged || state.turboShieldTimer > 0 ? 1.38 : 0.8) + 0.45 * Math.sin(timeSec * 48);
       this.flameL.scale.set(1, 1, flicker);
       this.flameR.scale.set(1, 1, flicker * 0.94);
     }
@@ -508,7 +642,7 @@ export class BikeVisual {
       this.updateCombatLimbs(state.weapon, state.attackSide, state.attackPhase);
     }
 
-    // Update nameplate sprite only when name, rounded HP, avatar index, or custom avatar version changes
+    // Update nameplate sprite only when name, rounded HP, avatar index, custom avatar version, or rage changes
     if (this.plateSprite && this.plateCanvas && this.plateTex) {
       const hpBucket = Math.round(state.hp / 4) * 4;
       const avatarVer = getAvatarVersion(state.id);
@@ -516,13 +650,22 @@ export class BikeVisual {
         state.name !== this.lastPlateName ||
         hpBucket !== this.lastPlateHp ||
         state.avatarIdx !== this.lastPlateAvatar ||
-        avatarVer !== this.lastPlateAvatarVer
+        avatarVer !== this.lastPlateAvatarVer ||
+        enraged !== this.lastPlateEnraged
       ) {
         this.lastPlateName = state.name;
         this.lastPlateHp = hpBucket;
         this.lastPlateAvatar = state.avatarIdx;
         this.lastPlateAvatarVer = avatarVer;
-        const p = state.isBot ? BOT_PALETTE : BIKE_PALETTES[Math.abs(state.colorIdx) % BIKE_PALETTES.length];
+        this.lastPlateEnraged = enraged;
+        const p =
+          role === 'meituan'
+            ? MEITUAN_PALETTE
+            : role === 'eleme'
+              ? ELEME_PALETTE
+              : state.isBot
+                ? BOT_PALETTE
+                : BIKE_PALETTES[Math.abs(state.colorIdx) % BIKE_PALETTES.length];
         drawNameplateCanvas(
           this.plateCanvas,
           state.name,
@@ -530,7 +673,8 @@ export class BikeVisual {
           p.primary,
           state.isBot,
           state.avatarIdx,
-          state.id
+          state.id,
+          enraged
         );
         this.plateTex.needsUpdate = true;
       }

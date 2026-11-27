@@ -539,7 +539,8 @@ export function drawNameplateCanvas(
   accentHex: string,
   isBot: boolean,
   avatarIdx = 0,
-  ownerId = ''
+  ownerId = '',
+  enraged = false
 ): void {
   const ctx = canvas.getContext('2d')!;
   ctx.imageSmoothingEnabled = false;
@@ -547,7 +548,7 @@ export function drawNameplateCanvas(
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
-  const label = name.slice(0, 14);
+  const label = enraged ? `🔥 ${name.slice(0, 8)} [狂暴]` : name.slice(0, 14);
   ctx.font = 'bold 14px "Silkscreen", "Press Start 2P", monospace';
   const avatarSize = 24;
   const avatarBox = avatarSize + 4; // 2px pixel border on all sides -> 28px
@@ -558,7 +559,7 @@ export function drawNameplateCanvas(
   const startX = Math.floor((w - totalW) / 2);
   const boxY = 4;
   const boxH = avatarBox; // 28px
-  const borderCol = isBot ? '#6c757d' : accentHex;
+  const borderCol = enraged ? '#ff2a54' : isBot && accentHex === '#8d99ae' ? '#6c757d' : accentHex;
 
   // Avatar frame on left (crisp 2px pixel border)
   ctx.fillStyle = '#090b12';
@@ -569,7 +570,7 @@ export function drawNameplateCanvas(
 
   // Name box on right
   const nameX = startX + avatarBox + gap;
-  ctx.fillStyle = 'rgba(12, 14, 24, 0.88)';
+  ctx.fillStyle = enraged ? 'rgba(64, 8, 18, 0.94)' : 'rgba(12, 14, 24, 0.88)';
   ctx.fillRect(nameX, boxY, nameBoxW, boxH);
   ctx.fillStyle = borderCol;
   ctx.fillRect(nameX, boxY, nameBoxW, 2);
@@ -584,7 +585,7 @@ export function drawNameplateCanvas(
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#090b12';
   ctx.fillText(label, textCenterX + 1, textCenterY + 1, nameBoxW - 10);
-  ctx.fillStyle = isBot ? '#ced4da' : '#ffffff';
+  ctx.fillStyle = enraged ? '#ffd166' : isBot && accentHex === '#8d99ae' ? '#ced4da' : '#ffffff';
   ctx.fillText(label, textCenterX, textCenterY, nameBoxW - 10);
 
   // Mini pixel HP strip underneath
