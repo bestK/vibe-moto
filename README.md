@@ -35,6 +35,7 @@ HD-pixel 3D multiplayer Road Rash on a 2400m cyclic Chinese national highway, bu
 - **Wheelie Boost, Charge-Slam & Backflip Risk** — Hold `Space` for wheelie speed and gold `⚡ SLAM` charge; release to slam rivals sideways, or over-hold into a backflip crash.
 - **Mobile Gyroscope Tilt Steering & Tap-Screen-to-Attack** — Toggle `🧭` gyroscope steering with portrait/landscape auto-calibration on iOS & Android, and tap the **left / right / center** of the canvas to strike.
 - **9 Pure-Code Pixel Avatars + Custom Base64 Sync** — Rename inline, pick from 9 procedural 32×32 pixel avatars, or upload any custom image—center-cropped & compressed on the frontend to WebP/JPEG (`<3.2 KB`) and synced over EMQX to standings & 3D nameplates.
+- **Studio Hybrid Audio (`vibe-motion/sound`)** — Pairs **18 CC0 studio SFX** (`152 KB` total, lazy-loaded via [`vibe-motion/sound`](https://github.com/vibe-motion/sound)) with a triple-oscillator boxer motorcycle engine synth, `DynamicsCompressorNode` master bus, stereo Doppler sweeps, and seamless procedural fallback.
 - **Zero-Config EMQX Multiplayer & High Performance** — Connects to `wss://broker.emqx.io:8084/mqtt` with **5m behind-last-player spawn**, one-click regroup (`⌖`), and fast tab-close cleanup. Sole runtime dependency is `three`, featuring a zero-dep native WebSocket MQTT 3.1.1 client, instanced traffic/scenery/animals/crates, progressive road LOD, steady **60 FPS**, and **~13 MB JS heap**.
 
 ### Controls
@@ -95,6 +96,7 @@ pnpm build
 - **翘头提速 · 蓄力猛压 · 翻车风险** — 按住 `Space` 翘头提速并蓄力金色 `⚡ SLAM` 能量条，松手震飞身旁对手；蓄力超时将后空翻翻车。
 - **移动端陀螺仪重力转向 + 轻触屏幕攻击** — 点击 `🧭` 开启重力感应线性转向（自动适配 iOS / Android 横竖屏校准），轻触画面**左 / 右 / 中央**直接向对应方向攻击。
 - **9 款纯代码像素头像 + 自定义头像压缩同步** — 点击左上角名牌快捷改名并切换 9 款 32×32 纯代码像素头像，也可上传自定义图片——前端自动居中裁切压缩为 `<3.2 KB` WebP/JPEG base64，经 EMQX 实时同步到全员排行榜与 3D 车手名牌。
+- **工作室级混合音频引擎（`vibe-motion/sound`）** — 内置经 [`vibe-motion/sound`](https://github.com/vibe-motion/sound) 精选压制的 **18 条 CC0 工作室级音效**（总计仅 `152 KB`，首交互懒加载），搭配三振荡器水平对置摩托引擎合成器、`DynamicsCompressorNode` 母线动态压缩、立体声多普勒扫频与零延迟程序化回退。
 - **免配置 EMQX 实时联机与极致性能** — 直连 `wss://broker.emqx.io:8084/mqtt`，自动空降到最后一名在线玩家后方 **5 米**，支持一键归队（`⌖`）与关页秒级退房清理。唯一运行时依赖为 `three`，自研零依赖原生 WebSocket MQTT 3.1.1 客户端、全实例化车流/动物/场景/货箱、渐进式公路 LOD，稳跑 **60 FPS**、仅占约 **13 MB JS 堆内存**。
 
 ### 操作按键
