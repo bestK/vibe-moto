@@ -398,6 +398,7 @@ export class Hud {
   };
 
   private readonly onOrientationChange = (): void => {
+    this.radarDimsDirty = true;
     if (this.gyroEnabled) {
       this.gyroBaseline = null;
     }
@@ -1101,6 +1102,7 @@ export class Hud {
     container.appendChild(this.root);
 
     window.addEventListener('resize', this.onWindowResize, { passive: true });
+    window.addEventListener('orientationchange', this.onOrientationChange, { passive: true });
   }
 
   // -------------------------------------------------------------------------
@@ -1453,7 +1455,6 @@ export class Hud {
     this.root.classList.add('vm-gyro-on');
 
     window.addEventListener('deviceorientation', this.onDeviceOrientation, { passive: true });
-    window.addEventListener('orientationchange', this.onOrientationChange, { passive: true });
 
     if (this.gyroSensorTimer !== null) {
       window.clearTimeout(this.gyroSensorTimer);
@@ -1474,7 +1475,6 @@ export class Hud {
     }
     if (this.gyroEnabled) {
       window.removeEventListener('deviceorientation', this.onDeviceOrientation);
-      window.removeEventListener('orientationchange', this.onOrientationChange);
     }
 
     this.gyroEnabled = false;
