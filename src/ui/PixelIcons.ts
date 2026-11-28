@@ -57,7 +57,15 @@ export type PixelIconId =
   | 'pickaxe'
   | 'road'
   | 'server'
-  | 'user';
+  | 'user'
+  | 'coin'
+  | 'shop'
+  | 'shield'
+  | 'terminal'
+  | 'sparkle'
+  | 'blueprint'
+  | 'bag'
+  | 'harvest';
 
 /**
  * Handcrafted 16x16 pixel-art SVG primitives (`shape-rendering="crispEdges"`).
@@ -597,6 +605,89 @@ const ICON_BODIES: Readonly<Record<PixelIconId, string>> = {
     '<rect x="5" y="2" width="6" height="5"/>' +
     '<rect x="3" y="8" width="10" height="6"/>' +
     '</g>',
+
+  coin:
+    '<rect x="5" y="1" width="6" height="2" fill="#ffbe3b"/>' +
+    '<rect x="3" y="3" width="10" height="10" fill="#ffbe3b"/>' +
+    '<rect x="2" y="5" width="12" height="6" fill="#ffbe3b"/>' +
+    '<rect x="5" y="13" width="6" height="2" fill="#d97706"/>' +
+    '<rect x="4" y="3" width="8" height="2" fill="#ffe66d"/>' +
+    '<rect x="4" y="5" width="2" height="6" fill="#fff5cc"/>' +
+    '<rect x="7" y="4" width="2" height="8" fill="#b45309"/>' +
+    '<rect x="8" y="4" width="1" height="8" fill="#ffe66d"/>' +
+    '<rect x="11" y="5" width="2" height="6" fill="#d97706"/>',
+
+  shop:
+    '<rect x="1" y="2" width="14" height="3" fill="#ff3b5c"/>' +
+    '<rect x="3" y="2" width="2" height="4" fill="#f8fafc"/>' +
+    '<rect x="7" y="2" width="2" height="4" fill="#f8fafc"/>' +
+    '<rect x="11" y="2" width="2" height="4" fill="#f8fafc"/>' +
+    '<rect x="1" y="5" width="14" height="2" fill="#d62828"/>' +
+    '<rect x="2" y="7" width="12" height="7" fill="#33415e"/>' +
+    '<rect x="4" y="8" width="4" height="4" fill="#38e2d4"/>' +
+    '<rect x="9" y="8" width="3" height="6" fill="#ffbe3b"/>' +
+    '<rect x="1" y="14" width="14" height="1" fill="#1e293b"/>',
+
+  shield:
+    '<rect x="3" y="1" width="10" height="2" fill="#38e2d4"/>' +
+    '<rect x="2" y="3" width="12" height="6" fill="#38e2d4"/>' +
+    '<rect x="3" y="9" width="10" height="2" fill="#1ca8aa"/>' +
+    '<rect x="4" y="11" width="8" height="2" fill="#1ca8aa"/>' +
+    '<rect x="6" y="13" width="4" height="2" fill="#0e7490"/>' +
+    '<rect x="4" y="3" width="8" height="6" fill="#0f172a"/>' +
+    '<rect x="7" y="4" width="2" height="5" fill="#ffbe3b"/>' +
+    '<rect x="5" y="6" width="6" height="2" fill="#ffbe3b"/>',
+
+  terminal:
+    '<rect x="1" y="2" width="14" height="10" fill="#475569"/>' +
+    '<rect x="2" y="3" width="12" height="8" fill="#090c14"/>' +
+    '<rect x="3" y="4" width="2" height="2" fill="#46d97c"/>' +
+    '<rect x="5" y="6" width="2" height="2" fill="#46d97c"/>' +
+    '<rect x="3" y="8" width="2" height="2" fill="#46d97c"/>' +
+    '<rect x="8" y="8" width="4" height="2" fill="#38e2d4"/>' +
+    '<rect x="6" y="12" width="4" height="2" fill="#33415e"/>' +
+    '<rect x="4" y="14" width="8" height="1" fill="#64748b"/>',
+
+  sparkle:
+    '<rect x="7" y="1" width="2" height="4" fill="#ffbe3b"/>' +
+    '<rect x="7" y="11" width="2" height="4" fill="#ffbe3b"/>' +
+    '<rect x="1" y="7" width="4" height="2" fill="#ffbe3b"/>' +
+    '<rect x="11" y="7" width="4" height="2" fill="#ffbe3b"/>' +
+    '<rect x="5" y="5" width="6" height="6" fill="#ffe66d"/>' +
+    '<rect x="7" y="7" width="2" height="2" fill="#ffffff"/>' +
+    '<rect x="2" y="2" width="2" height="2" fill="#38e2d4"/>' +
+    '<rect x="12" y="12" width="2" height="2" fill="#38e2d4"/>',
+
+  blueprint:
+    '<rect x="2" y="1" width="12" height="14" fill="#1d4ed8"/>' +
+    '<rect x="3" y="2" width="10" height="12" fill="#2563eb"/>' +
+    '<rect x="4" y="4" width="8" height="1" fill="#e0f2fe"/>' +
+    '<rect x="4" y="11" width="8" height="1" fill="#e0f2fe"/>' +
+    '<rect x="4" y="4" width="1" height="8" fill="#e0f2fe"/>' +
+    '<rect x="11" y="4" width="1" height="8" fill="#e0f2fe"/>' +
+    '<rect x="6" y="6" width="4" height="1" fill="#38e2d4"/>' +
+    '<rect x="6" y="8" width="2" height="3" fill="#ffbe3b"/>' +
+    '<rect x="9" y="8" width="1" height="2" fill="#38e2d4"/>',
+
+  bag:
+    '<rect x="5" y="1" width="6" height="2" fill="#c89252"/>' +
+    '<rect x="6" y="3" width="4" height="2" fill="#ffbe3b"/>' +
+    '<rect x="3" y="5" width="10" height="2" fill="#a46c36"/>' +
+    '<rect x="2" y="7" width="12" height="7" fill="#c89252"/>' +
+    '<rect x="3" y="14" width="10" height="1" fill="#6f4b2d"/>' +
+    '<rect x="6" y="7" width="4" height="3" fill="#ffbe3b"/>' +
+    '<rect x="7" y="8" width="2" height="1" fill="#10131c"/>' +
+    '<rect x="3" y="8" width="2" height="4" fill="#e0a967"/>',
+
+  harvest:
+    '<rect x="7" y="1" width="2" height="3" fill="#38e2d4"/>' +
+    '<rect x="5" y="4" width="6" height="5" fill="#38e2d4"/>' +
+    '<rect x="6" y="4" width="2" height="4" fill="#e0fffc"/>' +
+    '<rect x="2" y="6" width="3" height="5" fill="#60b4ff"/>' +
+    '<rect x="11" y="7" width="3" height="4" fill="#60b4ff"/>' +
+    '<rect x="3" y="11" width="10" height="3" fill="#475569"/>' +
+    '<rect x="4" y="14" width="8" height="1" fill="#1e293b"/>' +
+    '<rect x="11" y="2" width="2" height="2" fill="#ffbe3b"/>',
 };
 
 export const ITEM_ICON_MAP: Readonly<Record<ItemType, PixelIconId>> = {

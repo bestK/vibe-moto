@@ -12,6 +12,8 @@ import {
 } from './game/PixelAvatars';
 import { InputState, ParticleKind, PlayerCallbacks, PlayerPhysics } from './game/PlayerPhysics';
 import { OnFootController, OnFootInput } from './game/OnFootController';
+import { BlueprintManager, SavedBlueprint } from './game/BlueprintSystem';
+import { ResourceNodeManager } from './game/ResourceNodes';
 import { getLapNumber, openWorldGroundY, roadX, signedTrackDelta } from './game/RoadMath';
 import { CarItemEffectKind, TrafficSystem } from './game/TrafficSystem';
 import { BLOCK_SPEC_BY_ID, BlockType, VoxelWorld } from './game/VoxelWorld';
@@ -27,11 +29,21 @@ import {
 } from './game/types';
 import { CameraMode, WorldRenderer } from './game/WorldRenderer';
 import { WeatherCallbacks, WeatherId, WeatherSystem } from './game/WeatherSystem';
-import { t, weatherName } from './i18n';
+import { getLang, itemName, t, weatherName } from './i18n';
 import { ConnectionStatus, LobbyRoomSummary, MqttSync, PackSpawnTarget, RoomInfoSnapshot } from './net/MqttSync';
-import { GameAccount, ServerClient } from './net/ServerClient';
+import {
+  EconomyState,
+  GameAccount,
+  ServerBlueprint,
+  ServerClient,
+  createDefaultEconomyState,
+  getShieldRemainingSeconds,
+} from './net/ServerClient';
+import { AiBuildBlock, AiBuilderModal } from './ui/AiBuilderModal';
+import { BlueprintSelectionInfo, EconomyModal, EconomyTab } from './ui/EconomyModal';
 import { Hud, TouchInputPatch } from './ui/Hud';
 import { ANIMAL_ICON_MAP, WEATHER_ICON_MAP, type PixelIconId } from './ui/PixelIcons';
+import { WebSshModal } from './ui/WebSshModal';
 
 const STORAGE_NAME_KEY = 'vibemoto_name';
 const STORAGE_COLOR_KEY = 'vibemoto_color';
@@ -126,6 +138,17 @@ const animals = new AnimalSystem();
 const weather = new WeatherSystem('clear');
 const voxels = new VoxelWorld('global');
 const onFoot = new OnFootController();
+const resourceNodes = new ResourceNodeManager();
+const blueprints = new BlueprintManager();
+
+let economyState: EconomyState = createDefaultEconomyState();
+let savedBlueprints: ServerBlueprint[] = [];
+let shieldHudTickAccum = 0;
+let lastBlockSlowToastMs = 0;
+let lastInteractKind: 'none' | 'computer' | 'resource' | 'blueprint' = 'none';
+let lastInteractNodeId: string | null = null;
+const pendingBuildQueue: { gx: number; gy: number; gz: number; b: BlockType }[] = [];
+let buildQueueSfxCounter = 0;
 
 const footTouchState = {
   forward: 0,
@@ -209,6 +232,9 @@ let player!: PlayerPhysics;
 let hud!: Hud;
 let itemCallbacks!: ItemCallbacks;
 let serverClient!: ServerClient;
+let webSshModal!: WebSshModal;
+let aiBuilderModal!: AiBuilderModal;
+let economyModal!: EconomyModal;
 
 function spawnPackWarpFx(target: PackSpawnTarget): void {
   if (onFoot.state.active) {
@@ -285,8 +311,8 @@ const mqtt = new MqttSync(
       items.handleNetEvent(ev, player.state, itemCallbacks);
     },
     onVoxelEvent(ev: VoxelNetEvent) {
-      if (ev.op === 'set' && ev.b && ev.b >= 1 && ev.b <= 9) {
-        voxels.setBlock(ev.gx, ev.gy, ev.gz, ev.b as BlockType);
+      if (ev.op === 'set' && ev.b && ev.b >= 1 && ev.b <= 10) {
+        voxels.setBlock(ev.gx, ev.gy, ev.gz, ev.b as BlockType, true, ev.ownerId, ev.ownerName);
       } else if (ev.op === 'del') {
         voxels.removeBlock(ev.gx, ev.gy, ev.gz);
       }
@@ -338,7 +364,14 @@ if (initialCustomAvatar) {
 player = new PlayerPhysics(mqtt.clientId, initialName, colorIdx, initialAvatar);
 
 function isUiBlockingGameplay(): boolean {
-  return hud.isEditingName() || hud.isHomeModalOpen() || hud.isServerModalOpen();
+  return (
+    hud.isEditingName() ||
+    hud.isHomeModalOpen() ||
+    hud.isServerModalOpen() ||
+    Boolean(webSshModal?.isOpen()) ||
+    Boolean(aiBuilderModal?.isOpen()) ||
+    Boolean(economyModal?.isOpen())
+  );
 }
 
 function updateRoomUrlParam(roomSlug: string): void {
@@ -486,6 +519,272 @@ function returnToTrack(): void {
   hud.showToast(t('backToTrackToast'), 'cyan', 'road');
 }
 
+function getBlueprintSelectionInfo(): BlueprintSelectionInfo {
+  const b = blueprints.getSelectionBounds();
+  return {
+    pos1: blueprints.getPos1(),
+    pos2: blueprints.getPos2(),
+    sizeX: b?.sizeX,
+    sizeY: b?.sizeY,
+    sizeZ: b?.sizeZ,
+    blockCount: b ? (voxels.getBlockCount() > 0 ? countSelectedVoxels(b) : 0) : undefined,
+  };
+}
+
+function countSelectedVoxels(b: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }): number {
+  let c = 0;
+  for (let x = b.minX; x <= b.maxX; x++) {
+    for (let y = b.minY; y <= b.maxY; y++) {
+      for (let z = b.minZ; z <= b.maxZ; z++) {
+        if (voxels.hasBlock(x, y, z)) c++;
+      }
+    }
+  }
+  return c;
+}
+
+function syncEconomyUi(next: EconomyState): void {
+  economyState = next;
+  const shieldSec = getShieldRemainingSeconds(next.shieldUntil);
+  hud.setEconomyHud(next.coins, shieldSec, next.bagCapacity, next.savedItems.length);
+  hud.setInventoryCounts(next.inventory);
+  aiBuilderModal?.updateInventory(next.inventory);
+  if (economyModal?.isOpen()) {
+    economyModal.refreshState(next, player.state.heldItems, savedBlueprints, getBlueprintSelectionInfo());
+  }
+}
+
+async function refreshEconomyAndBlueprints(): Promise<void> {
+  const [eco, bpsRes] = await Promise.all([
+    serverClient.getEconomyState(),
+    serverClient.getBlueprints(),
+  ]);
+  savedBlueprints = bpsRes.blueprints;
+  syncEconomyUi(eco);
+}
+
+function awardRaceCoins(kind: 'lap' | 'ko' | 'nearmiss' | 'race', amount: number): void {
+  void serverClient.claimReward(kind, amount).then((res) => {
+    if (res.ok && res.state) {
+      syncEconomyUi(res.state);
+    }
+  });
+}
+
+function getBuildOriginForPlayer(): { gx: number; gy: number; gz: number } {
+  if (onFoot.state.active && onFoot.state.aimHit) {
+    return {
+      gx: onFoot.state.aimHit.placeX,
+      gy: onFoot.state.aimHit.placeY,
+      gz: onFoot.state.aimHit.placeZ,
+    };
+  }
+  const pose = onFoot.state.active
+    ? { wx: onFoot.state.wx, wy: onFoot.state.wy, ws: onFoot.state.ws, yaw: onFoot.state.yaw }
+    : player.getWorldPose();
+  const fwdX = -Math.sin(pose.yaw);
+  const fwdS = Math.cos(pose.yaw);
+  const tx = pose.wx + fwdX * 4.0;
+  const ts = pose.ws + fwdS * 4.0;
+  const ty = openWorldGroundY(tx, ts);
+  return { gx: Math.floor(tx), gy: Math.floor(ty + 0.05), gz: Math.floor(ts) };
+}
+
+function enqueueBlockBuildPlan(
+  name: string,
+  blocks: readonly { dx: number; dy: number; dz: number; b: number }[],
+  origin?: { gx: number; gy: number; gz: number }
+): void {
+  const base = origin ?? getBuildOriginForPlayer();
+  const avail: Record<number, number> = { ...economyState.inventory };
+  let queued = 0;
+  let skipped = 0;
+
+  for (let i = 0; i < blocks.length; i++) {
+    const item = blocks[i];
+    const bt = Math.min(10, Math.max(1, Math.trunc(item.b))) as BlockType;
+    if ((avail[bt] ?? 0) <= 0) {
+      skipped++;
+      continue;
+    }
+    avail[bt] = (avail[bt] ?? 0) - 1;
+    pendingBuildQueue.push({
+      gx: base.gx + Math.trunc(item.dx),
+      gy: base.gy + Math.trunc(item.dy),
+      gz: base.gz + Math.trunc(item.dz),
+      b: bt,
+    });
+    queued++;
+  }
+
+  if (queued === 0) {
+    hud.showToast(t('blockNoStock', { name }), 'red', 'warning');
+    return;
+  }
+  const msg =
+    skipped > 0
+      ? `${name}: 正在建造 ${queued} 块 (缺 ${skipped} 块)`
+      : `${name}: 正在自动建造 ${queued} 块!`;
+  hud.showToast(msg, 'cyan', 'sparkle');
+}
+
+function stepPendingBuildQueue(): void {
+  if (pendingBuildQueue.length === 0) return;
+  const perFrame = 4;
+  const acc = serverClient.getAccount();
+  let placedAny = false;
+
+  for (let n = 0; n < perFrame && pendingBuildQueue.length > 0; n++) {
+    const item = pendingBuildQueue.shift()!;
+    const stock = economyState.inventory[item.b] ?? 0;
+    if (stock <= 0) continue;
+
+    const ok = voxels.setBlock(
+      item.gx,
+      item.gy,
+      item.gz,
+      item.b,
+      true,
+      acc?.id,
+      acc?.displayName || player.state.name
+    );
+    if (!ok) continue;
+
+    placedAny = true;
+    const nextEco = serverClient.adjustLocalInventory(item.b, -1);
+    economyState = nextEco;
+    serverClient.sendVoxel('set', item.gx, item.gy, item.gz, item.b);
+    mqtt.publishVoxelEvent({
+      op: 'set',
+      gx: item.gx,
+      gy: item.gy,
+      gz: item.gz,
+      b: item.b,
+      ownerId: acc?.id,
+      ownerName: acc?.displayName || player.state.name,
+    });
+
+    buildQueueSfxCounter++;
+    if (buildQueueSfxCounter % 3 === 1) {
+      audio.playBlockPlace();
+    }
+    const spec = BLOCK_SPEC_BY_ID[item.b];
+    const blockS = item.gz + 0.5;
+    const blockLat = item.gx + 0.5 - roadX(blockS);
+    const blockRelY = Math.max(0.2, item.gy + 0.5 - openWorldGroundY(item.gx + 0.5, blockS));
+    world.spawnParticles(blockS, blockLat, blockRelY, 3, spec.particleHex, 2.5, 0.11, 0.22, 8, 0);
+  }
+
+  if (placedAny) {
+    syncEconomyUi(economyState);
+  }
+}
+
+function stashCurrentHeldItem(): void {
+  audio.unlock();
+  if (economyState.bagCapacity <= 0) {
+    hud.showToast(t('bagFullToast'), 'gold', 'bag');
+    economyModal.open('shop');
+    return;
+  }
+  const list = player.state.heldItems;
+  if (!list || list.length === 0) {
+    hud.showToast(t('bagEmpty'), 'gold', 'bag');
+    return;
+  }
+  const slot = list[0];
+  void serverClient.stashBagItem(slot.type).then((res) => {
+    if (!res.ok) {
+      hud.showToast(res.error || t('bagFullToast'), 'red', 'warning');
+      return;
+    }
+    list.shift();
+    player.state.heldItem = list.length > 0 ? list[0].type : null;
+    if (res.state) syncEconomyUi(res.state);
+    audio.playPickup();
+    hud.showToast(t('bagStashedToast', { item: itemName(slot.type) }), 'cyan', 'bag');
+  });
+}
+
+function fireBagItem(bagIndex: number): void {
+  void serverClient.useBagItem(bagIndex).then((res) => {
+    if (!res.ok || !res.item) {
+      hud.showToast(res.error || '使用失败', 'red', 'warning');
+      return;
+    }
+    if (res.state) syncEconomyUi(res.state);
+    economyModal.close();
+
+    // Support using bagged items both on highway AND on foot at resource nodes!
+    const shooter: RiderRenderState = onFoot.state.active
+      ? {
+          ...player.state,
+          s: onFoot.state.ws,
+          x: onFoot.state.wx - roadX(onFoot.state.ws),
+          y: Math.max(0, onFoot.state.wy - openWorldGroundY(onFoot.state.wx, onFoot.state.ws)),
+          speed: Math.max(24, onFoot.state.moveSpeed),
+          heldItem: res.item,
+          heldItems: [{ type: res.item, ttl: 30 }],
+        }
+      : player.state;
+
+    if (!onFoot.state.active) {
+      player.state.heldItems.unshift({ type: res.item, ttl: 30 });
+      player.state.heldItem = res.item;
+    }
+    items.useHeldItem(shooter, combatTargets, itemCallbacks, 0);
+  });
+}
+
+function handleContextInteract(): boolean {
+  audio.unlock();
+  // 1. Blueprint stamp if active blueprint preview is armed
+  const activeBp = blueprints.getActivePreview();
+  if (activeBp) {
+    const origin = getBuildOriginForPlayer();
+    blueprints.setActivePreview(null);
+    enqueueBlockBuildPlan(activeBp.name, activeBp.blocks, origin);
+    return true;
+  }
+
+  // 2. Open WebSSH Computer Terminal if aiming at a placed Computer Block (type 10)
+  if (onFoot.state.active && onFoot.state.aimHit?.hitType === 'block' && onFoot.state.aimHit.blockType === 10) {
+    webSshModal.open();
+    return true;
+  }
+
+  // 3. Harvest nearby natural Resource Node
+  const pose = onFoot.state.active
+    ? { wx: onFoot.state.wx, ws: onFoot.state.ws }
+    : player.getWorldPose();
+  const node = resourceNodes.getNearbyNode(pose.wx, pose.ws, 5.2);
+  if (node && node.cooldown <= 0) {
+    const res = resourceNodes.harvestNode(node.id);
+    if (res) {
+      audio.playPickup();
+      const s = node.ws;
+      const lat = node.wx - roadX(s);
+      world.spawnParticles(s, lat, 1.0, 14, node.colorHex, 6.0, 0.16, 0.45, 10, 0);
+      const summary = res.blockRewards
+        .map((r) => `${BLOCK_SPEC_BY_ID[r.b].zhName}x${r.qty}`)
+        .join(' + ');
+      const nodeName = getLang() === 'zh' ? node.zhName : node.enName;
+      hud.showToast(
+        `${t('harvestSuccess', { name: nodeName, coins: res.coinReward })} (${summary})`,
+        'cyan',
+        'harvest'
+      );
+      void serverClient
+        .claimReward('harvest', res.coinReward, res.blockRewards)
+        .then((r) => {
+          if (r.ok && r.state) syncEconomyUi(r.state);
+        });
+      return true;
+    }
+  }
+  return false;
+}
+
 function breakAimedBlock(): boolean {
   if (!onFoot.state.active) return false;
   const hit = onFoot.state.aimHit;
@@ -495,6 +794,9 @@ function breakAimedBlock(): boolean {
   if (!removed) return false;
 
   audio.playBlockBreak();
+  const nextEco = serverClient.adjustLocalInventory(removed, 1);
+  syncEconomyUi(nextEco);
+
   const spec = BLOCK_SPEC_BY_ID[removed];
   const blockS = hit.gz + 0.5;
   const blockLat = hit.gx + 0.5 - roadX(blockS);
@@ -514,8 +816,20 @@ function placeAimedBlock(): boolean {
     return false;
   }
   const blockType = onFoot.state.selectedBlock;
-  const ok = voxels.setBlock(hit.placeX, hit.placeY, hit.placeZ, blockType);
+  if ((economyState.inventory[blockType] ?? 0) <= 0) {
+    const bSpec = BLOCK_SPEC_BY_ID[blockType];
+    const bName = getLang() === 'zh' ? bSpec.zhName : bSpec.enName;
+    hud.showToast(t('blockNoStock', { name: bName }), 'red', 'shop');
+    return false;
+  }
+  const acc = serverClient.getAccount();
+  const ownerId = acc?.id;
+  const ownerName = acc?.displayName || player.state.name;
+  const ok = voxels.setBlock(hit.placeX, hit.placeY, hit.placeZ, blockType, true, ownerId, ownerName);
   if (!ok) return false;
+
+  const nextEco = serverClient.adjustLocalInventory(blockType, -1);
+  syncEconomyUi(nextEco);
 
   audio.playBlockPlace();
   const spec = BLOCK_SPEC_BY_ID[blockType];
@@ -529,6 +843,8 @@ function placeAimedBlock(): boolean {
     gy: hit.placeY,
     gz: hit.placeZ,
     b: blockType,
+    ownerId,
+    ownerName,
   });
   serverClient?.sendVoxel('set', hit.placeX, hit.placeY, hit.placeZ, blockType);
   return true;
@@ -863,6 +1179,21 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   onAccountLogout() {
     serverClient.logout();
     hud.showToast(t('accountLoggedOutToast'), 'gold', 'user');
+    void refreshEconomyAndBlueprints();
+  },
+  onOpenEconomy(tab?: EconomyTab) {
+    audio.unlock();
+    economyModal.open(tab ?? 'shop');
+  },
+  onOpenAiBuilder() {
+    audio.unlock();
+    aiBuilderModal.open(economyState.inventory);
+  },
+  onInteract() {
+    handleContextInteract();
+  },
+  onStashItem() {
+    stashCurrentHeldItem();
   },
 });
 
@@ -879,6 +1210,7 @@ function applyLoggedInAccount(acc: GameAccount): void {
     writeStorage(STORAGE_AVATAR_KEY, String(safeAv));
     hud.refreshLocalAvatar();
   }
+  void refreshEconomyAndBlueprints();
 }
 
 const initialRoomInfo = mqtt.getRoomInfo();
@@ -895,22 +1227,168 @@ serverClient = new ServerClient(mqtt.clientId, initialName, {
     voxels.replaceFromServer(blocks);
   },
   onVoxelUpdate(ev) {
-    if (ev.op === 'set' && ev.b && ev.b >= 1 && ev.b <= 9) {
-      voxels.setBlock(ev.gx ?? 0, ev.gy ?? 0, ev.gz ?? 0, ev.b as BlockType);
+    if (ev.op === 'set' && ev.b && ev.b >= 1 && ev.b <= 10) {
+      voxels.setBlock(
+        ev.gx ?? 0,
+        ev.gy ?? 0,
+        ev.gz ?? 0,
+        ev.b as BlockType,
+        true,
+        ev.ownerId,
+        ev.ownerName
+      );
     } else if (ev.op === 'del') {
       voxels.removeBlock(ev.gx ?? 0, ev.gy ?? 0, ev.gz ?? 0);
     } else if (ev.op === 'clear') {
       voxels.clearAll();
     }
   },
+  onVoxelRejected(_reason, ownerName, remainingSec) {
+    hud.showToast(
+      t('shieldBlockedToast', { owner: ownerName || '其他玩家', sec: Math.max(1, remainingSec) }),
+      'red',
+      'shield'
+    );
+    // Re-sync world from server so any optimistic local edit reverts cleanly
+    serverClient.connectRoom(mqtt.displayRoom);
+    void refreshEconomyAndBlueprints();
+  },
 });
+
+webSshModal = new WebSshModal(hudContainer, serverClient, {
+  onToggle(open) {
+    if (open) {
+      exitPointerLockSafe();
+      clearHeldInputs();
+    }
+  },
+  onToast(msg, accent) {
+    hud.showToast(msg, accent ?? 'cyan', 'terminal');
+  },
+});
+
+aiBuilderModal = new AiBuilderModal(hudContainer, {
+  onToggle(open) {
+    if (open) {
+      exitPointerLockSafe();
+      clearHeldInputs();
+    }
+  },
+  onToast(msg, accent) {
+    hud.showToast(msg, accent ?? 'cyan', 'sparkle');
+  },
+  onBuildBlocks(name: string, blocks: AiBuildBlock[]) {
+    aiBuilderModal.close();
+    enqueueBlockBuildPlan(name, blocks);
+  },
+});
+
+economyModal = new EconomyModal(hudContainer, serverClient, {
+  onToggle(open) {
+    if (open) {
+      exitPointerLockSafe();
+      clearHeldInputs();
+      economyModal.refreshState(
+        economyState,
+        player.state.heldItems,
+        savedBlueprints,
+        getBlueprintSelectionInfo()
+      );
+      void refreshEconomyAndBlueprints();
+    }
+  },
+  onToast(msg, accent) {
+    hud.showToast(msg, accent ?? 'gold', 'shop');
+  },
+  onEconomyUpdated(state) {
+    syncEconomyUi(state);
+  },
+  onStashHeldItem(_heldIdx, _item) {
+    stashCurrentHeldItem();
+  },
+  onUseBagItem(bagIndex) {
+    fireBagItem(bagIndex);
+  },
+  onSetBlueprintCornerA() {
+    const p = getBuildOriginForPlayer();
+    blueprints.setPos1(p.gx, p.gy, p.gz);
+    hud.showToast(`蓝图角点 A 已设 (${p.gx}, ${p.gy}, ${p.gz})`, 'gold', 'blueprint');
+    economyModal.refreshState(economyState, player.state.heldItems, savedBlueprints, getBlueprintSelectionInfo());
+  },
+  onSetBlueprintCornerB() {
+    const p = getBuildOriginForPlayer();
+    blueprints.setPos2(p.gx, p.gy, p.gz);
+    hud.showToast(`蓝图角点 B 已设 (${p.gx}, ${p.gy}, ${p.gz})`, 'gold', 'blueprint');
+    economyModal.refreshState(economyState, player.state.heldItems, savedBlueprints, getBlueprintSelectionInfo());
+  },
+  onClearBlueprintSelection() {
+    blueprints.clearSelection();
+    blueprints.setActivePreview(null);
+    economyModal.refreshState(economyState, player.state.heldItems, savedBlueprints, getBlueprintSelectionInfo());
+  },
+  async onSaveBlueprint(name: string) {
+    const cap = blueprints.captureFromWorld(voxels, name);
+    if (!cap.ok || !cap.blueprint) {
+      hud.showToast(cap.error || '请先在地图中选择建筑角点 A 和 B', 'red', 'warning');
+      return;
+    }
+    const res = await serverClient.saveBlueprint({
+      name: cap.blueprint.name,
+      sizeX: cap.blueprint.sizeX,
+      sizeY: cap.blueprint.sizeY,
+      sizeZ: cap.blueprint.sizeZ,
+      blocks: cap.blueprint.blocks,
+    });
+    if (res.ok && res.blueprint) {
+      savedBlueprints = [res.blueprint, ...savedBlueprints.filter((b) => b.id !== res.blueprint!.id)];
+      blueprints.clearSelection();
+      hud.showToast(t('bpSavedToast', { name: cap.blueprint.name }), 'cyan', 'blueprint');
+      economyModal.refreshState(economyState, player.state.heldItems, savedBlueprints, getBlueprintSelectionInfo());
+    } else {
+      hud.showToast(res.error || '蓝图保存失败', 'red', 'warning');
+    }
+  },
+  onPreviewBlueprint(bp) {
+    if (!bp) {
+      blueprints.setActivePreview(null);
+      return;
+    }
+    const converted: SavedBlueprint = {
+      id: bp.id,
+      name: bp.name,
+      sizeX: bp.sizeX,
+      sizeY: bp.sizeY,
+      sizeZ: bp.sizeZ,
+      blocks: bp.blocks.map((b) => ({ dx: b.dx, dy: b.dy, dz: b.dz, b: Math.min(10, Math.max(1, b.b)) as BlockType })),
+      createdAt: bp.createdAt,
+    };
+    blueprints.setActivePreview(converted);
+    economyModal.close();
+    hud.showToast(`蓝图预览已开启，走到目标位置按 E 或点重建`, 'cyan', 'blueprint');
+  },
+  onRebuildBlueprint(bp) {
+    economyModal.close();
+    blueprints.setActivePreview(null);
+    enqueueBlockBuildPlan(bp.name, bp.blocks);
+  },
+  async onDeleteBlueprint(id: string) {
+    const res = await serverClient.deleteBlueprint(id);
+    if (res.ok) {
+      savedBlueprints = savedBlueprints.filter((b) => b.id !== id);
+      economyModal.refreshState(economyState, player.state.heldItems, savedBlueprints, getBlueprintSelectionInfo());
+    }
+  },
+});
+
 hud.setServerState(serverClient.getStatus(), serverClient.getServerUrl());
 hud.setAccountState(serverClient.getAccount());
+syncEconomyUi(serverClient.getCachedEconomyState());
 serverClient.connectRoom(initialRoomInfo.room);
 void serverClient.verifySession().then((acc) => {
   if (acc) {
     hud.setAccountState(acc);
   }
+  void refreshEconomyAndBlueprints();
 });
 hud.setRoomInfo(
   initialRoomInfo.room,
@@ -938,10 +1416,12 @@ itemCallbacks = {
       if (ko || botKo) {
         player.state.kos += 1;
         player.state.nitro = Math.min(100, player.state.nitro + 32);
+        awardRaceCoins('ko', 60);
       }
     } else if (ko) {
       player.state.kos += 1;
       player.state.nitro = Math.min(100, player.state.nitro + 32);
+      awardRaceCoins('ko', 60);
     }
   },
   onPoliceDragRival(target, dt, shoveX) {
@@ -1105,6 +1585,7 @@ const playerCallbacks: PlayerCallbacks = {
         target.speed * 0.4
       );
       hud.showToast(t('koTarget', { name: target.name }), 'gold', 'skull');
+      awardRaceCoins('ko', 60);
     }
   },
   onWheelieSlam(charge: number, hitsCount: number) {
@@ -1141,6 +1622,7 @@ const playerCallbacks: PlayerCallbacks = {
     );
     if (confirmedKo) {
       hud.showToast(t('koTarget', { name: target.name }), 'gold', 'skull');
+      awardRaceCoins('ko', 60);
     }
   },
   onWheelieFlip() {
@@ -1153,6 +1635,7 @@ const playerCallbacks: PlayerCallbacks = {
     world.triggerShake(0.22, 0.22);
     world.spawnHitPopup('BOOST', player.state.s + 1.2, player.state.x, 1.55);
     hud.showToast(t('boostPad'), 'cyan', 'bolt');
+    awardRaceCoins('race', 10);
   },
   onNearMiss() {
     audio.playHorn();
@@ -1169,6 +1652,7 @@ const playerCallbacks: PlayerCallbacks = {
       player.state.speed * 0.4
     );
     hud.showToast(t('nearMiss'), 'cyan', 'bolt');
+    awardRaceCoins('nearmiss', 15);
   },
   onCrash() {
     audio.playCrash();
@@ -1180,6 +1664,38 @@ const playerCallbacks: PlayerCallbacks = {
   },
   onReturnTrack() {
     hud.showToast(t('backToTrackToast'), 'gold', 'road');
+  },
+  onBlockEffect(kind, _blockType) {
+    const nowMs = performance.now();
+    if (kind === 'crash') {
+      audio.playCrash();
+      world.triggerShake(0.58, 0.34);
+      spawnParticlePreset('crash', player.state.s, player.state.x, 0.7, player.state.speed * 0.3);
+      world.spawnHitPopup('BONK', player.state.s, player.state.x, 1.7);
+      hud.showToast(t('blockEffectCrash'), 'red', 'warning');
+      lastBlockSlowToastMs = nowMs;
+    } else if (kind === 'block') {
+      audio.playHit(0, false);
+      world.triggerShake(0.32, 0.2);
+      spawnParticlePreset('spark', player.state.s, player.state.x, 0.65, player.state.speed * 0.35);
+      if (nowMs - lastBlockSlowToastMs > 1800) {
+        hud.showToast(t('blockEffectBlock'), 'gold', 'cube');
+        lastBlockSlowToastMs = nowMs;
+      }
+    } else if (kind === 'slow') {
+      if (nowMs - lastBlockSlowToastMs > 2400) {
+        spawnParticlePreset('dust', player.state.s, player.state.x, 0.35, player.state.speed * 0.25);
+        hud.showToast(t('blockEffectSlow'), 'gold', 'cube');
+        lastBlockSlowToastMs = nowMs;
+      }
+    } else if (kind === 'boost') {
+      if (nowMs - lastBlockSlowToastMs > 2400) {
+        audio.playBoost();
+        spawnParticlePreset('nitro', player.state.s, player.state.x, 0.45, player.state.speed * 0.4);
+        hud.showToast(t('blockEffectBoost'), 'cyan', 'bolt');
+        lastBlockSlowToastMs = nowMs;
+      }
+    }
   },
   onParticles: spawnParticlePreset,
 };
@@ -1321,21 +1837,40 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
       weather.cycleWeather(weatherCallbacks);
       return;
     }
+    case 'KeyB': {
+      audio.unlock();
+      economyModal.open('shop');
+      return;
+    }
+    case 'KeyT': {
+      stashCurrentHeldItem();
+      return;
+    }
   }
 
-  // On-Foot Minecraft building shortcuts (1-9 hotbar, J break, K/E place, Q eyedropper)
+  // On-Foot Minecraft building shortcuts (1-9,0 hotbar, J break, K place, E context interact/place, Q eyedropper)
   if (onFoot.state.active) {
     if (e.code >= 'Digit1' && e.code <= 'Digit9') {
       const blockId = Number.parseInt(e.code.slice(5), 10) as BlockType;
       onFoot.selectBlock(blockId);
       return;
     }
+    if (e.code === 'Digit0') {
+      onFoot.selectBlock(10);
+      return;
+    }
     if (e.code === 'KeyJ') {
       breakAimedBlock();
       return;
     }
-    if (e.code === 'KeyK' || e.code === 'KeyE') {
+    if (e.code === 'KeyK') {
       placeAimedBlock();
+      return;
+    }
+    if (e.code === 'KeyE') {
+      if (!handleContextInteract()) {
+        placeAimedBlock();
+      }
       return;
     }
     if (e.code === 'KeyQ') {
@@ -1346,6 +1881,9 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
   }
 
   switch (e.code) {
+    case 'KeyE':
+      handleContextInteract();
+      break;
     case 'KeyR':
     case 'KeyX':
       items.useHeldItem(player.state, combatTargets, itemCallbacks, 0);
@@ -1667,6 +2205,10 @@ const perfSnapshot: PerfSnapshot = {
         x: number;
         s: number;
       };
+      openShop: (tab?: EconomyTab) => void;
+      openAi: () => void;
+      openSsh: () => void;
+      getEconomy: () => EconomyState;
     };
   }
 ).__VMOTO_OPENWORLD__ = {
@@ -1683,6 +2225,10 @@ const perfSnapshot: PerfSnapshot = {
     x: player.state.x,
     s: player.state.s,
   }),
+  openShop: (tab?: EconomyTab) => economyModal.open(tab ?? 'shop'),
+  openAi: () => aiBuilderModal.open(economyState.inventory),
+  openSsh: () => webSshModal.open(),
+  getEconomy: () => economyState,
 };
 
 function syncPerfViewportMetrics(): void {
@@ -1891,8 +2437,74 @@ function frame(nowPerfMs: number): void {
       lastLap = curLap;
       audio.playSpawnChime();
       const lapLabel = t('lapToast', { lap: curLap });
-      hud.showToast(lapLabel, 'gold', 'flag');
+      hud.showToast(`${lapLabel} +200💰`, 'gold', 'flag');
       hud.pushBroadcast(`${player.state.name} ${lapLabel}`, 'gold', 'flag');
+      awardRaceCoins('lap', 200);
+    }
+
+    // Step queued AI / blueprint block placement & natural resource nodes
+    stepPendingBuildQueue();
+    const curPose = onFoot.state.active
+      ? { wx: onFoot.state.wx, ws: onFoot.state.ws }
+      : player.getWorldPose();
+    resourceNodes.update(dt, curPose.wx, curPose.ws);
+
+    // Update live blueprint hologram origin when previewing
+    const activeBp = blueprints.getActivePreview();
+    if (activeBp) {
+      const bpOrigin = getBuildOriginForPlayer();
+      blueprints.setPreviewOrigin(bpOrigin.gx, bpOrigin.gy, bpOrigin.gz);
+    }
+
+    // Context interact prompt (blueprint stamp > WebSSH computer terminal > nearby resource node)
+    if (activeBp) {
+      if (lastInteractKind !== 'blueprint' || lastInteractNodeId !== activeBp.id) {
+        lastInteractKind = 'blueprint';
+        lastInteractNodeId = activeBp.id;
+        hud.setInteractPrompt(
+          getLang() === 'zh' ? `重建「${activeBp.name}」 [E]` : `REBUILD "${activeBp.name}" [E]`,
+          'blueprint'
+        );
+      }
+    } else if (
+      onFoot.state.active &&
+      onFoot.state.aimHit?.hitType === 'block' &&
+      onFoot.state.aimHit.blockType === 10
+    ) {
+      if (lastInteractKind !== 'computer') {
+        lastInteractKind = 'computer';
+        lastInteractNodeId = null;
+        hud.setInteractPrompt(t('computerPrompt'), 'terminal');
+      }
+    } else {
+      const nearNode = resourceNodes.getNearbyNode(curPose.wx, curPose.ws, 5.2);
+      if (nearNode && nearNode.cooldown <= 0) {
+        if (lastInteractKind !== 'resource' || lastInteractNodeId !== nearNode.id) {
+          lastInteractKind = 'resource';
+          lastInteractNodeId = nearNode.id;
+          const nName = getLang() === 'zh' ? nearNode.zhName : nearNode.enName;
+          hud.setInteractPrompt(t('harvestPrompt', { name: nName }), 'harvest');
+        }
+      } else if (lastInteractKind !== 'none') {
+        lastInteractKind = 'none';
+        lastInteractNodeId = null;
+        hud.setInteractPrompt(null);
+      }
+    }
+
+    // Smoothly tick shield countdown pill in HUD once per second
+    shieldHudTickAccum += dt;
+    if (shieldHudTickAccum >= 1.0) {
+      shieldHudTickAccum = 0;
+      const remShield = getShieldRemainingSeconds(economyState.shieldUntil);
+      if (remShield > 0) {
+        hud.setEconomyHud(
+          economyState.coins,
+          remShield,
+          economyState.bagCapacity,
+          economyState.savedItems.length
+        );
+      }
     }
   }
 
@@ -1930,7 +2542,9 @@ function frame(nowPerfMs: number): void {
     currentAnimals,
     weather.render,
     voxels,
-    onFoot.state
+    onFoot.state,
+    resourceNodes.getActiveNodes(),
+    blueprints
   );
   hud.setWeather(weather.render.current, weather.render.lightningFlash);
   hud.setEnragedWarning(ai.isAnyDeliveryEnraged());

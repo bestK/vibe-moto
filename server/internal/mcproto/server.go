@@ -320,8 +320,8 @@ func (s *Server) handleLogin(conn net.Conn, br *bufio.Reader, clientProto int32)
 	rw := s.worlds.GetRoom("global")
 	for _, b := range rw.SnapshotCompact() {
 		var body bytes.Buffer
-		writeMCBlockPos(&body, b[0], b[1], -b[2])
-		writeVarInt(&body, world.BlockTypeToMCStateID(b[3]))
+		writeMCBlockPos(&body, b.GX, b.GY, -b.GZ)
+		writeVarInt(&body, world.BlockTypeToMCStateID(b.Type))
 		client.writeRaw(framePacket(0x09, body.Bytes()))
 	}
 
@@ -339,7 +339,13 @@ func (s *Server) handleLogin(conn net.Conn, br *bufio.Reader, clientProto int32)
 			if err == nil && (status == 0 || status == 2) {
 				if x, y, z, err := readMCBlockPos(pr); err == nil {
 					gz := world.WrapGZ(-z)
-					if rw.DeleteBlock(x, y, gz) {
+					ok, prev, rej := rw.DeleteBlockChecked(x, y, gz, "", s.hub.ShieldLookup())
+					if rej != nil {
+						var body bytes.Buffer
+						writeMCBlockPos(&body, x, y, z)
+						writeVarInt(&body, world.BlockTypeToMCStateID(prev.Type))
+						client.writeRaw(framePacket(0x09, body.Bytes()))
+					} else if ok {
 						s.hub.BroadcastVoxel("global", hub.VoxelEvent{
 							Op:   "del",
 							GX:   x,
@@ -359,7 +365,13 @@ func (s *Server) handleLogin(conn net.Conn, br *bufio.Reader, clientProto int32)
 						nx, ny, nz := faceOffset(face)
 						px, py, pz := x+nx, y+ny, z+nz
 						gz := world.WrapGZ(-pz)
-						if rw.SetBlock(px, py, gz, 3) {
+						ok, prev, _, rej := rw.SetBlockChecked(px, py, gz, 3, "", "", s.hub.ShieldLookup())
+						if rej != nil {
+							var body bytes.Buffer
+							writeMCBlockPos(&body, px, py, pz)
+							writeVarInt(&body, world.BlockTypeToMCStateID(prev.Type))
+							client.writeRaw(framePacket(0x09, body.Bytes()))
+						} else if ok {
 							s.hub.BroadcastVoxel("global", hub.VoxelEvent{
 								Op:   "set",
 								GX:   px,

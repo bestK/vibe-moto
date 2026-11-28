@@ -16,16 +16,19 @@ import {
   sampleRoadFrame,
   signedTrackDelta,
   worldAbsToLocal,
+  wrapTrackS,
 } from './RoadMath';
 import { getPixelAtlas } from './PixelTextures';
 import { getChinaAtlas } from './ChinaTextures';
 import { CrossingAnimal } from './AnimalSystem';
 import { BikeVisual } from './BikeModel';
+import { BlueprintManager, BlueprintRenderData, MAX_BLUEPRINT_BLOCKS } from './BlueprintSystem';
 import { ItemVisuals } from './ItemSystem';
 import { OnFootState } from './OnFootController';
 import { PlayerCharacterVisual } from './PlayerCharacterVisual';
+import type { ResourceNode } from './ResourceNodes';
 import { BIKE_PALETTES, FallenCargo, RiderRenderState, TrafficCar } from './types';
-import { VoxelWorld, VoxelWorldVisual } from './VoxelWorld';
+import { VoxelWorld, VoxelWorldVisual, wrapGridZ } from './VoxelWorld';
 import type { WeatherId, WeatherRenderSnapshot } from './WeatherSystem';
 
 // Progressive road LOD slices: 12m rear (-144m..-36m) for 360° open-world turning, 3m near (-24m..+108m), 6m far (+114m..+324m)
@@ -44,6 +47,7 @@ const MAX_TRAFFIC_RENDER = 26;
 const MAX_TRUCK_RENDER = 10;
 const MAX_FALLEN_CARGO_RENDER = 20;
 const MAX_ANIMAL_RENDER = 16;
+const MAX_RESOURCE_NODES = 48;
 const MAX_SIREN_RENDER = 12;
 const MAX_POPUPS = 14;
 const MAX_WEATHER_DROPS = 220;
@@ -266,6 +270,20 @@ export class WorldRenderer {
   private readonly bikeBeaconMesh: THREE.Mesh;
   private freeCamYaw = 0;
   private freeCamYawInit = false;
+
+  // Natural World Resource Nodes (rotating crystal/crate clusters + pedestals + vertical light pillars)
+  private readonly resCrystalInst: THREE.InstancedMesh;
+  private readonly resBaseInst: THREE.InstancedMesh;
+  private readonly resPillarInst: THREE.InstancedMesh;
+  private lastResNodeCount = 0;
+  private lastResPillarCount = 0;
+
+  // Blueprint 3D gold selection box wireframe + translucent cyan reconstruction preview
+  private readonly bpSelWire: THREE.LineSegments;
+  private readonly bpSelFill: THREE.Mesh;
+  private readonly bpPreviewWire: THREE.LineSegments;
+  private readonly bpPreviewInst: THREE.InstancedMesh;
+  private lastBpPreviewCount = 0;
 
   // Instanced roadside scenery pools
   private readonly trunkInst: THREE.InstancedMesh;
@@ -550,6 +568,92 @@ export class WorldRenderer {
     );
     this.bikeBeaconMesh.visible = false;
     this.scene.add(this.bikeBeaconMesh);
+
+    // Natural World Resource Node instanced visuals (3 draw calls total, 0 when empty)
+    const resClusterGeo = mergeBoxGeometries([
+      { w: 0.92, h: 0.92, d: 0.92, x: 0, y: 0, z: 0 },
+      { w: 0.48, h: 1.28, d: 0.48, x: 0.42, y: 0.14, z: 0.25 },
+      { w: 0.44, h: 0.84, d: 0.44, x: -0.42, y: -0.1, z: -0.28 },
+    ]);
+    this.resCrystalInst = this.makeInstanced(
+      resClusterGeo,
+      new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      MAX_RESOURCE_NODES
+    );
+    this._tmpColor.setHex(0xffffff);
+    this.resCrystalInst.setColorAt(0, this._tmpColor);
+    this.resCrystalInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+
+    const resBaseGeo = mergeBoxGeometries([
+      { w: 2.1, h: 0.24, d: 2.1, x: 0, y: 0.12, z: 0 },
+      { w: 1.5, h: 0.22, d: 1.5, x: 0, y: 0.34, z: 0 },
+    ]);
+    this.resBaseInst = this.makeInstanced(
+      resBaseGeo,
+      new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+      MAX_RESOURCE_NODES
+    );
+    this.resBaseInst.setColorAt(0, this._tmpColor);
+    this.resBaseInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+
+    const resPillarGeo = new THREE.BoxGeometry(0.46, 15.0, 0.46);
+    resPillarGeo.translate(0, 7.8, 0);
+    this.resPillarInst = this.makeInstanced(
+      resPillarGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.24,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+      MAX_RESOURCE_NODES
+    );
+    this.resPillarInst.setColorAt(0, this._tmpColor);
+    this.resPillarInst.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+
+    // Blueprint gold selection wireframe + translucent cyan reconstruction footprint preview
+    const unitEdgesGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
+    this.bpSelWire = new THREE.LineSegments(
+      unitEdgesGeo,
+      new THREE.LineBasicMaterial({ color: 0xffd166, transparent: true, opacity: 0.96 })
+    );
+    this.bpSelWire.frustumCulled = false;
+    this.bpSelWire.visible = false;
+    this.scene.add(this.bpSelWire);
+
+    this.bpSelFill = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshBasicMaterial({
+        color: 0xffd166,
+        transparent: true,
+        opacity: 0.1,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      })
+    );
+    this.bpSelFill.frustumCulled = false;
+    this.bpSelFill.visible = false;
+    this.scene.add(this.bpSelFill);
+
+    this.bpPreviewWire = new THREE.LineSegments(
+      unitEdgesGeo,
+      new THREE.LineBasicMaterial({ color: 0x00f5d4, transparent: true, opacity: 0.95 })
+    );
+    this.bpPreviewWire.frustumCulled = false;
+    this.bpPreviewWire.visible = false;
+    this.scene.add(this.bpPreviewWire);
+
+    this.bpPreviewInst = this.makeInstanced(
+      new THREE.BoxGeometry(0.96, 0.96, 0.96),
+      new THREE.MeshBasicMaterial({
+        color: 0x00f5d4,
+        transparent: true,
+        opacity: 0.34,
+        depthWrite: false,
+      }),
+      MAX_BLUEPRINT_BLOCKS
+    );
 
     // Instanced roadside props (single draw call per category!)
     const trunkGeo = new THREE.BoxGeometry(0.95, 5.2, 0.95);
@@ -1551,7 +1655,9 @@ export class WorldRenderer {
     animals?: readonly CrossingAnimal[],
     weather?: WeatherRenderSnapshot,
     voxels?: VoxelWorld,
-    onFoot?: OnFootState
+    onFoot?: OnFootState,
+    resourceNodes?: readonly ResourceNode[],
+    blueprint?: BlueprintManager | BlueprintRenderData | null
   ): void {
     // Adaptive performance governor (auto-tunes DPR, horizon & particle caps for smooth FPS on ordinary machines)
     this.updatePerfGovernor();
@@ -1620,6 +1726,10 @@ export class WorldRenderer {
         Boolean(onFoot?.active)
       );
     }
+
+    // 2c. Update Natural World Resource Nodes & Blueprint 3D wireframe overlays
+    this.updateResourceNodeVisuals(resourceNodes, originS, originX, originY, timeSec);
+    this.updateBlueprintVisuals(blueprint, onFoot, originS, originX, originY, timeSec);
 
     // 3. Update traffic car meshes (sedans/police + Chinese overloaded cargo trucks)
     this.updateTrafficVisuals(traffic, originS, originX, originY, timeSec);
@@ -2186,6 +2296,190 @@ export class WorldRenderer {
     this._vB.set(-f.tx, -f.ty, -f.tz);
     this._m4.makeBasis(this._vR, this._vU, this._vB);
     outQ.setFromRotationMatrix(this._m4);
+  }
+
+  private updateResourceNodeVisuals(
+    nodes: readonly ResourceNode[] | undefined,
+    originS: number,
+    originX: number,
+    originY: number,
+    timeSec: number
+  ): void {
+    if (!nodes || nodes.length === 0) {
+      if (this.lastResNodeCount > 0) {
+        this.resCrystalInst.count = 0;
+        this.resBaseInst.count = 0;
+        this.resCrystalInst.instanceMatrix.needsUpdate = true;
+        this.resBaseInst.instanceMatrix.needsUpdate = true;
+        this.lastResNodeCount = 0;
+      }
+      if (this.lastResPillarCount > 0) {
+        this.resPillarInst.count = 0;
+        this.resPillarInst.instanceMatrix.needsUpdate = true;
+        this.lastResPillarCount = 0;
+      }
+      return;
+    }
+
+    const d = this._dummy;
+    const pos = this._v1;
+    let nodeC = 0;
+    let pillarC = 0;
+
+    for (let i = 0; i < nodes.length && nodeC < MAX_RESOURCE_NODES; i++) {
+      const n = nodes[i];
+      const ds = signedTrackDelta(n.ws, originS);
+      if (Math.abs(ds) > 220 || Math.abs(n.wx - originX) > 220) continue;
+
+      const cooling = n.cooldown > 0;
+      const phase = i * 1.17;
+      worldAbsToLocal(n.wx, n.wy, n.ws, originS, originX, originY, pos);
+
+      // Base pedestal
+      d.position.copy(pos);
+      d.rotation.set(0, 0, 0);
+      d.scale.set(1, 1, 1);
+      d.updateMatrix();
+      this.resBaseInst.setMatrixAt(nodeC, d.matrix);
+      this._tmpColor.setHex(cooling ? 0x3b4252 : 0x2a3245);
+      this.resBaseInst.setColorAt(nodeC, this._tmpColor);
+
+      // Rotating glowing voxel crystal / crate cluster (dimmed & smaller while cooling down)
+      const bobY = cooling ? 0.72 : 1.38 + Math.sin(timeSec * 3.4 + phase) * 0.24;
+      const sc = cooling ? 0.55 : 1.0 + Math.sin(timeSec * 5.0 + phase) * 0.05;
+      d.position.set(pos.x, pos.y + bobY, pos.z);
+      d.rotation.set(
+        cooling ? 0.15 : 0.28 * Math.sin(timeSec * 2.1 + phase),
+        timeSec * (cooling ? 0.45 : 1.8) + phase,
+        cooling ? 0.15 : 0.22 * Math.cos(timeSec * 1.7 + phase)
+      );
+      d.scale.set(sc, sc, sc);
+      d.updateMatrix();
+      this.resCrystalInst.setMatrixAt(nodeC, d.matrix);
+      this._tmpColor.setHex(n.colorHex);
+      if (cooling) {
+        this._tmpColor.multiplyScalar(0.28);
+      }
+      this.resCrystalInst.setColorAt(nodeC, this._tmpColor);
+      nodeC++;
+
+      // Tall glowing beacon light pillar for ready (unharvested) nodes
+      if (!cooling && pillarC < MAX_RESOURCE_NODES) {
+        const pulse = 0.85 + 0.22 * Math.sin(timeSec * 4.2 + phase);
+        d.position.copy(pos);
+        d.rotation.set(0, timeSec * 0.9 + phase, 0);
+        d.scale.set(pulse, 1, pulse);
+        d.updateMatrix();
+        this.resPillarInst.setMatrixAt(pillarC, d.matrix);
+        this._tmpColor.setHex(n.colorHex);
+        this.resPillarInst.setColorAt(pillarC, this._tmpColor);
+        pillarC++;
+      }
+    }
+
+    this.resCrystalInst.count = nodeC;
+    this.resBaseInst.count = nodeC;
+    if (nodeC > 0 || this.lastResNodeCount > 0) {
+      this.resCrystalInst.instanceMatrix.needsUpdate = true;
+      this.resBaseInst.instanceMatrix.needsUpdate = true;
+      if (this.resCrystalInst.instanceColor) this.resCrystalInst.instanceColor.needsUpdate = true;
+      if (this.resBaseInst.instanceColor) this.resBaseInst.instanceColor.needsUpdate = true;
+      this.lastResNodeCount = nodeC;
+    }
+
+    this.resPillarInst.count = pillarC;
+    if (pillarC > 0 || this.lastResPillarCount > 0) {
+      this.resPillarInst.instanceMatrix.needsUpdate = true;
+      if (this.resPillarInst.instanceColor) this.resPillarInst.instanceColor.needsUpdate = true;
+      this.lastResPillarCount = pillarC;
+    }
+  }
+
+  private updateBlueprintVisuals(
+    blueprint: BlueprintManager | BlueprintRenderData | null | undefined,
+    onFoot: OnFootState | undefined,
+    originS: number,
+    originX: number,
+    originY: number,
+    timeSec: number
+  ): void {
+    const data: BlueprintRenderData | null = !blueprint
+      ? null
+      : blueprint instanceof BlueprintManager
+        ? blueprint.getRenderData()
+        : blueprint;
+
+    const wrappedOriginS = wrapTrackS(originS);
+
+    // 1. Gold 3D selection box wireframe (when Corner A and/or Corner B is set)
+    const sel = data?.selection ?? null;
+    if (sel) {
+      const cx = sel.minX + sel.sizeX * 0.5 - originX;
+      const cy = sel.minY + sel.sizeY * 0.5 - originY;
+      const centerZ = wrapTrackS(sel.minZ + sel.sizeZ * 0.5);
+      const cz = -signedTrackDelta(centerZ, wrappedOriginS);
+
+      this.bpSelWire.position.set(cx, cy, cz);
+      this.bpSelWire.scale.set(sel.sizeX + 0.06, sel.sizeY + 0.06, sel.sizeZ + 0.06);
+      this.bpSelWire.visible = true;
+
+      this.bpSelFill.position.set(cx, cy, cz);
+      this.bpSelFill.scale.set(sel.sizeX + 0.02, sel.sizeY + 0.02, sel.sizeZ + 0.02);
+      this.bpSelFill.visible = sel.complete;
+    } else {
+      if (this.bpSelWire.visible) this.bpSelWire.visible = false;
+      if (this.bpSelFill.visible) this.bpSelFill.visible = false;
+    }
+
+    // 2. Translucent cyan blueprint footprint preview
+    const preview = data?.preview ?? null;
+    let anchor = data?.previewOrigin ?? null;
+    if (preview && !anchor && onFoot?.active && onFoot.aimHit) {
+      anchor = {
+        gx: onFoot.aimHit.placeX,
+        gy: onFoot.aimHit.placeY,
+        gz: onFoot.aimHit.placeZ,
+      };
+    }
+
+    if (preview && anchor) {
+      const pulse = 0.94 + 0.04 * Math.sin(timeSec * 5.0);
+      const cx = anchor.gx + preview.sizeX * 0.5 - originX;
+      const cy = anchor.gy + preview.sizeY * 0.5 - originY;
+      const centerZ = wrapTrackS(anchor.gz + preview.sizeZ * 0.5);
+      const cz = -signedTrackDelta(centerZ, wrappedOriginS);
+
+      this.bpPreviewWire.position.set(cx, cy, cz);
+      this.bpPreviewWire.scale.set(preview.sizeX + 0.08, preview.sizeY + 0.08, preview.sizeZ + 0.08);
+      this.bpPreviewWire.visible = true;
+
+      const d = this._dummy;
+      const count = Math.min(preview.blocks.length, MAX_BLUEPRINT_BLOCKS);
+      for (let i = 0; i < count; i++) {
+        const blk = preview.blocks[i];
+        const gz = wrapGridZ(anchor.gz + blk.dz);
+        const ds = signedTrackDelta(gz + 0.5, wrappedOriginS);
+        d.position.set(
+          anchor.gx + blk.dx + 0.5 - originX,
+          anchor.gy + blk.dy + 0.5 - originY,
+          -ds
+        );
+        d.rotation.set(0, 0, 0);
+        d.scale.set(pulse, pulse, pulse);
+        d.updateMatrix();
+        this.bpPreviewInst.setMatrixAt(i, d.matrix);
+      }
+      this.bpPreviewInst.count = count;
+      this.bpPreviewInst.instanceMatrix.needsUpdate = true;
+      this.lastBpPreviewCount = count;
+    } else {
+      if (this.bpPreviewWire.visible) this.bpPreviewWire.visible = false;
+      if (this.lastBpPreviewCount > 0) {
+        this.bpPreviewInst.count = 0;
+        this.bpPreviewInst.instanceMatrix.needsUpdate = true;
+        this.lastBpPreviewCount = 0;
+      }
+    }
   }
 
   private updateTrafficVisuals(

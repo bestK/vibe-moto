@@ -31,13 +31,15 @@ type RoomSummary struct {
 }
 
 type VoxelEvent struct {
-	Type string `json:"t"`
-	Op   string `json:"op"` // "set" | "del" | "clear"
-	GX   int    `json:"gx,omitempty"`
-	GY   int    `json:"gy,omitempty"`
-	GZ   int    `json:"gz,omitempty"`
-	B    int    `json:"b,omitempty"`
-	From string `json:"from,omitempty"`
+	Type      string `json:"t"`
+	Op        string `json:"op"` // "set" | "del" | "clear"
+	GX        int    `json:"gx,omitempty"`
+	GY        int    `json:"gy,omitempty"`
+	GZ        int    `json:"gz,omitempty"`
+	B         int    `json:"b,omitempty"`
+	From      string `json:"from,omitempty"`
+	OwnerID   string `json:"ownerId,omitempty"`
+	OwnerName string `json:"ownerName,omitempty"`
 }
 
 type Client struct {
@@ -72,6 +74,13 @@ func (h *Hub) AddVoxelHook(fn func(room string, ev VoxelEvent)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onVoxelHooks = append(h.onVoxelHooks, fn)
+}
+
+func (h *Hub) ShieldLookup() world.ShieldLookup {
+	if h.accounts == nil {
+		return nil
+	}
+	return h.accounts.GetShieldInfo
 }
 
 func (h *Hub) OnlineCount() int {
@@ -296,36 +305,74 @@ func (c *Client) readPump() {
 
 		case "vox":
 			rw := c.hub.worlds.GetRoom(c.room)
+			lookup := c.hub.ShieldLookup()
+			sendRejected := func(op string, gx, gy, gz int, rej *world.ShieldRejection) {
+				msg, _ := json.Marshal(map[string]any{
+					"t":            "vox_rejected",
+					"reason":       "shielded",
+					"ownerName":    rej.OwnerName,
+					"remainingSec": rej.RemainingSec,
+					"op":           op,
+					"gx":           gx,
+					"gy":           gy,
+					"gz":           world.WrapGZ(gz),
+				})
+				select {
+				case c.send <- msg:
+				default:
+				}
+			}
+
 			changed := false
+			ev := VoxelEvent{
+				Type: "vox",
+				Op:   env.Op,
+				GX:   env.GX,
+				GY:   env.GY,
+				GZ:   world.WrapGZ(env.GZ),
+				B:    env.B,
+				From: c.id,
+			}
+
 			switch env.Op {
 			case "set":
-				if rw.SetBlock(env.GX, env.GY, env.GZ, env.B) {
+				ok, _, _, rej := rw.SetBlockChecked(env.GX, env.GY, env.GZ, env.B, c.accountID, c.name, lookup)
+				if rej != nil {
+					sendRejected("set", env.GX, env.GY, env.GZ, rej)
+					continue
+				}
+				if ok {
 					changed = true
 					if c.accountID != "" {
-						go c.hub.accounts.RecordBlockStat(c.accountID, 1, 0)
+						ev.OwnerID = c.accountID
+						ev.OwnerName = c.name
+						c.hub.accounts.OnBlockPlaced(c.accountID, env.B)
 					}
 				}
 			case "del":
-				if rw.DeleteBlock(env.GX, env.GY, env.GZ) {
+				ok, prev, rej := rw.DeleteBlockChecked(env.GX, env.GY, env.GZ, c.accountID, lookup)
+				if rej != nil {
+					sendRejected("del", env.GX, env.GY, env.GZ, rej)
+					continue
+				}
+				if ok {
 					changed = true
 					if c.accountID != "" {
-						go c.hub.accounts.RecordBlockStat(c.accountID, 0, 1)
+						c.hub.accounts.OnBlockBroken(c.accountID, prev.Type)
 					}
 				}
 			case "clear":
-				rw.ClearAll()
-				changed = true
+				removed, rej := rw.ClearAllChecked(c.accountID, lookup)
+				if rej != nil {
+					sendRejected("clear", 0, 0, 0, rej)
+					continue
+				}
+				if removed > 0 {
+					changed = true
+				}
 			}
 			if changed {
-				c.hub.BroadcastVoxel(c.room, VoxelEvent{
-					Type: "vox",
-					Op:   env.Op,
-					GX:   env.GX,
-					GY:   env.GY,
-					GZ:   world.WrapGZ(env.GZ),
-					B:    env.B,
-					From: c.id,
-				}, c)
+				c.hub.BroadcastVoxel(c.room, ev, c)
 			}
 
 		case "state", "hit", "item":

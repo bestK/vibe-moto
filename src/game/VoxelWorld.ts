@@ -8,7 +8,7 @@ import {
   wrapTrackS,
 } from './RoadMath';
 
-export type BlockType = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+export type BlockType = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 
 export interface BlockSpec {
   id: BlockType;
@@ -30,6 +30,7 @@ export const BLOCK_SPECS: readonly BlockSpec[] = [
   { id: 7, code: 'GLASS', zhName: '玻璃', enName: 'GLASS', particleHex: 0x7de8ff, transparent: true },
   { id: 8, code: 'GLOW', zhName: '霓虹块', enName: 'NEON', particleHex: 0xffd166, emissive: true },
   { id: 9, code: 'ROAD', zhName: '赛道砖', enName: 'ASPHALT', particleHex: 0x3b4359 },
+  { id: 10, code: 'COMPUTER', zhName: '电脑终端', enName: 'COMPUTER', particleHex: 0x00f5d4, emissive: true },
 ] as const;
 
 export const BLOCK_SPEC_BY_ID: Record<BlockType, BlockSpec> = {
@@ -42,6 +43,7 @@ export const BLOCK_SPEC_BY_ID: Record<BlockType, BlockSpec> = {
   7: BLOCK_SPECS[6],
   8: BLOCK_SPECS[7],
   9: BLOCK_SPECS[8],
+  10: BLOCK_SPECS[9],
 };
 
 export interface VoxelBlockEntry {
@@ -49,7 +51,14 @@ export interface VoxelBlockEntry {
   gy: number;
   gz: number; // wrapped integer in [0, TRACK_LENGTH)
   type: BlockType;
+  ownerId?: string;
+  ownerName?: string;
 }
+
+export type CompactVoxelTuple =
+  | [number, number, number, number]
+  | [number, number, number, number, string, string]
+  | [number, number, number, number, string?, string?];
 
 export interface VoxelRaycastHit {
   hitType: 'block' | 'ground';
@@ -270,6 +279,77 @@ function drawBlockFaceCanvas(
       }
       break;
     }
+    case 10: {
+      // Retro Vibe-Coding CRT Computer Terminal
+      if (face === 'top') {
+        fillNoise(['#262e42', '#2d374f', '#21283a'], 101);
+        ctx.fillStyle = '#3d4a66';
+        ctx.fillRect(0, 0, 16, 1);
+        ctx.fillRect(0, 15, 16, 1);
+        ctx.fillRect(0, 0, 1, 16);
+        ctx.fillRect(15, 0, 1, 16);
+        // Cooling vent slats
+        ctx.fillStyle = '#121724';
+        for (const y of [3, 5, 7, 9, 11]) {
+          ctx.fillRect(3, y, 10, 1);
+        }
+        // Corner status LED accents
+        ctx.fillStyle = '#00f5d4';
+        ctx.fillRect(2, 2, 1, 1);
+        ctx.fillRect(13, 2, 1, 1);
+      } else if (face === 'bottom') {
+        fillNoise(['#1a2030', '#20283b', '#151a26'], 102);
+        ctx.fillStyle = '#0e121c';
+        ctx.fillRect(2, 2, 12, 12);
+        ctx.fillStyle = '#2d374f';
+        ctx.fillRect(4, 4, 8, 8);
+      } else {
+        // Outer retro CRT casing bezel
+        ctx.fillStyle = '#2a334a';
+        ctx.fillRect(0, 0, 16, 16);
+        // Top/left highlight bevel & bottom/right shadow bevel
+        ctx.fillStyle = '#445273';
+        ctx.fillRect(0, 0, 16, 1);
+        ctx.fillRect(0, 0, 1, 16);
+        ctx.fillStyle = '#181e2d';
+        ctx.fillRect(0, 15, 16, 1);
+        ctx.fillRect(15, 0, 1, 16);
+        // Inner recessed CRT screen frame
+        ctx.fillStyle = '#101622';
+        ctx.fillRect(1, 1, 14, 11);
+        // Deep phosphor screen background
+        ctx.fillStyle = '#06151c';
+        ctx.fillRect(2, 2, 12, 9);
+        // Subtle CRT scanline tint
+        ctx.fillStyle = '#09202a';
+        ctx.fillRect(2, 3, 12, 1);
+        ctx.fillRect(2, 6, 12, 1);
+        ctx.fillRect(2, 9, 12, 1);
+        // Glowing terminal code lines (cyan & neon phosphor green)
+        ctx.fillStyle = '#ffbe3b';
+        ctx.fillRect(3, 3, 1, 1); // prompt '>'
+        ctx.fillStyle = '#00f5d4';
+        ctx.fillRect(5, 3, 6, 1); // command text
+        ctx.fillStyle = '#38ff9c';
+        ctx.fillRect(3, 5, 8, 1); // output line 1
+        ctx.fillStyle = '#00f5d4';
+        ctx.fillRect(3, 7, 5, 1); // output line 2
+        ctx.fillStyle = '#5ce8e0';
+        ctx.fillRect(9, 7, 3, 1); // token highlight
+        ctx.fillStyle = '#38ff9c';
+        ctx.fillRect(3, 9, 4, 1); // prompt line 3
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(8, 9, 2, 1); // bright block cursor
+        // Bottom control strip: floppy slot + glowing power & disk LEDs
+        ctx.fillStyle = '#141a26';
+        ctx.fillRect(2, 13, 6, 1);
+        ctx.fillStyle = '#00f5d4';
+        ctx.fillRect(10, 13, 2, 1);
+        ctx.fillStyle = '#38ff9c';
+        ctx.fillRect(13, 13, 1, 1);
+      }
+      break;
+    }
   }
 
   return c;
@@ -294,7 +374,16 @@ function getVoxelMaterials(): Map<BlockType, THREE.Material | THREE.Material[]> 
   _sharedMaterials = new Map();
 
   for (const spec of BLOCK_SPECS) {
-    if (spec.id === 1 || spec.id === 5 || spec.id === 9) {
+    if (spec.id === 10) {
+      // Computer terminal: glowing CRT sides (MeshBasicMaterial) + shaded chassis top/bottom
+      const sideTex = toBlockTexture(drawBlockFaceCanvas(spec.id, 'side'));
+      const topTex = toBlockTexture(drawBlockFaceCanvas(spec.id, 'top'));
+      const botTex = toBlockTexture(drawBlockFaceCanvas(spec.id, 'bottom'));
+      const sideMat = new THREE.MeshBasicMaterial({ map: sideTex });
+      const topMat = new THREE.MeshLambertMaterial({ map: topTex });
+      const botMat = new THREE.MeshLambertMaterial({ map: botTex });
+      _sharedMaterials.set(spec.id, [sideMat, sideMat, topMat, botMat, sideMat, sideMat]);
+    } else if (spec.id === 1 || spec.id === 5 || spec.id === 9) {
       // Multi-face material array: [+x, -x, +y(top), -y(bottom), +z, -z]
       const sideTex = toBlockTexture(drawBlockFaceCanvas(spec.id, 'side'));
       const topTex = toBlockTexture(drawBlockFaceCanvas(spec.id, 'top'));
@@ -353,11 +442,23 @@ export class VoxelWorld {
     return entry ? entry.type : null;
   }
 
+  getBlockEntry(gx: number, gy: number, gz: number): VoxelBlockEntry | null {
+    return this.blocks.get(makeKey(Math.floor(gx), Math.floor(gy), wrapGridZ(gz))) ?? null;
+  }
+
   hasBlock(gx: number, gy: number, gz: number): boolean {
     return this.blocks.has(makeKey(Math.floor(gx), Math.floor(gy), wrapGridZ(gz)));
   }
 
-  setBlock(gx: number, gy: number, gz: number, type: BlockType, save = true): boolean {
+  setBlock(
+    gx: number,
+    gy: number,
+    gz: number,
+    type: BlockType,
+    save = true,
+    ownerId?: string,
+    ownerName?: string
+  ): boolean {
     const ix = Math.floor(gx);
     const iy = Math.floor(gy);
     const iz = wrapGridZ(gz);
@@ -366,9 +467,22 @@ export class VoxelWorld {
 
     const key = makeKey(ix, iy, iz);
     const prev = this.blocks.get(key);
-    if (prev && prev.type === type) return false;
+    const nextOwnerId = ownerId && ownerId.length > 0 ? ownerId : undefined;
+    const nextOwnerName = ownerName && ownerName.length > 0 ? ownerName : undefined;
+    if (
+      prev &&
+      prev.type === type &&
+      prev.ownerId === nextOwnerId &&
+      prev.ownerName === nextOwnerName
+    ) {
+      return false;
+    }
 
-    this.blocks.set(key, { gx: ix, gy: iy, gz: iz, type });
+    const entry: VoxelBlockEntry = { gx: ix, gy: iy, gz: iz, type };
+    if (nextOwnerId !== undefined) entry.ownerId = nextOwnerId;
+    if (nextOwnerName !== undefined) entry.ownerName = nextOwnerName;
+
+    this.blocks.set(key, entry);
     this.version++;
     if (save) this.scheduleSave();
     return true;
@@ -394,17 +508,23 @@ export class VoxelWorld {
     if (save) this.scheduleSave();
   }
 
-  replaceFromServer(compact: [number, number, number, number][]): void {
+  replaceFromServer(compact: readonly CompactVoxelTuple[]): void {
     this.blocks.clear();
     for (let i = 0; i < compact.length; i++) {
       const item = compact[i];
       if (
         Array.isArray(item) &&
-        item.length === 4 &&
+        item.length >= 4 &&
+        typeof item[0] === 'number' &&
+        typeof item[1] === 'number' &&
+        typeof item[2] === 'number' &&
+        typeof item[3] === 'number' &&
         item[3] >= 1 &&
-        item[3] <= 9
+        item[3] <= 10
       ) {
-        this.setBlock(item[0], item[1], item[2], item[3] as BlockType, false);
+        const ownerId = typeof item[4] === 'string' && item[4].length > 0 ? item[4] : undefined;
+        const ownerName = typeof item[5] === 'string' && item[5].length > 0 ? item[5] : undefined;
+        this.setBlock(item[0], item[1], item[2], item[3] as BlockType, false, ownerId, ownerName);
       }
     }
     this.version++;
@@ -425,15 +545,17 @@ export class VoxelWorld {
             const item = arr[i];
             if (
               Array.isArray(item) &&
-              item.length === 4 &&
+              item.length >= 4 &&
               typeof item[0] === 'number' &&
               typeof item[1] === 'number' &&
               typeof item[2] === 'number' &&
               typeof item[3] === 'number' &&
               item[3] >= 1 &&
-              item[3] <= 9
+              item[3] <= 10
             ) {
-              this.setBlock(item[0], item[1], item[2], item[3] as BlockType, false);
+              const ownerId = typeof item[4] === 'string' && item[4].length > 0 ? item[4] : undefined;
+              const ownerName = typeof item[5] === 'string' && item[5].length > 0 ? item[5] : undefined;
+              this.setBlock(item[0], item[1], item[2], item[3] as BlockType, false, ownerId, ownerName);
             }
           }
           loaded = true;
@@ -459,9 +581,13 @@ export class VoxelWorld {
 
   private saveNow(): void {
     try {
-      const compact: number[][] = [];
+      const compact: CompactVoxelTuple[] = [];
       for (const b of this.blocks.values()) {
-        compact.push([b.gx, b.gy, b.gz, b.type]);
+        if (b.ownerId || b.ownerName) {
+          compact.push([b.gx, b.gy, b.gz, b.type, b.ownerId ?? '', b.ownerName ?? '']);
+        } else {
+          compact.push([b.gx, b.gy, b.gz, b.type]);
+        }
       }
       window.localStorage.setItem(`${STORAGE_PREFIX}${this.roomKey}`, JSON.stringify(compact));
     } catch {

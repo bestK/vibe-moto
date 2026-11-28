@@ -160,7 +160,7 @@ export class OnFootController {
   }
 
   cycleBlock(delta: number): BlockType {
-    const idx = ((this.state.selectedBlock - 1 + delta) % 9 + 9) % 9;
+    const idx = ((this.state.selectedBlock - 1 + delta) % 10 + 10) % 10;
     this.state.selectedBlock = (idx + 1) as BlockType;
     return this.state.selectedBlock;
   }

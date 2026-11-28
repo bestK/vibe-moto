@@ -176,6 +176,8 @@ export interface VoxelNetEvent {
   gy: number;
   gz: number;
   b?: number;
+  ownerId?: string;
+  ownerName?: string;
   ts: number;
 }
 

@@ -15,7 +15,7 @@ import {
 import { AVATAR_COUNT } from './PixelAvatars';
 import { FallenCargo, RiderRenderState, TrafficCar, WEAPONS, WeaponType } from './types';
 import type { WeatherPhysicsMod } from './WeatherSystem';
-import type { VoxelWorld } from './VoxelWorld';
+import type { BlockType, VoxelWorld } from './VoxelWorld';
 
 export interface InputState {
   throttle: boolean;
@@ -57,6 +57,7 @@ export interface PlayerCallbacks {
   onCrash(): void;
   onLeaveTrack?(): void;
   onReturnTrack?(): void;
+  onBlockEffect?(kind: 'block' | 'slow' | 'boost' | 'crash', blockType: BlockType): void;
   onParticles(
     kind: ParticleKind,
     s: number,
@@ -82,6 +83,14 @@ const HOP_VELOCITY = 8.4; // peak height ~1.41m
 
 function clamp(v: number, min: number, max: number): number {
   return v < min ? min : v > max ? max : v;
+}
+
+function isSlowVoxel(bt: BlockType): boolean {
+  return bt === 1 || bt === 6;
+}
+
+function isSolidVoxel(bt: BlockType): boolean {
+  return bt === 2 || bt === 3 || bt === 4 || bt === 5 || bt === 7 || bt === 8 || bt === 10;
 }
 
 export class PlayerPhysics {
@@ -132,6 +141,12 @@ export class PlayerPhysics {
   private lastBoostSlot = -999;
   private particleTimer = 0;
   private railSparkTimer = 0;
+  private blockHitCooldown = 0;
+  private blockSlowFeedbackTimer = 0;
+  private blockBoostFeedbackTimer = 0;
+  private slowBlockTimer = 0;
+  private asphaltBoostTimer = 0;
+  private voxelSupportY = 0;
 
   // Open-world free-roam Euclidean pose
   private freeWx = 0;
@@ -243,6 +258,12 @@ export class PlayerPhysics {
     this.boostPadTimer = 0;
     this.lastBoostSlot = -999;
     this.freeRejoinCooldown = 0;
+    this.blockHitCooldown = 0;
+    this.blockSlowFeedbackTimer = 0;
+    this.blockBoostFeedbackTimer = 0;
+    this.slowBlockTimer = 0;
+    this.asphaltBoostTimer = 0;
+    this.voxelSupportY = 0;
     this.hitIdsThisSwing.clear();
   }
 
@@ -450,6 +471,9 @@ export class PlayerPhysics {
     this.attackTimer = 0;
     this.pendingSwingSide = 0;
     this.boostPadTimer = 0;
+    this.slowBlockTimer = 0;
+    this.asphaltBoostTimer = 0;
+    this.voxelSupportY = 0;
     this.hitIdsThisSwing.clear();
   }
 
@@ -499,6 +523,21 @@ export class PlayerPhysics {
     }
     if (this.railSparkTimer > 0) {
       this.railSparkTimer = Math.max(0, this.railSparkTimer - step);
+    }
+    if (this.blockHitCooldown > 0) {
+      this.blockHitCooldown = Math.max(0, this.blockHitCooldown - step);
+    }
+    if (this.blockSlowFeedbackTimer > 0) {
+      this.blockSlowFeedbackTimer = Math.max(0, this.blockSlowFeedbackTimer - step);
+    }
+    if (this.blockBoostFeedbackTimer > 0) {
+      this.blockBoostFeedbackTimer = Math.max(0, this.blockBoostFeedbackTimer - step);
+    }
+    if (this.slowBlockTimer > 0) {
+      this.slowBlockTimer = Math.max(0, this.slowBlockTimer - step);
+    }
+    if (this.asphaltBoostTimer > 0) {
+      this.asphaltBoostTimer = Math.max(0, this.asphaltBoostTimer - step);
     }
 
     sampleRoadFrame(st.s, this._frame);
@@ -572,7 +611,7 @@ export class PlayerPhysics {
 
     // Wheelie charge boost + charge-slam + over-wheelie flip + short-tap hop (Space)
     const wheeliePressed = inp.wheelie && st.spinOutTimer <= 0;
-    const grounded = st.y <= 0.001 && this.vy <= 0;
+    const grounded = st.y <= this.voxelSupportY + 0.05 && this.vy <= 0;
 
     if (wheeliePressed && grounded && !inp.brake && st.speed > 7.5) {
       this.wheelieHoldTime += step;
@@ -652,8 +691,13 @@ export class PlayerPhysics {
           cb.onParticles('dust', st.s - 0.5, st.x, 0.12, st.speed * 0.25);
         }
       }
-      const airPitch = this.vy > 0 ? 1.0 : clamp(st.y / 1.1, 0.15, 0.85);
-      st.wheelie += (airPitch - st.wheelie) * Math.min(1, step * 14);
+      const airAboveSupport = Math.max(0, st.y - this.voxelSupportY);
+      if (airAboveSupport > 0.12 || this.vy > 0) {
+        const airPitch = this.vy > 0 ? 1.0 : clamp(airAboveSupport / 1.1, 0.15, 0.85);
+        st.wheelie += (airPitch - st.wheelie) * Math.min(1, step * 14);
+      } else if (!wheeliePressed) {
+        st.wheelie += (0 - st.wheelie) * Math.min(1, step * 12);
+      }
     } else if (!wheeliePressed) {
       st.wheelie += (0 - st.wheelie) * Math.min(1, step * 12);
     }
@@ -671,6 +715,12 @@ export class PlayerPhysics {
       topSpeed = TOP_SPEED_NITRO + wheelieBonus * 0.5;
     } else if (onShoulder) {
       topSpeed = TOP_SPEED_OFFROAD;
+    }
+    if (this.asphaltBoostTimer > 0) {
+      topSpeed *= 1.12;
+    }
+    if (this.slowBlockTimer > 0 && st.turboShieldTimer <= 0) {
+      topSpeed = Math.min(topSpeed, 26.0);
     }
     if (st.spinOutTimer > 0) {
       topSpeed = Math.min(topSpeed, 22.0);
@@ -712,7 +762,8 @@ export class PlayerPhysics {
     const speedAuthority = clamp(st.speed / 12.0, 0, 1);
     const airFactor = st.y > 0.15 ? 0.48 : 1.0;
     const spinFactor = st.spinOutTimer > 0 ? 0.35 : 1.0;
-    const steerGrip = 0.85 + 0.15 * weatherGrip;
+    const asphaltGrip = this.asphaltBoostTimer > 0 ? 1.12 : 1.0;
+    const steerGrip = (0.85 + 0.15 * weatherGrip) * asphaltGrip;
     const steerAccel = steer * 45.0 * steerGrip * (0.45 + 0.72 * speedAuthority) * airFactor * spinFactor;
     const spinWobble = st.spinOutTimer > 0 ? Math.sin(st.spinOutTimer * 22) * 14.0 : 0;
 
@@ -721,7 +772,7 @@ export class PlayerPhysics {
     const crosswind = weatherWindX * speedAuthority * (st.turboShieldTimer > 0 ? 0.25 : 1.0);
 
     st.vx += (steerAccel + centrifugal + spinWobble + crosswind) * step;
-    const latDamp = (Math.abs(steer) > 0.05 ? 5.6 : 8.8) * weatherGrip;
+    const latDamp = (Math.abs(steer) > 0.05 ? 5.6 : 8.8) * weatherGrip * asphaltGrip;
     st.vx *= Math.exp(-latDamp * step);
 
     // Keep stopped bike from drifting sideways
@@ -745,16 +796,13 @@ export class PlayerPhysics {
       return;
     }
 
-    // Check voxel blocks built directly on the highway (ramps / bridges!)
+    // Check voxel blocks built directly on the highway (asphalt ramps, slowing grass/leaves, solid obstacles!)
     if (voxels && voxels.getBlockCount() > 0) {
-      const abs = roadToWorldAbs(st.s, st.x, st.y, this._tmpAbs);
-      const roadBase = roadY(abs.ws);
-      const support = voxels.getSupportHeight(abs.wx, abs.ws, 0.45, 0.85, abs.wy + 1.05);
-      const blockRelY = Math.max(0, support - roadBase);
-      if (blockRelY > st.y + 0.01 && blockRelY <= st.y + 1.1) {
-        st.y = blockRelY;
-        if (this.vy < 0) this.vy = 0;
+      if (this.handleHighwayVoxels(step, cb, voxels)) {
+        return;
       }
+    } else {
+      this.voxelSupportY = 0;
     }
 
     // Boost pads
@@ -990,9 +1038,155 @@ export class PlayerPhysics {
   }
 
   /**
+   * Evaluates placed voxel material physics on the highway:
+   * - Asphalt (9): smooth climbable ramp/bridge surface + 12% top speed & grip boost
+   * - Grass (1) & Leaves (6): heavy drag + 26 m/s speed cap + dust + throttled slow callback
+   * - Solid blocks (2, 3, 4, 5, 7, 8, 10): ride cleanly over top if st.y > 0.9, else block/shove/damage/crash!
+   */
+  private handleHighwayVoxels(step: number, cb: PlayerCallbacks, voxels: VoxelWorld): boolean {
+    const st = this.state;
+    const abs = roadToWorldAbs(st.s, st.x, st.y, this._tmpAbs);
+    const roadBase = roadY(abs.ws);
+
+    const minX = Math.floor(abs.wx - 0.52);
+    const maxX = Math.floor(abs.wx + 0.52);
+    const minS = Math.floor(abs.ws - 0.85);
+    const maxS = Math.floor(abs.ws + 0.85);
+    const minY = Math.floor(Math.min(roadBase, abs.wy) - 1);
+    const maxY = Math.floor(abs.wy + 1.45);
+
+    let highestSupport = roadBase;
+    let touchedAsphalt = false;
+    let slowHit: BlockType | null = null;
+    let solidHitType: BlockType | null = null;
+    let solidHitCenterX = abs.wx;
+    let solidHitDistSq = Infinity;
+
+    for (let gx = minX; gx <= maxX; gx++) {
+      for (let gs = minS; gs <= maxS; gs++) {
+        for (let gy = minY; gy <= maxY; gy++) {
+          const bt = voxels.getBlock(gx, gy, gs);
+          if (bt === null) continue;
+          const topY = gy + 1;
+
+          if (bt === 9) {
+            // Asphalt block: climbable ramp/bridge + grip/speed boost
+            if (topY <= abs.wy + 1.15 && topY > highestSupport) {
+              highestSupport = topY;
+            }
+            if (abs.wy >= gy - 0.15 && abs.wy <= topY + 0.45) {
+              touchedAsphalt = true;
+            }
+          } else if (isSlowVoxel(bt)) {
+            // Grass / Leaves: heavy drag + dust, never wall-crashes
+            if (abs.wy >= gy - 0.25 && abs.wy <= topY + 0.4) {
+              slowHit = bt;
+              if (topY <= abs.wy + 0.35 && topY > highestSupport) {
+                highestSupport = topY;
+              }
+            }
+          } else if (isSolidVoxel(bt)) {
+            if (st.y > 0.9 || topY <= abs.wy + 0.28) {
+              // Riding cleanly over top of solid block
+              if (topY <= abs.wy + 1.12 && topY > highestSupport) {
+                highestSupport = topY;
+              }
+            } else if (topY > abs.wy + 0.15 && gy < abs.wy + 1.35) {
+              const cx = gx + 0.5;
+              const dx = abs.wx - cx;
+              const d2 = dx * dx;
+              if (d2 < solidHitDistSq) {
+                solidHitDistSq = d2;
+                solidHitType = bt;
+                solidHitCenterX = cx;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const blockRelY = Math.max(0, highestSupport - roadBase);
+    this.voxelSupportY = blockRelY;
+    if (blockRelY > st.y + 0.01 && blockRelY <= st.y + 1.15) {
+      st.y = blockRelY;
+      if (this.vy < 0) this.vy = 0;
+    }
+
+    if (touchedAsphalt) {
+      this.asphaltBoostTimer = 0.28;
+      if (this.blockBoostFeedbackTimer <= 0 && st.speed > 10) {
+        this.blockBoostFeedbackTimer = 1.4;
+        cb.onBlockEffect?.('boost', 9);
+      }
+    }
+
+    if (slowHit !== null) {
+      this.slowBlockTimer = 0.18;
+      st.speed *= Math.exp(-3.4 * step);
+      if (st.speed > 26.0 && st.turboShieldTimer <= 0) {
+        st.speed = Math.min(st.speed, 26.0);
+      }
+      if (this.blockSlowFeedbackTimer <= 0) {
+        this.blockSlowFeedbackTimer = 0.75;
+        cb.onParticles('dust', st.s - 0.5, st.x, st.y + 0.18, st.speed * 0.25);
+        cb.onBlockEffect?.('slow', slowHit);
+      }
+    }
+
+    if (solidHitType !== null && st.y <= 0.9) {
+      const pushDir = abs.wx >= solidHitCenterX ? 1 : -1;
+
+      if (st.turboShieldTimer > 0) {
+        st.x = clamp(st.x + pushDir * 0.45, -MAX_LATERAL, MAX_LATERAL);
+        st.vx = clamp(st.vx + pushDir * 5.0, -20, 20);
+        if (this.blockHitCooldown <= 0) {
+          this.blockHitCooldown = 0.28;
+          cb.onParticles('spark', st.s, st.x, 0.55, st.speed * 0.4);
+          cb.onBlockEffect?.('block', solidHitType);
+        }
+        return false;
+      }
+
+      if (this.blockHitCooldown <= 0) {
+        this.blockHitCooldown = 0.35;
+        const preSpeed = st.speed;
+        cb.onParticles('spark', st.s, st.x, 0.55, preSpeed * 0.35);
+
+        if (preSpeed > 34 && st.invulnTimer <= 0) {
+          this.startCrash(pushDir * 8.0);
+          cb.onBlockEffect?.('crash', solidHitType);
+          cb.onCrash();
+          cb.onParticles('crash', st.s, st.x, 0.75, preSpeed * 0.3);
+          return true;
+        }
+
+        st.speed *= 0.48;
+        st.x = clamp(st.x + pushDir * 0.65, -MAX_LATERAL, MAX_LATERAL);
+        st.vx = clamp(pushDir * Math.max(8.0, Math.abs(st.vx) + 5.0), -20, 20);
+        if (st.invulnTimer <= 0) {
+          st.hp = Math.max(0, st.hp - 12);
+          if (st.hp <= 0) {
+            this.startCrash(pushDir * 7.5);
+            cb.onBlockEffect?.('crash', solidHitType);
+            cb.onCrash();
+            cb.onParticles('crash', st.s, st.x, 0.75, preSpeed * 0.3);
+            return true;
+          }
+        }
+        cb.onBlockEffect?.('block', solidHitType);
+      } else {
+        st.x = clamp(st.x + pushDir * 3.5 * step, -MAX_LATERAL, MAX_LATERAL);
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * Full 360° Open-World Off-Road Motorcycle Physics!
    * Supports arbitrary heading, reversing, voxel ramp climbing, wall collisions,
-   * and seamless auto-rejoin onto the highway when steering back onto asphalt facing forward.
+   * material physical effects, and seamless auto-rejoin onto the highway.
    */
   private updateFreeRoam(
     step: number,
@@ -1012,6 +1206,48 @@ export class PlayerPhysics {
     if (st.spinOutTimer > 0) st.spinOutTimer = Math.max(0, st.spinOutTimer - step);
     if (this.hopCooldown > 0) this.hopCooldown = Math.max(0, this.hopCooldown - step);
     if (this.freeRejoinCooldown > 0) this.freeRejoinCooldown = Math.max(0, this.freeRejoinCooldown - step);
+    if (this.blockHitCooldown > 0) this.blockHitCooldown = Math.max(0, this.blockHitCooldown - step);
+    if (this.blockSlowFeedbackTimer > 0) this.blockSlowFeedbackTimer = Math.max(0, this.blockSlowFeedbackTimer - step);
+    if (this.blockBoostFeedbackTimer > 0) this.blockBoostFeedbackTimer = Math.max(0, this.blockBoostFeedbackTimer - step);
+    if (this.slowBlockTimer > 0) this.slowBlockTimer = Math.max(0, this.slowBlockTimer - step);
+    if (this.asphaltBoostTimer > 0) this.asphaltBoostTimer = Math.max(0, this.asphaltBoostTimer - step);
+
+    // Handle wipeout tumble & auto-remount in free-roam mode
+    if (st.crashed) {
+      st.crashTimer += step;
+      st.speed = Math.max(0, st.speed - 28.0 * step);
+      const fwdX = -Math.sin(this.freeYaw);
+      const fwdS = Math.cos(this.freeYaw);
+      this.freeWx += fwdX * st.speed * step * 0.5;
+      this.freeWs += fwdS * st.speed * step * 0.5;
+      const gY = openWorldGroundY(this.freeWx, this.freeWs);
+      this.freeWy = Math.max(gY, this.freeWy - 8.0 * step);
+
+      st.s = this.freeWs;
+      st.x = this.freeWx - roadX(this.freeWs);
+      st.y = Math.max(0, this.freeWy - gY);
+      st.worldX = this.freeWx;
+      st.worldY = this.freeWy;
+      st.worldS = this.freeWs;
+
+      this.particleTimer += step;
+      if (st.speed > 6 && this.particleTimer >= 0.06) {
+        this.particleTimer = 0;
+        cb.onParticles('spark', st.s, st.x, st.y + 0.25, st.speed * 0.35);
+      }
+
+      if (st.crashTimer >= WIPEOUT_DURATION) {
+        st.crashed = false;
+        st.crashTimer = 0;
+        st.hp = 100;
+        st.invulnTimer = REMOUNT_INVULN;
+        st.speed = 0;
+        st.vx = 0;
+        st.lean = 0;
+        this.vy = 0;
+      }
+      return;
+    }
 
     // Nitro
     if (st.nitro <= 0.1) this.nitroDepleted = true;
@@ -1026,7 +1262,13 @@ export class PlayerPhysics {
     }
 
     // Acceleration, braking & slow reverse gear
-    const topOffroad = st.turboShieldTimer > 0 ? 74.0 : st.nitroActive ? 58.0 : 42.0;
+    let topOffroad = st.turboShieldTimer > 0 ? 74.0 : st.nitroActive ? 58.0 : 42.0;
+    if (this.asphaltBoostTimer > 0) {
+      topOffroad *= 1.12;
+    }
+    if (this.slowBlockTimer > 0 && st.turboShieldTimer <= 0) {
+      topOffroad = Math.min(topOffroad, 26.0);
+    }
     const weatherBrake = weatherMod ? weatherMod.brakeMul : 1.0;
     st.braking = inp.brake && st.speed > 0.6;
 
@@ -1055,7 +1297,8 @@ export class PlayerPhysics {
     const steer = digitalSteer !== 0 ? digitalSteer : clamp(inp.analogSteer ?? 0, -1, 1);
     const dirSign = st.speed >= -0.05 ? 1 : -1;
     const speedMag = Math.abs(st.speed);
-    const turnAuthority = speedMag < 0.35 ? 0.55 : clamp(0.45 + speedMag / 14.0, 0.45, 1.35);
+    const asphaltGrip = this.asphaltBoostTimer > 0 ? 1.12 : 1.0;
+    const turnAuthority = (speedMag < 0.35 ? 0.55 : clamp(0.45 + speedMag / 14.0, 0.45, 1.35)) * asphaltGrip;
     const highSpeedTighten = 1.0 / (1.0 + speedMag * 0.014);
     const turnRate = -steer * dirSign * 2.55 * turnAuthority * highSpeedTighten;
     this.freeYaw += turnRate * step;
@@ -1084,22 +1327,152 @@ export class PlayerPhysics {
     let nextWx = this.freeWx + dx;
     let nextWs = this.freeWs + ds;
 
-    // Voxel collision: allow climbing 1-block stepped ramps, bounce gently off taller walls!
+    // Voxel material physics in free-roam (asphalt ramps, slowing grass/leaves, solid walls!)
     if (voxels && voxels.getBlockCount() > 0) {
-      const stepSupport = voxels.getSupportHeight(nextWx, nextWs, 0.48, 0.88, this.freeWy + 1.08);
-      if (stepSupport > this.freeWy && stepSupport <= this.freeWy + 1.08 && !voxels.overlapsBox(nextWx, stepSupport + 0.05, nextWs, 0.42, 1.4, 0.42)) {
-        this.freeWy = stepSupport;
+      const nextGround = openWorldGroundY(nextWx, nextWs);
+      const minX = Math.floor(nextWx - 0.48);
+      const maxX = Math.floor(nextWx + 0.48);
+      const minS = Math.floor(nextWs - 0.52);
+      const maxS = Math.floor(nextWs + 0.52);
+      const minY = Math.floor(this.freeWy - 0.45);
+      const maxY = Math.floor(this.freeWy + 1.5);
+
+      let asphaltSupport = nextGround;
+      let touchedAsphalt = false;
+      let slowHit: BlockType | null = null;
+      let solidHitType: BlockType | null = null;
+      let solidHitCenterX = nextWx;
+      let solidHitCenterS = nextWs;
+      let solidHitDistSq = Infinity;
+
+      for (let gx = minX; gx <= maxX; gx++) {
+        for (let gs = minS; gs <= maxS; gs++) {
+          for (let gy = minY; gy <= maxY; gy++) {
+            const bt = voxels.getBlock(gx, gy, gs);
+            if (bt === null) continue;
+            const topY = gy + 1;
+
+            if (bt === 9) {
+              if (topY <= this.freeWy + 1.15 && topY > asphaltSupport) {
+                asphaltSupport = topY;
+              }
+              if (this.freeWy >= gy - 0.15 && this.freeWy <= topY + 0.45) {
+                touchedAsphalt = true;
+              }
+            } else if (isSlowVoxel(bt)) {
+              if (this.freeWy >= gy - 0.25 && this.freeWy <= topY + 0.4) {
+                slowHit = bt;
+              }
+            } else if (isSolidVoxel(bt)) {
+              const relAboveGround = this.freeWy - nextGround;
+              if (relAboveGround > 0.9 || topY <= this.freeWy + 0.35) {
+                if (topY <= this.freeWy + 1.08 && topY > asphaltSupport) {
+                  asphaltSupport = topY;
+                }
+              } else if (topY > this.freeWy + 0.2 && gy < this.freeWy + 1.45) {
+                const cx = gx + 0.5;
+                const cs = gs + 0.5;
+                const d2 = (nextWx - cx) ** 2 + signedTrackDelta(nextWs, cs) ** 2;
+                if (d2 < solidHitDistSq) {
+                  solidHitDistSq = d2;
+                  solidHitType = bt;
+                  solidHitCenterX = cx;
+                  solidHitCenterS = cs;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (
+        asphaltSupport > this.freeWy &&
+        asphaltSupport <= this.freeWy + 1.15 &&
+        !voxels.overlapsBox(nextWx, asphaltSupport + 0.05, nextWs, 0.42, 1.4, 0.42)
+      ) {
+        this.freeWy = asphaltSupport;
         if (this.vy < 0) this.vy = 0;
-      } else if (voxels.overlapsBox(nextWx, this.freeWy + 0.25, nextWs, 0.45, 1.35, 0.45)) {
-        // Axis-separated slide or gentle bounce
+        solidHitType = null;
+      }
+
+      if (touchedAsphalt) {
+        this.asphaltBoostTimer = 0.28;
+        if (this.blockBoostFeedbackTimer <= 0 && speedMag > 10) {
+          this.blockBoostFeedbackTimer = 1.4;
+          cb.onBlockEffect?.('boost', 9);
+        }
+      }
+
+      if (slowHit !== null) {
+        this.slowBlockTimer = 0.18;
+        st.speed *= Math.exp(-3.4 * step);
+        if (Math.abs(st.speed) > 26.0 && st.turboShieldTimer <= 0) {
+          st.speed = Math.sign(st.speed) * 26.0;
+        }
+        if (this.blockSlowFeedbackTimer <= 0) {
+          this.blockSlowFeedbackTimer = 0.75;
+          cb.onParticles('dust', this.freeWs, this.freeWx - roadX(this.freeWs), Math.max(0.15, this.freeWy - nextGround + 0.15), 0);
+          cb.onBlockEffect?.('slow', slowHit);
+        }
+      }
+
+      if (solidHitType !== null) {
+        // Axis-separated wall deflection + shove away from solid block center
+        const pushX = nextWx - solidHitCenterX;
+        const pushS = signedTrackDelta(nextWs, solidHitCenterS);
+        const pushLen = Math.hypot(pushX, pushS) || 1;
+        const nx = pushX / pushLen;
+        const ns = pushS / pushLen;
+
         const blockX = voxels.overlapsBox(nextWx, this.freeWy + 0.25, this.freeWs, 0.45, 1.35, 0.45);
         const blockS = voxels.overlapsBox(this.freeWx, this.freeWy + 0.25, nextWs, 0.45, 1.35, 0.45);
-        if (blockX) nextWx = this.freeWx;
-        if (blockS) nextWs = this.freeWs;
-        if (blockX && blockS) {
+        if (blockX) nextWx = this.freeWx + nx * 0.25;
+        if (blockS) nextWs = this.freeWs + ns * 0.25;
+
+        const preSpeed = Math.abs(st.speed);
+        const curLatForFx = this.freeWx - roadX(this.freeWs);
+        const curRelYForFx = Math.max(0.35, this.freeWy - nextGround + 0.35);
+
+        if (
+          preSpeed > 34 &&
+          st.invulnTimer <= 0 &&
+          st.turboShieldTimer <= 0 &&
+          this.blockHitCooldown <= 0
+        ) {
+          this.blockHitCooldown = 0.45;
+          this.freeWx = nextWx;
+          this.freeWs = nextWs;
+          this.startCrash(nx * 8.0);
+          cb.onBlockEffect?.('crash', solidHitType);
+          cb.onCrash();
+          cb.onParticles('crash', this.freeWs, curLatForFx, curRelYForFx, preSpeed * 0.25);
+          return;
+        }
+
+        if (preSpeed > 5.0 && this.blockHitCooldown <= 0) {
+          this.blockHitCooldown = 0.35;
+          st.speed *= 0.48;
+          nextWx += nx * 0.32;
+          nextWs += ns * 0.32;
+          cb.onParticles('spark', this.freeWs, curLatForFx, curRelYForFx, preSpeed * 0.3);
+
+          if (st.invulnTimer <= 0 && st.turboShieldTimer <= 0) {
+            st.hp = Math.max(0, st.hp - 12);
+            if (st.hp <= 0) {
+              this.freeWx = nextWx;
+              this.freeWs = nextWs;
+              this.startCrash(nx * 7.5);
+              cb.onBlockEffect?.('crash', solidHitType);
+              cb.onCrash();
+              cb.onParticles('crash', this.freeWs, curLatForFx, curRelYForFx, preSpeed * 0.25);
+              return;
+            }
+          }
+          cb.onBlockEffect?.('block', solidHitType);
+        } else if (blockX && blockS) {
           st.speed *= -0.25;
         } else {
-          st.speed *= 0.82;
+          st.speed *= 0.78;
         }
       }
     }

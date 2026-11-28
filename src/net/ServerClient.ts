@@ -1,9 +1,244 @@
 import type { BlockType } from '../game/VoxelWorld';
+import type { ItemType } from '../game/types';
 
 export const DEFAULT_SERVER_URL = 'https://moto.linkof.link';
 const STORAGE_SERVER_URL_KEY = 'vibemoto_server_url';
 const STORAGE_AUTH_TOKEN_KEY = 'vibemoto_auth_token';
 const STORAGE_AUTH_ACCOUNT_KEY = 'vibemoto_auth_account';
+const STORAGE_GUEST_ECONOMY_KEY = 'vibemoto_guest_economy_v1';
+const STORAGE_GUEST_BLUEPRINTS_KEY = 'vibemoto_guest_blueprints_v1';
+
+export type VoxelBlockId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+
+export interface BlockCatalogEntry {
+  id: VoxelBlockId;
+  code: string;
+  zhName: string;
+  enName: string;
+  colorHex: string;
+}
+
+export const BLOCK_CATALOG: readonly BlockCatalogEntry[] = [
+  { id: 1, code: 'GRASS', zhName: '草方块', enName: 'GRASS', colorHex: '#5ab552' },
+  { id: 2, code: 'STONE', zhName: '圆石', enName: 'STONE', colorHex: '#8b95a5' },
+  { id: 3, code: 'WOOD', zhName: '木板', enName: 'PLANKS', colorHex: '#c89252' },
+  { id: 4, code: 'BRICK', zhName: '红砖', enName: 'BRICK', colorHex: '#c2543e' },
+  { id: 5, code: 'LOG', zhName: '原木', enName: 'LOG', colorHex: '#6f4b2d' },
+  { id: 6, code: 'LEAF', zhName: '树叶', enName: 'LEAVES', colorHex: '#3b9445' },
+  { id: 7, code: 'GLASS', zhName: '玻璃', enName: 'GLASS', colorHex: '#7de8ff' },
+  { id: 8, code: 'GLOW', zhName: '霓虹块', enName: 'NEON', colorHex: '#ffd166' },
+  { id: 9, code: 'ROAD', zhName: '赛道砖', enName: 'ASPHALT', colorHex: '#3b4359' },
+  { id: 10, code: 'PC', zhName: '电脑终端', enName: 'COMPUTER', colorHex: '#38e2d4' },
+] as const;
+
+export function getBlockCatalogEntry(id: number): BlockCatalogEntry {
+  for (let i = 0; i < BLOCK_CATALOG.length; i++) {
+    if (BLOCK_CATALOG[i].id === id) return BLOCK_CATALOG[i];
+  }
+  return BLOCK_CATALOG[0];
+}
+
+export const VALID_ITEM_TYPES: readonly ItemType[] = [
+  'rpg',
+  'airstrike',
+  'sniper',
+  'police',
+  'turbo',
+  'trap',
+  'magnet',
+  'banana',
+] as const;
+
+export function isValidItemType(val: unknown): val is ItemType {
+  return typeof val === 'string' && (VALID_ITEM_TYPES as readonly string[]).includes(val);
+}
+
+export interface ShopItemSpec {
+  id: string;
+  kind: 'block' | 'bag' | 'shield';
+  blockType?: number;
+  qty?: number;
+  price: number;
+  zhName: string;
+  enName: string;
+  durationSec?: number;
+}
+
+export interface EconomyState {
+  coins: number;
+  inventory: Record<number, number>;
+  caps: Record<number, number>;
+  bagCapacity: number;
+  savedItems: ItemType[];
+  shieldUntil: number;
+  shop: ShopItemSpec[];
+}
+
+export interface MarketListing {
+  id: string;
+  sellerId: string;
+  sellerName: string;
+  blockType: number;
+  qty: number;
+  priceCoins: number;
+  createdAt: number;
+}
+
+export interface BlueprintBlock {
+  dx: number;
+  dy: number;
+  dz: number;
+  b: number;
+}
+
+export interface ServerBlueprint {
+  id: string;
+  name: string;
+  sizeX: number;
+  sizeY: number;
+  sizeZ: number;
+  blocks: BlueprintBlock[];
+  createdAt: number;
+}
+
+export const DEFAULT_MATERIAL_CAPS: Readonly<Record<number, number>> = {
+  1: 99,
+  2: 99,
+  3: 99,
+  4: 99,
+  5: 99,
+  6: 99,
+  7: 60,
+  8: 60,
+  9: 60,
+  10: 5,
+};
+
+export const DEFAULT_STARTER_INVENTORY: Readonly<Record<number, number>> = {
+  1: 20,
+  2: 20,
+  3: 30,
+  4: 15,
+  5: 15,
+  6: 15,
+  7: 10,
+  8: 8,
+  9: 15,
+  10: 1,
+};
+
+export const DEFAULT_SHOP_ITEMS: readonly ShopItemSpec[] = [
+  { id: 'block_1', kind: 'block', blockType: 1, qty: 10, price: 30, zhName: '草方块 x10', enName: 'Grass x10' },
+  { id: 'block_2', kind: 'block', blockType: 2, qty: 10, price: 40, zhName: '圆石 x10', enName: 'Stone x10' },
+  { id: 'block_3', kind: 'block', blockType: 3, qty: 10, price: 35, zhName: '木板 x10', enName: 'Planks x10' },
+  { id: 'block_4', kind: 'block', blockType: 4, qty: 10, price: 50, zhName: '红砖 x10', enName: 'Brick x10' },
+  { id: 'block_5', kind: 'block', blockType: 5, qty: 10, price: 45, zhName: '原木 x10', enName: 'Log x10' },
+  { id: 'block_6', kind: 'block', blockType: 6, qty: 10, price: 30, zhName: '树叶 x10', enName: 'Leaves x10' },
+  { id: 'block_7', kind: 'block', blockType: 7, qty: 8, price: 60, zhName: '玻璃 x8', enName: 'Glass x8' },
+  { id: 'block_8', kind: 'block', blockType: 8, qty: 6, price: 90, zhName: '霓虹块 x6', enName: 'Neon x6' },
+  { id: 'block_9', kind: 'block', blockType: 9, qty: 10, price: 70, zhName: '赛道砖 x10', enName: 'Asphalt x10' },
+  { id: 'block_10', kind: 'block', blockType: 10, qty: 1, price: 220, zhName: '电脑终端 x1', enName: 'Computer x1' },
+  { id: 'item_bag', kind: 'bag', qty: 3, price: 300, zhName: '道具道路袋 (+3格)', enName: 'Item Bag (+3)' },
+  { id: 'shield_10m', kind: 'shield', durationSec: 600, price: 250, zhName: '建筑防护盾 (+10分钟)', enName: 'Shield (+10m)' },
+  { id: 'shield_30m', kind: 'shield', durationSec: 1800, price: 600, zhName: '建筑防护盾 (+30分钟)', enName: 'Shield (+30m)' },
+];
+
+export function createDefaultEconomyState(): EconomyState {
+  const inventory: Record<number, number> = {};
+  const caps: Record<number, number> = {};
+  for (let b = 1; b <= 10; b++) {
+    inventory[b] = DEFAULT_STARTER_INVENTORY[b] ?? 0;
+    caps[b] = DEFAULT_MATERIAL_CAPS[b] ?? 99;
+  }
+  return {
+    coins: 500,
+    inventory,
+    caps,
+    bagCapacity: 0,
+    savedItems: [],
+    shieldUntil: 0,
+    shop: DEFAULT_SHOP_ITEMS.map((item) => ({ ...item })),
+  };
+}
+
+export function normalizeEconomyState(raw: unknown): EconomyState {
+  const def = createDefaultEconomyState();
+  if (!raw || typeof raw !== 'object') return def;
+  const obj = raw as Record<string, unknown>;
+  const src =
+    obj.state && typeof obj.state === 'object' ? (obj.state as Record<string, unknown>) : obj;
+
+  const caps: Record<number, number> = { ...def.caps };
+  if (src.caps && typeof src.caps === 'object') {
+    const rawCaps = src.caps as Record<string, unknown>;
+    for (let b = 1; b <= 10; b++) {
+      const v = Number(rawCaps[String(b)]);
+      if (Number.isFinite(v) && v > 0) caps[b] = Math.floor(v);
+    }
+  }
+
+  const inventory: Record<number, number> = {};
+  const rawInv =
+    src.inventory && typeof src.inventory === 'object'
+      ? (src.inventory as Record<string, unknown>)
+      : null;
+  for (let b = 1; b <= 10; b++) {
+    if (rawInv && rawInv[String(b)] !== undefined) {
+      const v = Number(rawInv[String(b)]);
+      inventory[b] = Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
+    } else {
+      inventory[b] = def.inventory[b] ?? 0;
+    }
+  }
+
+  const savedItems: ItemType[] = [];
+  if (Array.isArray(src.savedItems)) {
+    for (const entry of src.savedItems) {
+      if (isValidItemType(entry)) savedItems.push(entry);
+    }
+  }
+
+  let shop: ShopItemSpec[] = def.shop;
+  if (Array.isArray(src.shop) && src.shop.length > 0) {
+    const parsed: ShopItemSpec[] = [];
+    for (const s of src.shop) {
+      if (!s || typeof s !== 'object') continue;
+      const item = s as Record<string, unknown>;
+      const kind = item.kind;
+      if (kind !== 'block' && kind !== 'bag' && kind !== 'shield') continue;
+      parsed.push({
+        id: String(item.id || ''),
+        kind,
+        blockType: item.blockType !== undefined ? Number(item.blockType) : undefined,
+        qty: item.qty !== undefined ? Number(item.qty) : undefined,
+        price: Math.max(0, Math.floor(Number(item.price) || 0)),
+        zhName: String(item.zhName || item.id || ''),
+        enName: String(item.enName || item.zhName || item.id || ''),
+        durationSec: item.durationSec !== undefined ? Number(item.durationSec) : undefined,
+      });
+    }
+    if (parsed.length > 0) shop = parsed;
+  }
+
+  const coins = Number(src.coins);
+  const bagCapacity = Number(src.bagCapacity);
+  const shieldUntil = Number(src.shieldUntil);
+
+  return {
+    coins: Number.isFinite(coins) ? Math.max(0, Math.floor(coins)) : def.coins,
+    inventory,
+    caps,
+    bagCapacity: Number.isFinite(bagCapacity) ? Math.max(0, Math.min(12, Math.floor(bagCapacity))) : 0,
+    savedItems,
+    shieldUntil: Number.isFinite(shieldUntil) ? Math.max(0, Math.floor(shieldUntil)) : 0,
+    shop,
+  };
+}
+
+export function getShieldRemainingSeconds(shieldUntil: number, nowSec = Math.floor(Date.now() / 1000)): number {
+  if (!Number.isFinite(shieldUntil) || shieldUntil <= nowSec) return 0;
+  return Math.max(0, Math.floor(shieldUntil - nowSec));
+}
 
 export interface GameAccount {
   id: string;
@@ -32,6 +267,8 @@ export interface ServerHealthInfo {
 
 export type ServerConnStatus = 'disconnected' | 'connecting' | 'connected';
 
+export type ServerWorldBlockTuple = [number, number, number, number, string?, string?];
+
 export interface ServerVoxelMsg {
   op: 'set' | 'del' | 'clear';
   gx?: number;
@@ -39,13 +276,16 @@ export interface ServerVoxelMsg {
   gz?: number;
   b?: number;
   from?: string;
+  ownerId?: string;
+  ownerName?: string;
 }
 
 export interface ServerClientCallbacks {
   onStatusChange?(status: ServerConnStatus, url: string): void;
   onAccountChange?(account: GameAccount | null): void;
-  onWorldSnapshot?(room: string, blocks: [number, number, number, number][]): void;
+  onWorldSnapshot?(room: string, blocks: ServerWorldBlockTuple[]): void;
   onVoxelUpdate?(ev: ServerVoxelMsg): void;
+  onVoxelRejected?(reason: string, ownerName: string, remainingSec: number): void;
 }
 
 export function normalizeServerUrl(raw: string): string {
@@ -91,6 +331,79 @@ function safeRemove(key: string): void {
   }
 }
 
+function loadGuestEconomyState(): EconomyState {
+  const raw = safeRead(STORAGE_GUEST_ECONOMY_KEY);
+  if (!raw) return createDefaultEconomyState();
+  try {
+    return normalizeEconomyState(JSON.parse(raw));
+  } catch {
+    return createDefaultEconomyState();
+  }
+}
+
+function saveGuestEconomyState(state: EconomyState): void {
+  safeWrite(STORAGE_GUEST_ECONOMY_KEY, JSON.stringify(state));
+}
+
+function loadGuestBlueprints(): ServerBlueprint[] {
+  const raw = safeRead(STORAGE_GUEST_BLUEPRINTS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as ServerBlueprint[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveGuestBlueprints(list: ServerBlueprint[]): void {
+  safeWrite(STORAGE_GUEST_BLUEPRINTS_KEY, JSON.stringify(list));
+}
+
+function normalizeBlueprint(raw: unknown): ServerBlueprint | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const blocksRaw = Array.isArray(o.blocks) ? o.blocks : [];
+  const blocks: BlueprintBlock[] = [];
+  for (const item of blocksRaw) {
+    if (!item || typeof item !== 'object') continue;
+    const bi = item as Record<string, unknown>;
+    const b = Math.floor(Number(bi.b));
+    if (b < 1 || b > 10) continue;
+    blocks.push({
+      dx: Math.floor(Number(bi.dx) || 0),
+      dy: Math.floor(Number(bi.dy) || 0),
+      dz: Math.floor(Number(bi.dz) || 0),
+      b,
+    });
+  }
+  return {
+    id: String(o.id || `bp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`),
+    name: String(o.name || 'Blueprint').slice(0, 32),
+    sizeX: Math.max(1, Math.floor(Number(o.sizeX) || 1)),
+    sizeY: Math.max(1, Math.floor(Number(o.sizeY) || 1)),
+    sizeZ: Math.max(1, Math.floor(Number(o.sizeZ) || 1)),
+    blocks,
+    createdAt: Number(o.createdAt) || Math.floor(Date.now() / 1000),
+  };
+}
+
+function normalizeMarketListing(raw: unknown): MarketListing | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const id = String(o.id || '');
+  if (!id) return null;
+  return {
+    id,
+    sellerId: String(o.sellerId || ''),
+    sellerName: String(o.sellerName || 'Player'),
+    blockType: Math.max(1, Math.min(10, Math.floor(Number(o.blockType) || 1))),
+    qty: Math.max(1, Math.floor(Number(o.qty) || 1)),
+    priceCoins: Math.max(1, Math.floor(Number(o.priceCoins) || 1)),
+    createdAt: Number(o.createdAt) || Math.floor(Date.now() / 1000),
+  };
+}
+
 export class ServerClient {
   private serverUrl: string;
   private token: string | null = null;
@@ -104,6 +417,7 @@ export class ServerClient {
   private playerName: string;
   private disposed = false;
   private readonly cb: ServerClientCallbacks;
+  private lastEconomyState: EconomyState;
 
   constructor(clientId: string, playerName: string, cb: ServerClientCallbacks) {
     this.clientId = clientId;
@@ -121,6 +435,7 @@ export class ServerClient {
         this.account = null;
       }
     }
+    this.lastEconomyState = loadGuestEconomyState();
   }
 
   getServerUrl(): string {
@@ -131,8 +446,24 @@ export class ServerClient {
     return this.account;
   }
 
+  isAuthenticated(): boolean {
+    return Boolean(this.token && this.account);
+  }
+
   getStatus(): ServerConnStatus {
     return this.status;
+  }
+
+  getCachedEconomyState(): EconomyState {
+    return this.lastEconomyState;
+  }
+
+  getSshWsUrl(): string {
+    const base = `${toWsUrl(this.serverUrl)}/ws/ssh`;
+    if (this.token) {
+      return `${base}?token=${encodeURIComponent(this.token)}`;
+    }
+    return base;
   }
 
   setPlayerName(name: string): void {
@@ -328,7 +659,476 @@ export class ServerClient {
     this.reconnectNow();
   }
 
-  sendVoxel(op: 'set' | 'del' | 'clear', gx = 0, gy = 0, gz = 0, b?: BlockType): void {
+  // -------------------------------------------------------------------------
+  // ECONOMY, SHOP, ITEM BAG, MARKETPLACE & BLUEPRINTS API
+  // -------------------------------------------------------------------------
+
+  private authHeaders(withJson = false): Record<string, string> {
+    const h: Record<string, string> = {};
+    if (withJson) h['Content-Type'] = 'application/json';
+    if (this.token) h.Authorization = `Bearer ${this.token}`;
+    return h;
+  }
+
+  async getEconomyState(): Promise<EconomyState> {
+    if (!this.token) {
+      const local = loadGuestEconomyState();
+      this.lastEconomyState = local;
+      // Still try to fetch shop catalog from server if reachable
+      try {
+        const res = await fetch(`${this.serverUrl}/api/economy/state`, { method: 'GET' });
+        if (res.ok) {
+          const data = (await res.json()) as Record<string, unknown>;
+          const remote = normalizeEconomyState(data);
+          local.shop = remote.shop;
+          local.caps = remote.caps;
+          this.lastEconomyState = local;
+        }
+      } catch {
+        // Offline guest fallback
+      }
+      return this.lastEconomyState;
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/economy/state`, {
+        method: 'GET',
+        headers: this.authHeaders(false),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as Record<string, unknown>;
+        const state = normalizeEconomyState(data);
+        this.lastEconomyState = state;
+        return state;
+      }
+    } catch {
+      // Fall back to cached state
+    }
+    return this.lastEconomyState;
+  }
+
+  async claimReward(
+    kind: string,
+    amount?: number,
+    blockRewards?: { b: number; qty: number }[]
+  ): Promise<{ ok: boolean; state: EconomyState; error?: string }> {
+    const applyLocal = (): EconomyState => {
+      const st = loadGuestEconomyState();
+      const coinGain = Math.max(0, Math.min(500, Math.floor(amount ?? 0)));
+      st.coins += coinGain;
+      if (Array.isArray(blockRewards)) {
+        for (const r of blockRewards) {
+          const b = Math.floor(r.b);
+          const q = Math.max(0, Math.floor(r.qty));
+          if (b >= 1 && b <= 10 && q > 0) {
+            const cap = st.caps[b] ?? DEFAULT_MATERIAL_CAPS[b] ?? 99;
+            st.inventory[b] = Math.min(cap, (st.inventory[b] ?? 0) + q);
+          }
+        }
+      }
+      saveGuestEconomyState(st);
+      this.lastEconomyState = st;
+      return st;
+    };
+
+    if (!this.token) {
+      return { ok: true, state: applyLocal() };
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/economy/reward`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({ kind, amount, blockRewards }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return {
+          ok: false,
+          state: this.lastEconomyState,
+          error: String(data.error || `HTTP ${res.status}`),
+        };
+      }
+      const state = normalizeEconomyState(data);
+      this.lastEconomyState = state;
+      return { ok: true, state };
+    } catch {
+      return { ok: true, state: applyLocal() };
+    }
+  }
+
+  async buyShopItem(
+    itemId: string,
+    qty = 1
+  ): Promise<{ ok: boolean; state: EconomyState; error?: string }> {
+    const safeQty = Math.max(1, Math.min(20, Math.floor(qty)));
+
+    const buyLocal = (): { ok: boolean; state: EconomyState; error?: string } => {
+      const st = loadGuestEconomyState();
+      const spec = st.shop.find((s) => s.id === itemId);
+      if (!spec) return { ok: false, state: st, error: '商品不存在' };
+      const totalPrice = spec.price * safeQty;
+      if (st.coins < totalPrice) return { ok: false, state: st, error: '金币不足' };
+
+      if (spec.kind === 'block' && spec.blockType) {
+        const b = spec.blockType;
+        const cap = st.caps[b] ?? DEFAULT_MATERIAL_CAPS[b] ?? 99;
+        const cur = st.inventory[b] ?? 0;
+        const add = (spec.qty ?? 1) * safeQty;
+        if (cur >= cap) return { ok: false, state: st, error: '该材料库存已达上限' };
+        st.inventory[b] = Math.min(cap, cur + add);
+        st.coins -= totalPrice;
+      } else if (spec.kind === 'bag') {
+        if (st.bagCapacity >= 12) return { ok: false, state: st, error: '道具道路袋已达最大容量 (12格)' };
+        st.bagCapacity = Math.min(12, st.bagCapacity + (spec.qty ?? 3) * safeQty);
+        st.coins -= totalPrice;
+      } else if (spec.kind === 'shield') {
+        const now = Math.floor(Date.now() / 1000);
+        const base = Math.max(now, st.shieldUntil || 0);
+        st.shieldUntil = base + (spec.durationSec ?? 600) * safeQty;
+        st.coins -= totalPrice;
+      }
+      saveGuestEconomyState(st);
+      this.lastEconomyState = st;
+      return { ok: true, state: st };
+    };
+
+    if (!this.token) {
+      return buyLocal();
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/economy/shop/buy`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({ itemId, qty: safeQty }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return {
+          ok: false,
+          state: this.lastEconomyState,
+          error: String(data.error || `HTTP ${res.status}`),
+        };
+      }
+      const state = normalizeEconomyState(data);
+      this.lastEconomyState = state;
+      return { ok: true, state };
+    } catch {
+      return buyLocal();
+    }
+  }
+
+  async stashBagItem(item: ItemType): Promise<{ ok: boolean; state: EconomyState; error?: string }> {
+    const stashLocal = (): { ok: boolean; state: EconomyState; error?: string } => {
+      const st = loadGuestEconomyState();
+      if (st.bagCapacity <= 0) return { ok: false, state: st, error: '请先在商店购买道具道路袋' };
+      if (st.savedItems.length >= st.bagCapacity) return { ok: false, state: st, error: '道具道路袋已满' };
+      st.savedItems.push(item);
+      saveGuestEconomyState(st);
+      this.lastEconomyState = st;
+      return { ok: true, state: st };
+    };
+
+    if (!this.token) {
+      return stashLocal();
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/economy/bag/stash`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({ item }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return {
+          ok: false,
+          state: this.lastEconomyState,
+          error: String(data.error || `HTTP ${res.status}`),
+        };
+      }
+      const state = normalizeEconomyState(data);
+      this.lastEconomyState = state;
+      return { ok: true, state };
+    } catch {
+      return stashLocal();
+    }
+  }
+
+  async useBagItem(
+    index: number
+  ): Promise<{ ok: boolean; item?: ItemType; state: EconomyState; error?: string }> {
+    const idx = Math.floor(index);
+    const useLocal = (): { ok: boolean; item?: ItemType; state: EconomyState; error?: string } => {
+      const st = loadGuestEconomyState();
+      if (idx < 0 || idx >= st.savedItems.length) {
+        return { ok: false, state: st, error: '道具槽位无效' };
+      }
+      const [used] = st.savedItems.splice(idx, 1);
+      saveGuestEconomyState(st);
+      this.lastEconomyState = st;
+      return { ok: true, item: used, state: st };
+    };
+
+    if (!this.token) {
+      return useLocal();
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/economy/bag/use`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({ index: idx }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return {
+          ok: false,
+          state: this.lastEconomyState,
+          error: String(data.error || `HTTP ${res.status}`),
+        };
+      }
+      const state = normalizeEconomyState(data);
+      this.lastEconomyState = state;
+      const usedItem = isValidItemType(data.item) ? data.item : undefined;
+      return { ok: true, item: usedItem, state };
+    } catch {
+      return useLocal();
+    }
+  }
+
+  async getMarketListings(): Promise<{ ok: boolean; listings: MarketListing[]; error?: string }> {
+    try {
+      const res = await fetch(`${this.serverUrl}/api/market/listings`, {
+        method: 'GET',
+        headers: this.authHeaders(false),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, listings: [], error: String(data.error || `HTTP ${res.status}`) };
+      }
+      const rawList = Array.isArray(data.listings)
+        ? data.listings
+        : Array.isArray(data)
+          ? data
+          : [];
+      const listings: MarketListing[] = [];
+      for (const item of rawList) {
+        const norm = normalizeMarketListing(item);
+        if (norm) listings.push(norm);
+      }
+      return { ok: true, listings };
+    } catch (err) {
+      return {
+        ok: false,
+        listings: [],
+        error: err instanceof Error ? err.message : '无法连接交易行',
+      };
+    }
+  }
+
+  async createMarketListing(
+    blockType: number,
+    qty: number,
+    priceCoins: number
+  ): Promise<{ ok: boolean; listing?: MarketListing; state?: EconomyState; error?: string }> {
+    if (!this.token) {
+      return { ok: false, error: '请先登录游戏账号后再使用玩家交易行' };
+    }
+    try {
+      const res = await fetch(`${this.serverUrl}/api/market/list`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({
+          blockType: Math.floor(blockType),
+          qty: Math.floor(qty),
+          priceCoins: Math.floor(priceCoins),
+        }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      const listing = normalizeMarketListing(data.listing) ?? undefined;
+      const hasEco = data.coins !== undefined || data.state !== undefined || data.inventory !== undefined;
+      const state = hasEco ? normalizeEconomyState(data) : undefined;
+      if (state) this.lastEconomyState = state;
+      return { ok: true, listing, state };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : '上架失败' };
+    }
+  }
+
+  async buyMarketListing(
+    listingId: string
+  ): Promise<{ ok: boolean; state?: EconomyState; error?: string }> {
+    if (!this.token) {
+      return { ok: false, error: '请先登录游戏账号后再购买玩家挂单' };
+    }
+    try {
+      const res = await fetch(`${this.serverUrl}/api/market/buy`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({ listingId }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      const hasEco = data.coins !== undefined || data.state !== undefined || data.inventory !== undefined;
+      const state = hasEco ? normalizeEconomyState(data) : undefined;
+      if (state) this.lastEconomyState = state;
+      return { ok: true, state };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : '购买失败' };
+    }
+  }
+
+  async cancelMarketListing(
+    listingId: string
+  ): Promise<{ ok: boolean; state?: EconomyState; error?: string }> {
+    if (!this.token) {
+      return { ok: false, error: '请先登录游戏账号' };
+    }
+    try {
+      const res = await fetch(`${this.serverUrl}/api/market/cancel`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({ listingId }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      const hasEco = data.coins !== undefined || data.state !== undefined || data.inventory !== undefined;
+      const state = hasEco ? normalizeEconomyState(data) : undefined;
+      if (state) this.lastEconomyState = state;
+      return { ok: true, state };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : '取消失败' };
+    }
+  }
+
+  async getBlueprints(): Promise<{ ok: boolean; blueprints: ServerBlueprint[]; error?: string }> {
+    if (!this.token) {
+      return { ok: true, blueprints: loadGuestBlueprints() };
+    }
+    try {
+      const res = await fetch(`${this.serverUrl}/api/blueprints`, {
+        method: 'GET',
+        headers: this.authHeaders(false),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return {
+          ok: false,
+          blueprints: loadGuestBlueprints(),
+          error: String(data.error || `HTTP ${res.status}`),
+        };
+      }
+      const rawList = Array.isArray(data.blueprints)
+        ? data.blueprints
+        : Array.isArray(data)
+          ? data
+          : [];
+      const blueprints: ServerBlueprint[] = [];
+      for (const item of rawList) {
+        const bp = normalizeBlueprint(item);
+        if (bp) blueprints.push(bp);
+      }
+      return { ok: true, blueprints };
+    } catch {
+      return { ok: true, blueprints: loadGuestBlueprints() };
+    }
+  }
+
+  async saveBlueprint(
+    bp: Omit<ServerBlueprint, 'id' | 'createdAt'>
+  ): Promise<{ ok: boolean; blueprint?: ServerBlueprint; error?: string }> {
+    const saveLocal = (): ServerBlueprint => {
+      const created: ServerBlueprint = {
+        ...bp,
+        id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        createdAt: Math.floor(Date.now() / 1000),
+      };
+      const existing = loadGuestBlueprints();
+      existing.unshift(created);
+      saveGuestBlueprints(existing.slice(0, 24));
+      return created;
+    };
+
+    if (!this.token) {
+      return { ok: true, blueprint: saveLocal() };
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/blueprints`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify(bp),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      const created = normalizeBlueprint(data.blueprint ?? data) ?? saveLocal();
+      return { ok: true, blueprint: created };
+    } catch {
+      return { ok: true, blueprint: saveLocal() };
+    }
+  }
+
+  async deleteBlueprint(id: string): Promise<{ ok: boolean; error?: string }> {
+    const deleteLocal = (): void => {
+      const existing = loadGuestBlueprints().filter((b) => b.id !== id);
+      saveGuestBlueprints(existing);
+    };
+
+    if (!this.token || id.startsWith('local_')) {
+      deleteLocal();
+      return { ok: true };
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/blueprints/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: this.authHeaders(false),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : '删除失败' };
+    }
+  }
+
+  // Local helper for guest inventory sync when placing/breaking blocks offline
+  adjustLocalInventory(blockType: number, delta: number): EconomyState {
+    if (this.token) {
+      const cur = this.lastEconomyState.inventory[blockType] ?? 0;
+      const cap = this.lastEconomyState.caps[blockType] ?? DEFAULT_MATERIAL_CAPS[blockType] ?? 99;
+      this.lastEconomyState.inventory[blockType] = Math.max(0, Math.min(cap, cur + delta));
+      return this.lastEconomyState;
+    }
+    const st = loadGuestEconomyState();
+    const cur = st.inventory[blockType] ?? 0;
+    const cap = st.caps[blockType] ?? DEFAULT_MATERIAL_CAPS[blockType] ?? 99;
+    st.inventory[blockType] = Math.max(0, Math.min(cap, cur + delta));
+    saveGuestEconomyState(st);
+    this.lastEconomyState = st;
+    return st;
+  }
+
+  sendVoxel(
+    op: 'set' | 'del' | 'clear',
+    gx = 0,
+    gy = 0,
+    gz = 0,
+    b?: BlockType | VoxelBlockId | number
+  ): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     try {
       this.ws.send(JSON.stringify({ t: 'vox', op, gx, gy, gz, b }));
@@ -442,10 +1242,21 @@ export class ServerClient {
       try {
         const msg = JSON.parse(ev.data) as Record<string, unknown>;
         if (msg.t === 'world_init' && Array.isArray(msg.blocks)) {
-          this.cb.onWorldSnapshot?.(
-            String(msg.room || this.roomSlug),
-            msg.blocks as [number, number, number, number][]
-          );
+          const tuples: ServerWorldBlockTuple[] = [];
+          for (const raw of msg.blocks) {
+            if (!Array.isArray(raw) || raw.length < 4) continue;
+            const gx = Number(raw[0]);
+            const gy = Number(raw[1]);
+            const gz = Number(raw[2]);
+            const b = Number(raw[3]);
+            if (!Number.isFinite(gx) || !Number.isFinite(gy) || !Number.isFinite(gz) || !Number.isFinite(b)) {
+              continue;
+            }
+            const ownerId = typeof raw[4] === 'string' ? raw[4] : undefined;
+            const ownerName = typeof raw[5] === 'string' ? raw[5] : undefined;
+            tuples.push([gx, gy, gz, b, ownerId, ownerName]);
+          }
+          this.cb.onWorldSnapshot?.(String(msg.room || this.roomSlug), tuples);
         } else if (msg.t === 'vox') {
           const op = msg.op;
           if (op === 'set' || op === 'del' || op === 'clear') {
@@ -456,8 +1267,16 @@ export class ServerClient {
               gz: typeof msg.gz === 'number' ? msg.gz : 0,
               b: typeof msg.b === 'number' ? msg.b : undefined,
               from: typeof msg.from === 'string' ? msg.from : undefined,
+              ownerId: typeof msg.ownerId === 'string' ? msg.ownerId : undefined,
+              ownerName: typeof msg.ownerName === 'string' ? msg.ownerName : undefined,
             });
           }
+        } else if (msg.t === 'vox_rejected') {
+          this.cb.onVoxelRejected?.(
+            String(msg.reason || 'shielded'),
+            String(msg.ownerName || ''),
+            Math.max(0, Math.floor(Number(msg.remainingSec) || 0))
+          );
         }
       } catch {
         // Ignore malformed messages

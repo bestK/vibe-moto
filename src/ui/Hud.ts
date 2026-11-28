@@ -105,6 +105,10 @@ export interface HudCallbacks {
     displayName: string
   ): Promise<{ ok: boolean; error?: string }>;
   onAccountLogout?(): void;
+  onOpenEconomy?(tab?: 'shop' | 'market' | 'bag' | 'blueprints'): void;
+  onOpenAiBuilder?(): void;
+  onInteract?(): void;
+  onStashItem?(): void;
 }
 
 const STANDINGS_SLOTS = 5;
@@ -225,6 +229,13 @@ function formatDeltaMeters(rounded: number): string {
   return `${sign}${abs}m`;
 }
 
+function formatShieldClock(sec: number): string {
+  const s = Math.max(0, Math.ceil(sec));
+  const mins = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${mins}:${rem < 10 ? '0' : ''}${rem}`;
+}
+
 function hasAnyKey(pressed: Set<string>, candidates: readonly string[]): boolean {
   for (let i = 0; i < candidates.length; i++) {
     if (pressed.has(candidates[i])) return true;
@@ -277,6 +288,15 @@ export class Hud {
   private readonly serverBtnEl: HTMLButtonElement;
   private readonly serverDotEl: HTMLSpanElement;
   private readonly serverBtnLabelEl: HTMLSpanElement;
+  private readonly coinPillEl: HTMLButtonElement;
+  private readonly coinValEl: HTMLSpanElement;
+  private readonly shieldPillEl: HTMLButtonElement;
+  private readonly shieldValEl: HTMLSpanElement;
+  private readonly shopBtnEl: HTMLButtonElement;
+  private readonly shopLabelEl: HTMLSpanElement;
+  private readonly shopBagBadgeEl: HTMLSpanElement;
+  private readonly aiBuildBtnEl: HTMLButtonElement;
+  private readonly aiBuildLabelEl: HTMLSpanElement;
 
   // Server & Game Account Modal
   private readonly serverOverlayEl: HTMLDivElement;
@@ -313,11 +333,22 @@ export class Hud {
   private readonly buildBlockLabelEl: HTMLDivElement;
   private readonly buildHintEl: HTMLDivElement;
   private readonly hotbarSlotEls: HTMLButtonElement[] = [];
+  private readonly hotbarSlotById = new Map<
+    number,
+    { btn: HTMLButtonElement; qtyEl: HTMLSpanElement; lastQty: number | null }
+  >();
   private readonly hotbarClearBtnEl: HTMLButtonElement;
   private readonly footTouchActionsEl: HTMLDivElement;
   private readonly footPlaceLabelEl: HTMLSpanElement;
   private readonly footBreakLabelEl: HTMLSpanElement;
   private readonly footJumpLabelEl: HTMLSpanElement;
+  private readonly footInteractBtnEl: HTMLButtonElement;
+  private readonly footInteractLabelEl: HTMLSpanElement;
+  private readonly interactPillEl: HTMLButtonElement;
+  private readonly interactIconEl: HTMLSpanElement;
+  private readonly interactLabelEl: HTMLSpanElement;
+  private readonly bagStashBtnEl: HTMLButtonElement;
+  private readonly bagStashLabelEl: HTMLSpanElement;
   private isOnFoot = false;
   private isFreeRoam = false;
   private lastSelectedBlock: BlockType = 3;
@@ -325,6 +356,14 @@ export class Hud {
   private lastHasAimTarget = false;
   private clearArmed = false;
   private clearArmTimer: number | null = null;
+  private lastCoins = -1;
+  private lastShieldSec = -1;
+  private bagCapacity = 0;
+  private savedItemCount = 0;
+  private lastHeldItemCount = 0;
+  private lastStashBtnVisible = false;
+  private lastInteractLabel: string | null = null;
+  private lastInteractIcon: PixelIconId | undefined = undefined;
 
   // Home / Room Lobby Modal
   private readonly homeOverlayEl: HTMLDivElement;
@@ -822,6 +861,7 @@ export class Hud {
     this.dismountIconEl.className = 'vm-btn-icon';
     this.dismountIconEl.innerHTML = getPixelIconSvg('walk', 'vm-icon-sm');
     this.dismountLabelEl = document.createElement('span');
+    this.dismountLabelEl.className = 'vm-dismount-label';
     this.dismountLabelEl.textContent = t('dismountBtn');
     const dismountKey = document.createElement('span');
     dismountKey.className = 'vm-btn-key-tag';
@@ -840,6 +880,7 @@ export class Hud {
     trackIcon.className = 'vm-btn-icon';
     trackIcon.innerHTML = getPixelIconSvg('road', 'vm-icon-sm');
     this.returnTrackLabelEl = document.createElement('span');
+    this.returnTrackLabelEl.className = 'vm-track-label';
     this.returnTrackLabelEl.textContent = t('backToTrackBtn');
     const trackKey = document.createElement('span');
     trackKey.className = 'vm-btn-key-tag';
@@ -861,6 +902,7 @@ export class Hud {
     srvIcon.className = 'vm-btn-icon';
     srvIcon.innerHTML = getPixelIconSvg('server', 'vm-icon-sm');
     this.serverBtnLabelEl = document.createElement('span');
+    this.serverBtnLabelEl.className = 'vm-server-btn-label';
     this.serverBtnLabelEl.textContent = t('serverAccountBtn');
     this.serverBtnEl.append(this.serverDotEl, srvIcon, this.serverBtnLabelEl);
     this.serverBtnEl.addEventListener('click', () => {
@@ -868,11 +910,89 @@ export class Hud {
       this.serverBtnEl.blur();
     });
 
+    // Economy: Coins pill & Active Shield timer pill
+    this.coinPillEl = document.createElement('button');
+    this.coinPillEl.type = 'button';
+    this.coinPillEl.className = 'vm-slab vm-coin-pill';
+    this.coinPillEl.title = t('shopBtnTitle');
+    this.coinPillEl.setAttribute('aria-label', 'Coins and shop');
+    const coinIcon = document.createElement('span');
+    coinIcon.className = 'vm-btn-icon';
+    coinIcon.innerHTML = getPixelIconSvg('coin', 'vm-icon-sm');
+    this.coinValEl = document.createElement('span');
+    this.coinValEl.className = 'vm-coin-val';
+    this.coinValEl.textContent = '0';
+    this.coinPillEl.append(coinIcon, this.coinValEl);
+    this.coinPillEl.addEventListener('click', () => {
+      this.callbacks.onOpenEconomy?.('shop');
+      this.coinPillEl.blur();
+    });
+
+    this.shieldPillEl = document.createElement('button');
+    this.shieldPillEl.type = 'button';
+    this.shieldPillEl.className = 'vm-slab vm-shield-pill is-hidden';
+    this.shieldPillEl.title = t('shieldTitle');
+    this.shieldPillEl.setAttribute('aria-label', 'Protection shield');
+    const shieldIcon = document.createElement('span');
+    shieldIcon.className = 'vm-btn-icon';
+    shieldIcon.innerHTML = getPixelIconSvg('shield', 'vm-icon-sm');
+    this.shieldValEl = document.createElement('span');
+    this.shieldValEl.className = 'vm-shield-val';
+    this.shieldValEl.textContent = '0:00';
+    this.shieldPillEl.append(shieldIcon, this.shieldValEl);
+    this.shieldPillEl.addEventListener('click', () => {
+      this.callbacks.onOpenEconomy?.('shop');
+      this.shieldPillEl.blur();
+    });
+
+    // World Shop / Bag (B) button
+    this.shopBtnEl = document.createElement('button');
+    this.shopBtnEl.type = 'button';
+    this.shopBtnEl.className = 'vm-btn vm-btn-shop';
+    this.shopBtnEl.title = t('shopBtnTitle');
+    this.shopBtnEl.setAttribute('aria-label', 'World shop and bag');
+    const shopIcon = document.createElement('span');
+    shopIcon.className = 'vm-btn-icon';
+    shopIcon.innerHTML = getPixelIconSvg('shop', 'vm-icon-sm');
+    this.shopLabelEl = document.createElement('span');
+    this.shopLabelEl.className = 'vm-shop-label';
+    this.shopLabelEl.textContent = t('shopBtn');
+    this.shopBagBadgeEl = document.createElement('span');
+    this.shopBagBadgeEl.className = 'vm-shop-bag-badge is-hidden';
+    const shopKey = document.createElement('span');
+    shopKey.className = 'vm-btn-key-tag';
+    shopKey.textContent = 'B';
+    this.shopBtnEl.append(shopIcon, this.shopLabelEl, this.shopBagBadgeEl, shopKey);
+    this.shopBtnEl.addEventListener('click', () => {
+      this.callbacks.onOpenEconomy?.('shop');
+      this.shopBtnEl.blur();
+    });
+
+    // AI Builder button
+    this.aiBuildBtnEl = document.createElement('button');
+    this.aiBuildBtnEl.type = 'button';
+    this.aiBuildBtnEl.className = 'vm-btn vm-btn-ai';
+    this.aiBuildBtnEl.title = t('aiBuildBtnTitle');
+    this.aiBuildBtnEl.setAttribute('aria-label', 'AI Builder');
+    const aiIcon = document.createElement('span');
+    aiIcon.className = 'vm-btn-icon';
+    aiIcon.innerHTML = getPixelIconSvg('sparkle', 'vm-icon-sm');
+    this.aiBuildLabelEl = document.createElement('span');
+    this.aiBuildLabelEl.className = 'vm-ai-label';
+    this.aiBuildLabelEl.textContent = t('aiBuildBtn');
+    this.aiBuildBtnEl.append(aiIcon, this.aiBuildLabelEl);
+    this.aiBuildBtnEl.addEventListener('click', () => {
+      this.callbacks.onOpenAiBuilder?.();
+      this.aiBuildBtnEl.blur();
+    });
+
     actions.append(
       this.homeBtnEl,
-      this.serverBtnEl,
+      this.shopBtnEl,
       this.dismountBtnEl,
+      this.aiBuildBtnEl,
       this.returnTrackBtnEl,
+      this.serverBtnEl,
       this.muteBtnEl,
       this.pxBtnEl,
       camBtnEl,
@@ -881,7 +1001,7 @@ export class Hud {
       this.gyroBtnEl,
       this.regroupBtnEl
     );
-    topLeft.append(this.riderPillEl, this.netBadgeEl, actions);
+    topLeft.append(this.riderPillEl, this.netBadgeEl, this.coinPillEl, this.shieldPillEl, actions);
 
     // 3-line pooled broadcast ticker feed (dedicated icon span + safe textContent span)
     const feedEl = document.createElement('div');
@@ -1326,6 +1446,30 @@ export class Hud {
       itemTray.appendChild(btn);
     }
 
+    // Compact Stash-to-Bag (T) button next to the highway item tray
+    this.bagStashBtnEl = document.createElement('button');
+    this.bagStashBtnEl.type = 'button';
+    this.bagStashBtnEl.className = 'vm-bag-stash-btn is-hidden';
+    this.bagStashBtnEl.title = t('stashItemTitle');
+    this.bagStashBtnEl.setAttribute('aria-label', 'Stash item into bag');
+    const stashIcon = document.createElement('span');
+    stashIcon.className = 'vm-btn-icon';
+    stashIcon.innerHTML = getPixelIconSvg('bag', 'vm-icon-sm');
+    this.bagStashLabelEl = document.createElement('span');
+    this.bagStashLabelEl.className = 'vm-bag-stash-label';
+    this.bagStashLabelEl.textContent = t('stashItemBtn');
+    const stashKey = document.createElement('span');
+    stashKey.className = 'vm-btn-key-tag';
+    stashKey.textContent = 'T';
+    this.bagStashBtnEl.append(stashIcon, this.bagStashLabelEl, stashKey);
+    this.bagStashBtnEl.addEventListener('pointerdown', (e) => e.stopPropagation());
+    this.bagStashBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.callbacks.onStashItem?.();
+      this.bagStashBtnEl.blur();
+    });
+    itemTray.appendChild(this.bagStashBtnEl);
+
     const weaponsEl = document.createElement('div');
     weaponsEl.className = 'vm-weapons';
     for (let i = 0; i < WEAPONS.length; i++) {
@@ -1654,10 +1798,30 @@ export class Hud {
     this.homeOverlayEl.appendChild(homeCard);
 
     // -----------------------------------------------------------------------
-    // 5b. OPEN-WORLD MINECRAFT CROSSHAIR, 9-SLOT BLOCK HOTBAR & TOUCH BUILD UI
+    // 5b. OPEN-WORLD MINECRAFT CROSSHAIR, 10-SLOT BLOCK HOTBAR & TOUCH BUILD UI
     // -----------------------------------------------------------------------
     this.crosshairEl = document.createElement('div');
     this.crosshairEl.className = 'vm-crosshair is-hidden';
+
+    // Center-bottom clickable Context Interact Pill (resource nodes / computer terminal)
+    this.interactPillEl = document.createElement('button');
+    this.interactPillEl.type = 'button';
+    this.interactPillEl.className = 'vm-slab vm-interact-pill is-hidden';
+    this.interactPillEl.setAttribute('aria-live', 'polite');
+    this.interactIconEl = document.createElement('span');
+    this.interactIconEl.className = 'vm-btn-icon';
+    const interactKeyEl = document.createElement('span');
+    interactKeyEl.className = 'vm-interact-key';
+    interactKeyEl.textContent = 'E';
+    this.interactLabelEl = document.createElement('span');
+    this.interactLabelEl.className = 'vm-interact-label';
+    this.interactPillEl.append(this.interactIconEl, interactKeyEl, this.interactLabelEl);
+    this.interactPillEl.addEventListener('pointerdown', (e) => e.stopPropagation());
+    this.interactPillEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.callbacks.onInteract?.();
+      this.interactPillEl.blur();
+    });
 
     this.buildDockEl = document.createElement('div');
     this.buildDockEl.className = 'vm-build-dock is-hidden';
@@ -1674,11 +1838,13 @@ export class Hud {
       const slotBtn = document.createElement('button');
       slotBtn.type = 'button';
       slotBtn.className = spec.id === 3 ? 'vm-hotbar-slot is-active' : 'vm-hotbar-slot';
-      slotBtn.title = `${spec.id}: ${spec.zhName}`;
+      const keyLabel = (spec.id as number) === 10 ? '0' : String(spec.id);
+      slotBtn.title = `${keyLabel}: ${spec.zhName}`;
+      slotBtn.dataset.blockId = String(spec.id);
 
       const keyTag = document.createElement('span');
       keyTag.className = 'vm-hotbar-key';
-      keyTag.textContent = String(spec.id);
+      keyTag.textContent = keyLabel;
 
       const swatch = document.createElement('img');
       swatch.className = 'vm-hotbar-swatch';
@@ -1686,7 +1852,10 @@ export class Hud {
       swatch.alt = spec.enName;
       swatch.draggable = false;
 
-      slotBtn.append(keyTag, swatch);
+      const qtyEl = document.createElement('span');
+      qtyEl.className = 'vm-hotbar-qty is-hidden';
+
+      slotBtn.append(keyTag, swatch, qtyEl);
       slotBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
       slotBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -1694,6 +1863,7 @@ export class Hud {
         slotBtn.blur();
       });
       this.hotbarSlotEls.push(slotBtn);
+      this.hotbarSlotById.set(spec.id, { btn: slotBtn, qtyEl, lastQty: null });
       hotbar.appendChild(slotBtn);
     }
 
@@ -1734,9 +1904,27 @@ export class Hud {
 
     this.buildDockEl.append(this.buildBlockLabelEl, hotbar, this.buildHintEl);
 
-    // Mobile On-Foot Action Buttons (Place / Break / Jump)
+    // Mobile On-Foot Action Buttons (Interact + Jump / Break + Place)
     this.footTouchActionsEl = document.createElement('div');
     this.footTouchActionsEl.className = 'vm-foot-touch-actions';
+
+    const footTopRow = document.createElement('div');
+    footTopRow.className = 'vm-foot-touch-row';
+
+    this.footInteractBtnEl = document.createElement('button');
+    this.footInteractBtnEl.type = 'button';
+    this.footInteractBtnEl.className = 'vm-foot-act-btn vm-foot-act-interact is-hidden';
+    const footInteractIcon = document.createElement('span');
+    footInteractIcon.className = 'vm-btn-icon';
+    footInteractIcon.innerHTML = getPixelIconSvg('harvest', 'vm-icon-sm');
+    this.footInteractLabelEl = document.createElement('span');
+    this.footInteractLabelEl.textContent = t('interactBtn');
+    this.footInteractBtnEl.append(footInteractIcon, this.footInteractLabelEl);
+    this.footInteractBtnEl.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.callbacks.onInteract?.();
+    });
 
     const footJumpBtn = document.createElement('button');
     footJumpBtn.type = 'button';
@@ -1756,6 +1944,8 @@ export class Hud {
     };
     footJumpBtn.addEventListener('pointerup', endJump);
     footJumpBtn.addEventListener('pointercancel', endJump);
+
+    footTopRow.append(this.footInteractBtnEl, footJumpBtn);
 
     const footActionRow = document.createElement('div');
     footActionRow.className = 'vm-foot-touch-row';
@@ -1787,7 +1977,7 @@ export class Hud {
     });
 
     footActionRow.append(footBreakBtn, footPlaceBtn);
-    this.footTouchActionsEl.append(footJumpBtn, footActionRow);
+    this.footTouchActionsEl.append(footTopRow, footActionRow);
 
     // -----------------------------------------------------------------------
     // 7. SERVER CONFIG & GAME ACCOUNT MODAL (Go + Minecraft Protocol Server)
@@ -1995,6 +2185,7 @@ export class Hud {
       this.keycapsEl,
       touchLayer,
       this.crosshairEl,
+      this.interactPillEl,
       this.buildDockEl,
       this.footTouchActionsEl,
       this.homeOverlayEl,
@@ -2495,16 +2686,104 @@ export class Hud {
 
     if (selectedBlock !== this.lastSelectedBlock) {
       this.lastSelectedBlock = selectedBlock;
-      for (let i = 0; i < this.hotbarSlotEls.length; i++) {
-        this.hotbarSlotEls[i].classList.toggle('is-active', i + 1 === selectedBlock);
-      }
+      this.hotbarSlotById.forEach((slot, blockId) => {
+        slot.btn.classList.toggle('is-active', blockId === selectedBlock);
+      });
       const spec = BLOCK_SPEC_BY_ID[selectedBlock];
-      this.buildBlockLabelEl.textContent = getLang() === 'zh' ? spec.zhName : spec.enName;
+      if (spec) {
+        this.buildBlockLabelEl.textContent = getLang() === 'zh' ? spec.zhName : spec.enName;
+      }
     }
 
     if (hasAimTarget !== this.lastHasAimTarget) {
       this.lastHasAimTarget = hasAimTarget;
       this.crosshairEl.classList.toggle('has-target', hasAimTarget);
+    }
+  }
+
+  setEconomyHud(
+    coins: number,
+    shieldRemainingSec: number,
+    bagCapacity: number,
+    savedItemCount: number
+  ): void {
+    const safeCoins = Math.max(0, Math.floor(Number.isFinite(coins) ? coins : 0));
+    if (safeCoins !== this.lastCoins) {
+      this.lastCoins = safeCoins;
+      this.coinValEl.textContent = String(safeCoins);
+    }
+
+    const safeShield = Math.max(0, Math.ceil(Number.isFinite(shieldRemainingSec) ? shieldRemainingSec : 0));
+    if (safeShield !== this.lastShieldSec) {
+      this.lastShieldSec = safeShield;
+      if (safeShield > 0) {
+        this.shieldPillEl.classList.remove('is-hidden');
+        this.shieldValEl.textContent = formatShieldClock(safeShield);
+      } else {
+        this.shieldPillEl.classList.add('is-hidden');
+      }
+    }
+
+    const safeCap = Math.max(0, Math.floor(Number.isFinite(bagCapacity) ? bagCapacity : 0));
+    const safeSaved = Math.max(0, Math.floor(Number.isFinite(savedItemCount) ? savedItemCount : 0));
+    if (safeCap !== this.bagCapacity || safeSaved !== this.savedItemCount) {
+      this.bagCapacity = safeCap;
+      this.savedItemCount = safeSaved;
+      if (safeCap > 0) {
+        this.shopBagBadgeEl.textContent = `${safeSaved}/${safeCap}`;
+        this.shopBagBadgeEl.classList.remove('is-hidden');
+      } else {
+        this.shopBagBadgeEl.classList.add('is-hidden');
+      }
+      this.syncBagStashBtn();
+    }
+  }
+
+  setInventoryCounts(counts: Record<number, number>): void {
+    this.hotbarSlotById.forEach((slot, blockId) => {
+      const raw = counts[blockId];
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+        if (slot.lastQty !== null) {
+          slot.lastQty = null;
+          slot.qtyEl.classList.add('is-hidden');
+          slot.btn.classList.remove('is-empty');
+        }
+        return;
+      }
+      const qty = Math.max(0, Math.floor(raw));
+      if (qty !== slot.lastQty) {
+        slot.lastQty = qty;
+        slot.qtyEl.textContent = String(qty);
+        slot.qtyEl.classList.remove('is-hidden');
+        slot.btn.classList.toggle('is-empty', qty <= 0);
+      }
+    });
+  }
+
+  setInteractPrompt(label: string | null, icon?: PixelIconId): void {
+    const clean = label ? label.trim() : null;
+    if (clean === this.lastInteractLabel && icon === this.lastInteractIcon) return;
+    this.lastInteractLabel = clean;
+    this.lastInteractIcon = icon;
+
+    if (!clean) {
+      this.interactPillEl.classList.add('is-hidden');
+      this.footInteractBtnEl.classList.add('is-hidden');
+      return;
+    }
+
+    const resolvedIcon: PixelIconId = icon ?? 'harvest';
+    this.interactIconEl.innerHTML = getPixelIconSvg(resolvedIcon, 'vm-icon-sm');
+    this.interactLabelEl.textContent = clean;
+    this.interactPillEl.classList.remove('is-hidden');
+    this.footInteractBtnEl.classList.remove('is-hidden');
+  }
+
+  private syncBagStashBtn(): void {
+    const show = this.bagCapacity > 0 && this.lastHeldItemCount > 0;
+    if (show !== this.lastStashBtnVisible) {
+      this.lastStashBtnVisible = show;
+      this.bagStashBtnEl.classList.toggle('is-hidden', !show);
     }
   }
 
@@ -2744,14 +3023,25 @@ export class Hud {
         : t('mountBtn')
       : t('dismountBtn');
     this.returnTrackLabelEl.textContent = t('backToTrackBtn');
+    this.coinPillEl.title = t('shopBtnTitle');
+    this.shieldPillEl.title = t('shieldTitle');
+    this.shopBtnEl.title = t('shopBtnTitle');
+    this.shopLabelEl.textContent = t('shopBtn');
+    this.aiBuildBtnEl.title = t('aiBuildBtnTitle');
+    this.aiBuildLabelEl.textContent = t('aiBuildBtn');
+    this.bagStashBtnEl.title = t('stashItemTitle');
+    this.bagStashLabelEl.textContent = t('stashItemBtn');
     this.buildHintEl.textContent = t('buildHint');
     this.hotbarClearBtnEl.textContent = t('clearBuildBtn');
     this.hotbarClearBtnEl.title = t('clearBuildTitle');
     this.footBreakLabelEl.textContent = t('breakBtn');
     this.footPlaceLabelEl.textContent = t('placeBtn');
     this.footJumpLabelEl.textContent = t('jumpBtn');
+    this.footInteractLabelEl.textContent = t('interactBtn');
     const spec = BLOCK_SPEC_BY_ID[this.lastSelectedBlock];
-    this.buildBlockLabelEl.textContent = getLang() === 'zh' ? spec.zhName : spec.enName;
+    if (spec) {
+      this.buildBlockLabelEl.textContent = getLang() === 'zh' ? spec.zhName : spec.enName;
+    }
 
     // Server & Account modal locale refresh
     this.serverModalTitleEl.textContent = t('serverModalTitle');
@@ -3709,6 +3999,10 @@ export class Hud {
     fallbackItem: ItemType | null
   ): void {
     const count = heldItems ? Math.min(MAX_HELD_ITEMS, heldItems.length) : fallbackItem ? 1 : 0;
+    if (count !== this.lastHeldItemCount) {
+      this.lastHeldItemCount = count;
+      this.syncBagStashBtn();
+    }
     const showTtl = count >= 2;
 
     for (let i = 0; i < MAX_HELD_ITEMS; i++) {
