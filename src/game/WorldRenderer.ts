@@ -23,11 +23,12 @@ import { getChinaAtlas } from './ChinaTextures';
 import { CrossingAnimal } from './AnimalSystem';
 import { BikeVisual } from './BikeModel';
 import { BlueprintManager, BlueprintRenderData, MAX_BLUEPRINT_BLOCKS } from './BlueprintSystem';
+import { getPeerCustomSkin } from './CustomAvatarSystem';
 import { ItemVisuals } from './ItemSystem';
 import { OnFootState } from './OnFootController';
 import { PlayerCharacterVisual } from './PlayerCharacterVisual';
 import type { ResourceNode } from './ResourceNodes';
-import { BIKE_PALETTES, FallenCargo, RiderRenderState, TrafficCar } from './types';
+import { BIKE_PALETTES, FallenCargo, IntruderSiteVisual, RiderRenderState, TrafficCar } from './types';
 import { VoxelWorld, VoxelWorldVisual, wrapGridZ } from './VoxelWorld';
 import type { WeatherId, WeatherRenderSnapshot } from './WeatherSystem';
 
@@ -48,6 +49,7 @@ const MAX_TRUCK_RENDER = 10;
 const MAX_FALLEN_CARGO_RENDER = 20;
 const MAX_ANIMAL_RENDER = 16;
 const MAX_RESOURCE_NODES = 48;
+const MAX_INTRUDER_SITES = 16;
 const MAX_SIREN_RENDER = 12;
 const MAX_POPUPS = 14;
 const MAX_WEATHER_DROPS = 220;
@@ -224,6 +226,15 @@ interface WeatherDrop {
   speedMul: number;
 }
 
+interface IntruderMarkerSlot {
+  wire: THREE.LineSegments;
+  sprite: THREE.Sprite;
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  tex: THREE.CanvasTexture;
+  lastKey: string;
+}
+
 export class WorldRenderer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene: THREE.Scene;
@@ -284,6 +295,11 @@ export class WorldRenderer {
   private readonly bpPreviewWire: THREE.LineSegments;
   private readonly bpPreviewInst: THREE.InstancedMesh;
   private lastBpPreviewCount = 0;
+
+  // 3D Intruder Warning Markers at destroyed player buildings (up to 16 active)
+  private readonly intruderPillarInst: THREE.InstancedMesh;
+  private readonly intruderMarkers: IntruderMarkerSlot[] = [];
+  private lastIntruderCount = 0;
 
   // Instanced roadside scenery pools
   private readonly trunkInst: THREE.InstancedMesh;
@@ -654,6 +670,58 @@ export class WorldRenderer {
       }),
       MAX_BLUEPRINT_BLOCKS
     );
+
+    // 3D Intruder Warning Markers at destroyed building sites (red pulsing box + laser pillar + billboard label)
+    const intruderPillarGeo = new THREE.BoxGeometry(0.34, 18.0, 0.34);
+    intruderPillarGeo.translate(0, 9.0, 0);
+    this.intruderPillarInst = this.makeInstanced(
+      intruderPillarGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xff2244,
+        transparent: true,
+        opacity: 0.36,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+      MAX_INTRUDER_SITES
+    );
+
+    const intruderWireMat = new THREE.LineBasicMaterial({
+      color: 0xff2a44,
+      transparent: true,
+      opacity: 0.96,
+    });
+    for (let i = 0; i < MAX_INTRUDER_SITES; i++) {
+      const wire = new THREE.LineSegments(unitEdgesGeo, intruderWireMat);
+      wire.frustumCulled = false;
+      wire.visible = false;
+      this.scene.add(wire);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 64;
+      const ctx = canvas.getContext('2d')!;
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.magFilter = THREE.NearestFilter;
+      tex.minFilter = THREE.NearestFilter;
+      tex.generateMipmaps = false;
+      tex.colorSpace = THREE.SRGBColorSpace;
+
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthTest: false,
+          depthWrite: false,
+        })
+      );
+      sprite.scale.set(4.2, 1.05, 1);
+      sprite.frustumCulled = false;
+      sprite.visible = false;
+      this.scene.add(sprite);
+
+      this.intruderMarkers.push({ wire, sprite, canvas, ctx, tex, lastKey: '' });
+    }
 
     // Instanced roadside props (single draw call per category!)
     const trunkGeo = new THREE.BoxGeometry(0.95, 5.2, 0.95);
@@ -1657,7 +1725,8 @@ export class WorldRenderer {
     voxels?: VoxelWorld,
     onFoot?: OnFootState,
     resourceNodes?: readonly ResourceNode[],
-    blueprint?: BlueprintManager | BlueprintRenderData | null
+    blueprint?: BlueprintManager | BlueprintRenderData | null,
+    intruderSites?: readonly IntruderSiteVisual[]
   ): void {
     // Adaptive performance governor (auto-tunes DPR, horizon & particle caps for smooth FPS on ordinary machines)
     this.updatePerfGovernor();
@@ -1727,9 +1796,10 @@ export class WorldRenderer {
       );
     }
 
-    // 2c. Update Natural World Resource Nodes & Blueprint 3D wireframe overlays
+    // 2c. Update Natural World Resource Nodes, Blueprint 3D overlays & Intruder Warning Beacons
     this.updateResourceNodeVisuals(resourceNodes, originS, originX, originY, timeSec);
     this.updateBlueprintVisuals(blueprint, onFoot, originS, originX, originY, timeSec);
+    this.updateIntruderSiteVisuals(intruderSites, originS, originX, originY, timeSec);
 
     // 3. Update traffic car meshes (sedans/police + Chinese overloaded cargo trucks)
     this.updateTrafficVisuals(traffic, originS, originX, originY, timeSec);
@@ -1750,18 +1820,21 @@ export class WorldRenderer {
 
     // 5b. Sync on-foot 3D character visual & parked bike beacon
     if (onFoot?.active) {
-      this.charVisual.setAvatar(local.avatarIdx);
+      const footCamMode = onFoot.cameraMode ?? (onFoot.firstPerson ? 0 : 1);
+      const isFirstPerson = footCamMode === 0;
+      this.charVisual.setAvatar(local.avatarIdx, getPeerCustomSkin(local.id));
       this.charVisual.setHeldBlock(onFoot.selectedBlock);
       this.charVisual.updateAnimation(
         onFoot.walkPhase,
         onFoot.moveSpeed,
         onFoot.swingTimer,
         timeSec,
-        onFoot.firstPerson
+        isFirstPerson
       );
-      if (onFoot.firstPerson) {
+      if (isFirstPerson) {
         this.charVisual.root.visible = false;
       } else {
+        // Visible in BOTH mode 1 (3rd-person rear) and mode 2 (3rd-person front selfie)!
         this.charVisual.root.visible = true;
         worldAbsToLocal(onFoot.wx, onFoot.wy, onFoot.ws, originS, originX, originY, this._v1);
         this.charVisual.root.position.copy(this._v1);
@@ -2482,6 +2555,123 @@ export class WorldRenderer {
     }
   }
 
+  private drawIntruderBadgeCanvas(
+    ctx: CanvasRenderingContext2D,
+    name: string,
+    coordLine: string,
+    online: boolean
+  ): void {
+    const w = ctx.canvas.width;
+    const h = ctx.canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    // Retro dark crimson danger panel + sharp red border
+    ctx.fillStyle = 'rgba(20, 6, 12, 0.92)';
+    ctx.fillRect(2, 2, w - 4, h - 4);
+    ctx.strokeStyle = '#ff2a44';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(2, 2, w - 4, h - 4);
+    ctx.fillStyle = '#ff2a44';
+    ctx.fillRect(2, 2, w - 4, 5);
+
+    const safeName = (name || 'UNKNOWN').slice(0, 14);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 18px "Courier New", monospace';
+    ctx.fillStyle = '#ffdf4d';
+    ctx.fillText(`⚠ 入侵者: ${safeName}`, w * 0.5, 25);
+
+    ctx.font = 'bold 14px "Courier New", monospace';
+    ctx.fillStyle = online ? '#ff7b8a' : '#b8c0d4';
+    ctx.fillText(coordLine, w * 0.5, 48);
+  }
+
+  private updateIntruderSiteVisuals(
+    sites: readonly IntruderSiteVisual[] | undefined,
+    originS: number,
+    originX: number,
+    originY: number,
+    timeSec: number
+  ): void {
+    if (!sites || sites.length === 0) {
+      if (this.lastIntruderCount > 0) {
+        for (let i = 0; i < this.lastIntruderCount; i++) {
+          const slot = this.intruderMarkers[i];
+          slot.wire.visible = false;
+          slot.sprite.visible = false;
+        }
+        this.intruderPillarInst.count = 0;
+        this.intruderPillarInst.instanceMatrix.needsUpdate = true;
+        this.lastIntruderCount = 0;
+      }
+      return;
+    }
+
+    const d = this._dummy;
+    const pos = this._v1;
+    let count = 0;
+
+    for (let i = 0; i < sites.length && count < MAX_INTRUDER_SITES; i++) {
+      const s = sites[i];
+      const wx = s.gx + 0.5;
+      const wy = s.gy + 0.5;
+      const ws = s.gz + 0.5;
+      const ds = signedTrackDelta(ws, originS);
+      if (Math.abs(ds) > 260 || Math.abs(wx - originX) > 260) continue;
+
+      worldAbsToLocal(wx, wy, ws, originS, originX, originY, pos);
+
+      const slot = this.intruderMarkers[count];
+      const boxPulse = 1.12 + 0.1 * Math.sin(timeSec * 8.0 + count * 1.1);
+      slot.wire.position.copy(pos);
+      slot.wire.scale.set(boxPulse, boxPulse, boxPulse);
+      slot.wire.visible = true;
+
+      // Vertical translucent red laser pillar
+      const pillarPulse = 0.8 + 0.28 * Math.sin(timeSec * 6.5 + count * 0.9);
+      d.position.set(pos.x, pos.y - 0.5, pos.z);
+      d.rotation.set(0, timeSec * 1.4 + count, 0);
+      d.scale.set(pillarPulse, 1, pillarPulse);
+      d.updateMatrix();
+      this.intruderPillarInst.setMatrixAt(count, d.matrix);
+
+      // Floating billboard label showing intruder name & live coordinates
+      const hasLive =
+        typeof s.liveWx === 'number' &&
+        Number.isFinite(s.liveWx) &&
+        typeof s.liveWs === 'number' &&
+        Number.isFinite(s.liveWs);
+      const coordX = Math.round(hasLive ? s.liveWx! : s.gx);
+      const coordZ = Math.round(hasLive ? s.liveWs! : s.gz);
+      const statusTag = hasLive ? (s.online ? '●在线' : '离线') : '现场';
+      const coordLine = `(${coordX}, ${coordZ}) ${statusTag}`;
+      const badgeKey = `${s.intruderName}|${coordLine}|${s.online ? 1 : 0}`;
+      if (slot.lastKey !== badgeKey) {
+        slot.lastKey = badgeKey;
+        this.drawIntruderBadgeCanvas(slot.ctx, s.intruderName, coordLine, Boolean(s.online));
+        slot.tex.needsUpdate = true;
+      }
+
+      const bob = Math.sin(timeSec * 3.8 + count * 0.7) * 0.15;
+      slot.sprite.position.set(pos.x, pos.y + 2.15 + bob, pos.z);
+      slot.sprite.visible = true;
+
+      count++;
+    }
+
+    for (let i = count; i < this.lastIntruderCount; i++) {
+      const slot = this.intruderMarkers[i];
+      slot.wire.visible = false;
+      slot.sprite.visible = false;
+    }
+
+    this.intruderPillarInst.count = count;
+    if (count > 0 || this.lastIntruderCount > 0) {
+      this.intruderPillarInst.instanceMatrix.needsUpdate = true;
+      this.lastIntruderCount = count;
+    }
+  }
+
   private updateTrafficVisuals(
     traffic: TrafficCar[],
     originS: number,
@@ -3082,10 +3272,11 @@ export class WorldRenderer {
   ): void {
     const portraitBoost = this.camera.aspect < 0.85 ? Math.min(18, (0.85 - this.camera.aspect) * 42) : 0;
 
-    // MODE A: On-Foot Minecraft-Style 1st / 3rd Person Camera
+    // MODE A: On-Foot Minecraft-Style 3-Mode Camera (0: 1st-Person, 1: 3rd-Person Rear, 2: 3rd-Person Front/Selfie)
     if (onFoot?.active) {
       this.freeCamYawInit = false;
-      const targetFov = (onFoot.firstPerson ? 74 : 70) + portraitBoost;
+      const footCamMode = onFoot.cameraMode ?? (onFoot.firstPerson ? 0 : 1);
+      const targetFov = (footCamMode === 0 ? 74 : footCamMode === 2 ? 64 : 70) + portraitBoost;
       this.currentFov += (targetFov - this.currentFov) * Math.min(1, dt * 10);
       if (Math.abs(this.camera.fov - this.currentFov) > 0.05) {
         this.camera.fov = this.currentFov;
@@ -3099,10 +3290,12 @@ export class WorldRenderer {
       const lookS = Math.cos(onFoot.yaw) * cp;
       const eyeWy = onFoot.wy + 1.54;
 
-      if (onFoot.firstPerson) {
+      if (footCamMode === 0) {
+        // First-Person camera
         worldAbsToLocal(onFoot.wx, eyeWy, onFoot.ws, originS, originX, originY, this._v1);
         this._v2.set(this._v1.x + lookX * 10, this._v1.y + lookY * 10, this._v1.z - lookS * 10);
-      } else {
+      } else if (footCamMode === 1) {
+        // Third-Person Rear camera
         const backDist = 4.3;
         const camWx = onFoot.wx - lookX * backDist;
         const camWs = onFoot.ws - lookS * backDist;
@@ -3118,6 +3311,22 @@ export class WorldRenderer {
           originY,
           this._v2
         );
+      } else {
+        // Third-Person Front/Selfie camera (~3.6m in front looking back at player's face/chest)
+        const frontDist = 3.6;
+        const selfiePitch = Math.max(-0.55, Math.min(0.65, -onFoot.pitch * 0.55));
+        const horizDist = frontDist * Math.cos(selfiePitch);
+        const fwdX = -Math.sin(onFoot.yaw);
+        const fwdS = Math.cos(onFoot.yaw);
+        const camWx = onFoot.wx + fwdX * horizDist;
+        const camWs = onFoot.ws + fwdS * horizDist;
+        const groundAtCam = openWorldGroundY(camWx, camWs);
+        const camWy = Math.max(
+          groundAtCam + 0.55,
+          eyeWy + 0.14 + frontDist * Math.sin(selfiePitch)
+        );
+        worldAbsToLocal(camWx, camWy, camWs, originS, originX, originY, this._v1);
+        worldAbsToLocal(onFoot.wx, onFoot.wy + 1.26, onFoot.ws, originS, originX, originY, this._v2);
       }
 
       if (this.shakeTime > 0) {

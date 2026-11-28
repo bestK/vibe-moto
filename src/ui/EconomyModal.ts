@@ -179,7 +179,7 @@ export class EconomyModal {
     this.tabBtns = {
       shop: makeTab('shop', '世界商店'),
       market: makeTab('market', '玩家交易行'),
-      bag: makeTab('bag', '道具道路袋'),
+      bag: makeTab('bag', '道具袋'),
       blueprints: makeTab('blueprints', '建筑蓝图'),
     };
 
@@ -358,20 +358,27 @@ export class EconomyModal {
     s2.style.color = shieldRem > 0 ? 'var(--vm-cyan)' : 'var(--vm-dim)';
 
     const s3 = document.createElement('span');
-    s3.textContent = `道具道路袋：${this.state.savedItems.length}/${this.state.bagCapacity} 格`;
+    s3.textContent = `道具袋：${this.state.savedItems.length}/${this.state.bagCapacity} 格`;
     s3.style.color = 'var(--vm-green)';
 
-    summary.append(s1, s2, s3);
+    const s4 = document.createElement('span');
+    s4.textContent = `传送卡：${this.state.teleportCards ?? 0} 张`;
+    s4.style.color = 'var(--vm-sky)';
+    s4.style.fontWeight = '700';
+
+    summary.append(s1, s2, s3, s4);
     this.bodyEl.appendChild(summary);
 
-    // Gear items (bag + shields)
-    const gearItems = this.state.shop.filter((i) => i.kind === 'bag' || i.kind === 'shield');
+    // Gear items (bag + shields + teleport cards)
+    const gearItems = this.state.shop.filter(
+      (i) => i.kind === 'bag' || i.kind === 'shield' || i.kind === 'teleport'
+    );
     if (gearItems.length > 0) {
       const secTitle = document.createElement('div');
       secTitle.style.fontSize = '11px';
       secTitle.style.fontWeight = '700';
       secTitle.style.color = 'var(--vm-cyan)';
-      secTitle.textContent = '功能装备 · 道具道路袋 & 建筑防护盾 (防护时间可叠加)';
+      secTitle.textContent = `功能装备 · 道具袋 / 传送卡 (当前: ${this.state.teleportCards ?? 0}) / 建筑防护盾`;
       this.bodyEl.appendChild(secTitle);
 
       const gearGrid = document.createElement('div');
@@ -387,7 +394,12 @@ export class EconomyModal {
         const nameEl = document.createElement('div');
         nameEl.style.fontSize = '12px';
         nameEl.style.fontWeight = '700';
-        nameEl.style.color = item.kind === 'shield' ? 'var(--vm-cyan)' : 'var(--vm-gold)';
+        nameEl.style.color =
+          item.kind === 'shield'
+            ? 'var(--vm-cyan)'
+            : item.kind === 'teleport'
+              ? 'var(--vm-sky)'
+              : 'var(--vm-gold)';
         nameEl.textContent = item.zhName;
 
         const descEl = document.createElement('div');
@@ -395,6 +407,8 @@ export class EconomyModal {
         descEl.style.color = 'var(--vm-dim)';
         if (item.kind === 'bag') {
           descEl.textContent = `当前 ${this.state.bagCapacity}/12 格 · 永久保存赛道道具，开放世界也能用`;
+        } else if (item.kind === 'teleport') {
+          descEl.textContent = `当前拥有 ${this.state.teleportCards ?? 0}/50 张 · 世界地图可消耗传送卡追击传送至入侵者实时位置`;
         } else {
           const mins = Math.round((item.durationSec ?? 600) / 60);
           descEl.textContent = `+${mins} 分钟建筑保护（多次购买自动叠加时长）`;
@@ -404,9 +418,14 @@ export class EconomyModal {
         buyBtn.type = 'button';
         buyBtn.className = 'vm-home-btn vm-home-btn-primary';
         const bagMaxed = item.kind === 'bag' && this.state.bagCapacity >= 12;
+        const tpMaxed = item.kind === 'teleport' && (this.state.teleportCards ?? 0) >= 50;
         const cantAfford = this.state.coins < item.price;
-        buyBtn.disabled = this.busy || bagMaxed || cantAfford;
-        buyBtn.textContent = bagMaxed ? '已满级 (12格)' : `购买 · ${item.price} 🪙`;
+        buyBtn.disabled = this.busy || bagMaxed || tpMaxed || cantAfford;
+        buyBtn.textContent = bagMaxed
+          ? '已满级 (12格)'
+          : tpMaxed
+            ? '已达上限 (50张)'
+            : `购买 · ${item.price} 🪙`;
         buyBtn.addEventListener('click', () => {
           void this.handleBuyShop(item.id, 1);
         });
@@ -691,7 +710,7 @@ export class EconomyModal {
     capText.style.fontSize = '12px';
     capText.style.fontWeight = '700';
     capText.style.color = 'var(--vm-cyan)';
-    capText.textContent = `道具道路袋容量：${used} / ${cap} 格（永久保存 · 赛道 & 开放世界 PvP 通用）`;
+    capText.textContent = `道具袋容量：${used} / ${cap} 格（永久保存 · 赛道 & 开放世界 PvP 通用）`;
 
     const upgradeBtn = document.createElement('button');
     upgradeBtn.type = 'button';
@@ -712,7 +731,7 @@ export class EconomyModal {
     heldTitle.style.fontSize = '11px';
     heldTitle.style.fontWeight = '700';
     heldTitle.style.color = 'var(--vm-gold)';
-    heldTitle.textContent = '当前手持赛道道具（可存入道具道路袋永久保留）';
+    heldTitle.textContent = '当前手持赛道道具（可存入道具袋永久保留）';
     heldBox.appendChild(heldTitle);
 
     if (this.heldItems.length === 0) {
@@ -777,8 +796,8 @@ export class EconomyModal {
       empty.className = 'vm-home-lobby-empty';
       empty.textContent =
         cap <= 0
-          ? '你还未解锁道具道路袋，前往「世界商店」购买即可永久存储赛道道具！'
-          : '道具道路袋为空，快去赛道拾取火箭筒/空袭/狙击枪存进来吧！';
+          ? '你还未解锁道具袋，前往「世界商店」购买即可永久存储赛道道具！'
+          : '道具袋为空，快去赛道拾取火箭筒/空袭/狙击枪存进来吧！';
       this.bodyEl.appendChild(empty);
     } else {
       const grid = document.createElement('div');
@@ -1158,7 +1177,7 @@ export class EconomyModal {
         } else {
           this.state = res.state;
           this.cb.onEconomyUpdated?.(res.state);
-          this.cb.onToast?.(`已将 ${itemName(item)} 存入道具道路袋`, 'cyan');
+          this.cb.onToast?.(`已将 ${itemName(item)} 存入道具袋`, 'cyan');
         }
       }
     } finally {

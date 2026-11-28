@@ -10,6 +10,11 @@ import {
   isValidCustomAvatarDataUrl,
   setCustomAvatar,
 } from './game/PixelAvatars';
+import {
+  SavedCustomAvatar,
+  renderSkinPortraitDataUrl,
+  setPeerCustomSkin,
+} from './game/CustomAvatarSystem';
 import { InputState, ParticleKind, PlayerCallbacks, PlayerPhysics } from './game/PlayerPhysics';
 import { OnFootController, OnFootInput } from './game/OnFootController';
 import { BlueprintManager, SavedBlueprint } from './game/BlueprintSystem';
@@ -20,6 +25,7 @@ import { BLOCK_SPEC_BY_ID, BlockType, VoxelWorld } from './game/VoxelWorld';
 import {
   BIKE_PALETTES,
   CombatHitEvent,
+  IntruderSiteVisual,
   ItemNetEvent,
   ItemType,
   RiderRenderState,
@@ -34,16 +40,26 @@ import { ConnectionStatus, LobbyRoomSummary, MqttSync, PackSpawnTarget, RoomInfo
 import {
   EconomyState,
   GameAccount,
+  IntruderRecord,
+  MapMarker,
+  MapOnlinePlayer,
   ServerBlueprint,
   ServerClient,
   createDefaultEconomyState,
   getShieldRemainingSeconds,
 } from './net/ServerClient';
 import { AiBuildBlock, AiBuilderModal } from './ui/AiBuilderModal';
+import { AvatarStudioModal } from './ui/AvatarStudioModal';
 import { BlueprintSelectionInfo, EconomyModal, EconomyTab } from './ui/EconomyModal';
 import { Hud, TouchInputPatch } from './ui/Hud';
 import { ANIMAL_ICON_MAP, WEATHER_ICON_MAP, type PixelIconId } from './ui/PixelIcons';
 import { WebSshModal } from './ui/WebSshModal';
+import {
+  WorldMapBuildingCenter,
+  WorldMapModal,
+  WorldMapRemotePlayer,
+  WorldMapSnapshot,
+} from './ui/WorldMapModal';
 
 const STORAGE_NAME_KEY = 'vibemoto_name';
 const STORAGE_COLOR_KEY = 'vibemoto_color';
@@ -143,6 +159,16 @@ const blueprints = new BlueprintManager();
 
 let economyState: EconomyState = createDefaultEconomyState();
 let savedBlueprints: ServerBlueprint[] = [];
+let mapMarkers: MapMarker[] = [];
+let intruderRecords: IntruderRecord[] = [];
+let mapOnlinePlayers: MapOnlinePlayer[] = [];
+let savedCustomAvatars: SavedCustomAvatar[] = [];
+let activeCustomAvatarId = '';
+let offTrackElapsedSec = 0;
+let trackInfoHidden = false;
+let mapUiRefreshAccum = 0;
+let mapNetRefreshAccum = 0;
+let intruderSitesBuf: IntruderSiteVisual[] = [];
 let shieldHudTickAccum = 0;
 let lastBlockSlowToastMs = 0;
 let lastInteractKind: 'none' | 'computer' | 'resource' | 'blueprint' = 'none';
@@ -235,6 +261,8 @@ let serverClient!: ServerClient;
 let webSshModal!: WebSshModal;
 let aiBuilderModal!: AiBuilderModal;
 let economyModal!: EconomyModal;
+let worldMapModal!: WorldMapModal;
+let avatarStudioModal!: AvatarStudioModal;
 
 function spawnPackWarpFx(target: PackSpawnTarget): void {
   if (onFoot.state.active) {
@@ -320,6 +348,9 @@ const mqtt = new MqttSync(
     onRemoteCustomAvatar(peerId: string, dataUrl: string | null) {
       setCustomAvatar(peerId, dataUrl);
     },
+    onRemoteCustomSkin(peerId: string, skin) {
+      setPeerCustomSkin(peerId, skin);
+    },
     onPeerEvent(msg: string) {
       hud.showToast(msg, 'cyan', 'globe');
     },
@@ -370,7 +401,9 @@ function isUiBlockingGameplay(): boolean {
     hud.isServerModalOpen() ||
     Boolean(webSshModal?.isOpen()) ||
     Boolean(aiBuilderModal?.isOpen()) ||
-    Boolean(economyModal?.isOpen())
+    Boolean(economyModal?.isOpen()) ||
+    Boolean(worldMapModal?.isOpen()) ||
+    Boolean(avatarStudioModal?.isOpen())
   );
 }
 
@@ -464,9 +497,11 @@ function togglePixelScale(): number {
 
 function cycleCamera(): number {
   if (onFoot.state.active) {
-    const isFp = onFoot.togglePerspective();
-    hud.showToast(isFp ? t('fpCamToast') : t('tpCamToast'), 'cyan');
-    return isFp ? 2 : 0;
+    const mode = onFoot.cycleCameraMode();
+    hud.setOnFootCameraMode(mode);
+    const key = mode === 0 ? 'camFpOnFoot' : mode === 1 ? 'camTpRearOnFoot' : 'camTpFrontOnFoot';
+    hud.showToast(t(key), 'cyan', 'camera');
+    return mode;
   }
   world.cameraMode = ((world.cameraMode + 1) % 3) as CameraMode;
   hud.setCameraMode(world.cameraMode);
@@ -489,6 +524,7 @@ function toggleDismount(): void {
   if (!onFoot.state.active) {
     const bikePose = player.parkForDismount();
     onFoot.dismountFromBike(bikePose.wx, bikePose.wy, bikePose.ws, bikePose.yaw, voxels);
+    hud.setOnFootCameraMode(onFoot.state.cameraMode);
     footTouchState.forward = 0;
     footTouchState.strafe = 0;
     footTouchState.jump = false;
@@ -554,13 +590,188 @@ function syncEconomyUi(next: EconomyState): void {
   }
 }
 
+function syncIntruderVisuals(): void {
+  hud.setIntruderBadge(intruderRecords.length);
+  intruderSitesBuf = intruderRecords.slice(0, 16).map((r) => ({
+    id: r.id,
+    gx: r.gx,
+    gy: r.gy,
+    gz: r.gz,
+    intruderName: r.intruderName,
+    liveWx: r.liveWx,
+    liveWs: r.liveWs,
+    online: r.online,
+    createdAt: r.createdAt,
+  }));
+}
+
+function applyActiveCustomAvatar(av: SavedCustomAvatar | null, broadcast = true): void {
+  activeCustomAvatarId = av?.id ?? '';
+  setPeerCustomSkin(mqtt.clientId, av ? av.skin : null);
+  const portrait = av ? av.portraitDataUrl || renderSkinPortraitDataUrl(av.skin) : loadSavedCustomAvatar();
+  setCustomAvatar(mqtt.clientId, portrait);
+  if (broadcast) {
+    mqtt.setCustomSkin(av ? av.skin : null);
+    mqtt.setCustomAvatar(portrait);
+  }
+  hud.refreshLocalAvatar();
+}
+
+function computeMyBuildingCenters(): WorldMapBuildingCenter[] {
+  const acc = serverClient.getAccount();
+  const ownerId = acc?.id;
+  const cells = new Map<string, { sumX: number; sumS: number; count: number }>();
+  for (const entry of voxels.values()) {
+    if (ownerId && entry.ownerId && entry.ownerId !== ownerId) continue;
+    if (ownerId && !entry.ownerId) continue;
+    const cx = Math.floor(entry.gx / 20);
+    const cz = Math.floor(entry.gz / 20);
+    const k = `${cx},${cz}`;
+    let cell = cells.get(k);
+    if (!cell) {
+      cell = { sumX: 0, sumS: 0, count: 0 };
+      cells.set(k, cell);
+    }
+    cell.sumX += entry.gx + 0.5;
+    cell.sumS += entry.gz + 0.5;
+    cell.count += 1;
+  }
+  const out: WorldMapBuildingCenter[] = [];
+  for (const c of cells.values()) {
+    out.push({
+      wx: c.sumX / c.count,
+      ws: c.sumS / c.count,
+      count: c.count,
+    });
+  }
+  return out;
+}
+
+function buildWorldMapSnapshot(remoteRiders: readonly RiderRenderState[]): WorldMapSnapshot {
+  const pose = onFoot.state.active
+    ? { wx: onFoot.state.wx, wy: onFoot.state.wy, ws: onFoot.state.ws, yaw: onFoot.state.yaw }
+    : player.getWorldPose();
+
+  const playerMap = new Map<string, WorldMapRemotePlayer>();
+  for (let i = 0; i < remoteRiders.length; i++) {
+    const r = remoteRiders[i];
+    if (r.isBot || r.isLocal) continue;
+    const rWs = r.freeRoam && r.worldS !== undefined ? r.worldS : r.s;
+    const rWx = r.freeRoam && r.worldX !== undefined ? r.worldX : roadX(rWs) + r.x;
+    playerMap.set(r.id, {
+      id: r.id,
+      name: r.name,
+      wx: rWx,
+      wy: r.worldY ?? r.y,
+      ws: rWs,
+      color: BIKE_PALETTES[Math.abs(r.colorIdx) % BIKE_PALETTES.length]?.primary,
+    });
+  }
+  for (let i = 0; i < mapOnlinePlayers.length; i++) {
+    const p = mapOnlinePlayers[i];
+    if (p.id === mqtt.clientId) continue;
+    if (!playerMap.has(p.id)) {
+      playerMap.set(p.id, {
+        id: p.id,
+        accountId: p.accountId,
+        name: p.name,
+        wx: p.wx,
+        wy: p.wy,
+        ws: p.ws,
+        onFoot: p.onFoot,
+      });
+    }
+  }
+
+  return {
+    playerWx: pose.wx,
+    playerWy: pose.wy,
+    playerWs: pose.ws,
+    playerYaw: pose.yaw,
+    remotePlayers: Array.from(playerMap.values()),
+    markers: mapMarkers,
+    intruders: intruderRecords,
+    resourceNodes: resourceNodes.getActiveNodes().map((n) => ({
+      id: n.id,
+      kind: n.kind,
+      name: getLang() === 'zh' ? n.zhName : n.enName,
+      wx: n.wx,
+      ws: n.ws,
+      ready: n.cooldown <= 0,
+      color: `#${n.colorHex.toString(16).padStart(6, '0')}`,
+    })),
+    myBuildingCenters: computeMyBuildingCenters(),
+    teleportCards: economyState.teleportCards ?? 0,
+  };
+}
+
+async function refreshMapAndIntruders(): Promise<void> {
+  const [markers, intruders, players] = await Promise.all([
+    serverClient.getMapMarkers(),
+    serverClient.getIntruderRecords(mqtt.displayRoom),
+    serverClient.getMapPlayers(mqtt.displayRoom),
+  ]);
+  mapMarkers = markers;
+  intruderRecords = intruders;
+  mapOnlinePlayers = players;
+  syncIntruderVisuals();
+  if (worldMapModal?.isOpen()) {
+    worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+  }
+}
+
+async function teleportPlayerTo(
+  wx: number,
+  ws: number,
+  label: string,
+  useCard: boolean
+): Promise<void> {
+  if (useCard) {
+    const res = await serverClient.useTeleportCard();
+    if (!res.ok) {
+      hud.showToast(res.error || t('teleportNoCard'), 'red', 'teleport');
+      worldMapModal.close();
+      economyModal.open('shop');
+      return;
+    }
+    if (res.state) syncEconomyUi(res.state);
+  }
+  if (onFoot.state.active) {
+    onFoot.teleportTo(wx, ws, voxels);
+  } else {
+    player.teleportToWorld(wx, ws, voxels);
+  }
+  worldMapModal.close();
+  audio.playSpawnChime();
+  const s = player.state.s;
+  const lat = wx - roadX(s);
+  world.spawnParticles(s, lat, 1.0, 22, 0x38e2d4, 7.5, 0.18, 0.5, 6, 0);
+  hud.showToast(t('teleportSuccess', { label }), 'cyan', 'teleport');
+}
+
 async function refreshEconomyAndBlueprints(): Promise<void> {
-  const [eco, bpsRes] = await Promise.all([
+  const [eco, bpsRes, markers, intruders, avatarRes] = await Promise.all([
     serverClient.getEconomyState(),
     serverClient.getBlueprints(),
+    serverClient.getMapMarkers(),
+    serverClient.getIntruderRecords(mqtt.displayRoom),
+    serverClient.getCustomAvatars(),
   ]);
   savedBlueprints = bpsRes.blueprints;
+  mapMarkers = markers;
+  intruderRecords = intruders;
+  savedCustomAvatars = avatarRes.avatars;
+  activeCustomAvatarId = avatarRes.activeId;
   syncEconomyUi(eco);
+  syncIntruderVisuals();
+
+  const activeAv = savedCustomAvatars.find((a) => a.id === activeCustomAvatarId) ?? null;
+  if (activeAv) {
+    applyActiveCustomAvatar(activeAv, true);
+  }
+  if (avatarStudioModal?.isOpen()) {
+    avatarStudioModal.refreshSaved(savedCustomAvatars, activeCustomAvatarId);
+  }
 }
 
 function awardRaceCoins(kind: 'lap' | 'ko' | 'nearmiss' | 'race', amount: number): void {
@@ -1195,6 +1406,16 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   onStashItem() {
     stashCurrentHeldItem();
   },
+  onOpenWorldMap() {
+    audio.unlock();
+    worldMapModal.open(intruderRecords.length > 0 ? 'intruders' : 'markers');
+    worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+    void refreshMapAndIntruders();
+  },
+  onOpenAvatarStudio() {
+    audio.unlock();
+    avatarStudioModal.open(savedCustomAvatars, activeCustomAvatarId);
+  },
 });
 
 function applyLoggedInAccount(acc: GameAccount): void {
@@ -1252,6 +1473,107 @@ serverClient = new ServerClient(mqtt.clientId, initialName, {
     // Re-sync world from server so any optimistic local edit reverts cleanly
     serverClient.connectRoom(mqtt.displayRoom);
     void refreshEconomyAndBlueprints();
+  },
+  onIntruderAlert(record) {
+    intruderRecords = [record, ...intruderRecords.filter((r) => r.id !== record.id)].slice(0, 100);
+    syncIntruderVisuals();
+    audio.playHorn();
+    const msg = t('intruderAlertToast', { name: record.intruderName });
+    hud.showToast(msg, 'red', 'intruder');
+    hud.pushBroadcast(msg, 'red', 'intruder');
+    if (worldMapModal?.isOpen()) {
+      worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+    }
+  },
+});
+
+worldMapModal = new WorldMapModal(hudContainer, {
+  onToggle(open) {
+    if (open) {
+      exitPointerLockSafe();
+      clearHeldInputs();
+    }
+  },
+  onToast(msg, accent) {
+    hud.showToast(msg, accent ?? 'cyan', 'map');
+  },
+  async onTeleportTo(wx, ws, label, useCard) {
+    await teleportPlayerTo(wx, ws, label, useCard);
+  },
+  async onAddMarker(name, wx, wy, ws, color) {
+    const res = await serverClient.saveMapMarker({ name, wx, wy, ws, color });
+    if (res.ok && res.marker) {
+      mapMarkers = [res.marker, ...mapMarkers.filter((m) => m.id !== res.marker!.id)];
+      worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+      hud.showToast(`已标记「${res.marker.name}」`, 'gold', 'pin');
+    } else {
+      hud.showToast(res.error || '标记失败', 'red', 'warning');
+    }
+  },
+  async onDeleteMarker(id) {
+    const res = await serverClient.deleteMapMarker(id);
+    if (res.ok) {
+      mapMarkers = mapMarkers.filter((m) => m.id !== id);
+      worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+    }
+  },
+  async onDismissIntruder(id) {
+    const res = await serverClient.dismissIntruderRecord(id);
+    if (res.ok) {
+      intruderRecords = intruderRecords.filter((r) => r.id !== id);
+      syncIntruderVisuals();
+      worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+    }
+  },
+  onOpenShop() {
+    worldMapModal.close();
+    economyModal.open('shop');
+  },
+});
+
+avatarStudioModal = new AvatarStudioModal(hudContainer, {
+  onToggle(open) {
+    if (open) {
+      exitPointerLockSafe();
+      clearHeldInputs();
+    }
+  },
+  onToast(msg, accent) {
+    hud.showToast(msg, accent ?? 'cyan', 'avatarStudio');
+  },
+  async onSaveAvatar(av) {
+    const res = await serverClient.saveCustomAvatar(av);
+    if (res.ok) {
+      if (res.avatars) {
+        savedCustomAvatars = res.avatars;
+      } else if (res.avatar) {
+        savedCustomAvatars = [res.avatar, ...savedCustomAvatars.filter((a) => a.id !== res.avatar!.id)];
+      }
+      if (res.avatar) {
+        await serverClient.setActiveCustomAvatar(res.avatar.id);
+        applyActiveCustomAvatar(res.avatar, true);
+      }
+      avatarStudioModal.refreshSaved(savedCustomAvatars, activeCustomAvatarId);
+      hud.showToast(t('avatarSwitchedToast'), 'cyan', 'avatarStudio');
+    } else {
+      hud.showToast(res.error || '形象保存失败', 'red', 'warning');
+    }
+  },
+  async onSelectAvatar(av) {
+    await serverClient.setActiveCustomAvatar(av?.id ?? '');
+    applyActiveCustomAvatar(av, true);
+    avatarStudioModal.refreshSaved(savedCustomAvatars, activeCustomAvatarId);
+    hud.showToast(av ? t('avatarSwitchedToast') : t('avatarResetToast'), av ? 'cyan' : 'gold', 'avatarStudio');
+  },
+  async onDeleteAvatar(id) {
+    const res = await serverClient.deleteCustomAvatar(id);
+    if (res.ok) {
+      savedCustomAvatars = res.avatars ?? savedCustomAvatars.filter((a) => a.id !== id);
+      if (activeCustomAvatarId === id) {
+        applyActiveCustomAvatar(null, true);
+      }
+      avatarStudioModal.refreshSaved(savedCustomAvatars, activeCustomAvatarId);
+    }
   },
 });
 
@@ -1842,6 +2164,13 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
       economyModal.open('shop');
       return;
     }
+    case 'KeyN': {
+      audio.unlock();
+      worldMapModal.open(intruderRecords.length > 0 ? 'intruders' : 'markers');
+      worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+      void refreshMapAndIntruders();
+      return;
+    }
     case 'KeyT': {
       stashCurrentHeldItem();
       return;
@@ -2208,6 +2537,10 @@ const perfSnapshot: PerfSnapshot = {
       openShop: (tab?: EconomyTab) => void;
       openAi: () => void;
       openSsh: () => void;
+      openMap: (tab?: 'markers' | 'intruders' | 'players') => void;
+      openAvatarStudio: () => void;
+      cycleOnFootCam: () => number;
+      setOffTrackQuiet: (hidden: boolean) => void;
       getEconomy: () => EconomyState;
     };
   }
@@ -2228,6 +2561,17 @@ const perfSnapshot: PerfSnapshot = {
   openShop: (tab?: EconomyTab) => economyModal.open(tab ?? 'shop'),
   openAi: () => aiBuilderModal.open(economyState.inventory),
   openSsh: () => webSshModal.open(),
+  openMap: (tab?: 'markers' | 'intruders' | 'players') => {
+    worldMapModal.open(tab ?? 'markers');
+    worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+    void refreshMapAndIntruders();
+  },
+  openAvatarStudio: () => avatarStudioModal.open(savedCustomAvatars, activeCustomAvatarId),
+  cycleOnFootCam: () => cycleCamera(),
+  setOffTrackQuiet: (hidden: boolean) => {
+    trackInfoHidden = hidden;
+    hud.setTrackInfoHidden(hidden);
+  },
   getEconomy: () => economyState,
 };
 
@@ -2445,9 +2789,41 @@ function frame(nowPerfMs: number): void {
     // Step queued AI / blueprint block placement & natural resource nodes
     stepPendingBuildQueue();
     const curPose = onFoot.state.active
-      ? { wx: onFoot.state.wx, ws: onFoot.state.ws }
+      ? { wx: onFoot.state.wx, wy: onFoot.state.wy, ws: onFoot.state.ws }
       : player.getWorldPose();
     resourceNodes.update(dt, curPose.wx, curPose.ws);
+    serverClient.sendPlayerPosition(curPose.wx, curPose.wy, curPose.ws, onFoot.state.active);
+
+    // Hide race/track HUD automatically after leaving the highway for 10 continuous seconds
+    const isOffTrackNow = Boolean(player.state.freeRoam || onFoot.state.active);
+    if (isOffTrackNow) {
+      offTrackElapsedSec += dt;
+      if (offTrackElapsedSec >= 10.0 && !trackInfoHidden) {
+        trackInfoHidden = true;
+        hud.setTrackInfoHidden(true);
+        hud.showToast(t('offTrackQuietToast'), 'cyan', 'map');
+      }
+    } else {
+      offTrackElapsedSec = 0;
+      if (trackInfoHidden) {
+        trackInfoHidden = false;
+        hud.setTrackInfoHidden(false);
+      }
+    }
+
+    // Live WorldMapModal refresh while open
+    if (worldMapModal.isOpen()) {
+      mapUiRefreshAccum += dt;
+      if (mapUiRefreshAccum >= 0.16) {
+        mapUiRefreshAccum = 0;
+        worldMapModal.updateData(buildWorldMapSnapshot(remoteRiders));
+      }
+      mapNetRefreshAccum += dt;
+      if (mapNetRefreshAccum >= 4.0) {
+        mapNetRefreshAccum = 0;
+        void refreshMapAndIntruders();
+      }
+    }
 
     // Update live blueprint hologram origin when previewing
     const activeBp = blueprints.getActivePreview();
@@ -2544,7 +2920,8 @@ function frame(nowPerfMs: number): void {
     voxels,
     onFoot.state,
     resourceNodes.getActiveNodes(),
-    blueprints
+    blueprints,
+    intruderSitesBuf
   );
   hud.setWeather(weather.render.current, weather.render.lightningFlash);
   hud.setEnragedWarning(ai.isAnyDeliveryEnraged());

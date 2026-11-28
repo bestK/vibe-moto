@@ -3,13 +3,16 @@ package hub
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"vibe-moto-server/internal/auth"
+	"vibe-moto-server/internal/intruders"
 	"vibe-moto-server/internal/world"
 )
 
@@ -42,6 +45,25 @@ type VoxelEvent struct {
 	OwnerName string `json:"ownerName,omitempty"`
 }
 
+type PlayerPos struct {
+	WX        float64 `json:"wx"`
+	WY        float64 `json:"wy"`
+	WS        float64 `json:"ws"`
+	OnFoot    bool    `json:"onFoot"`
+	Room      string  `json:"room"`
+	UpdatedAt int64   `json:"updatedAt"`
+}
+
+type OnlinePlayer struct {
+	ID        string  `json:"id"`
+	AccountID string  `json:"accountId,omitempty"`
+	Name      string  `json:"name"`
+	WX        float64 `json:"wx"`
+	WY        float64 `json:"wy"`
+	WS        float64 `json:"ws"`
+	OnFoot    bool    `json:"onFoot"`
+}
+
 type Client struct {
 	hub       *Hub
 	conn      *websocket.Conn
@@ -52,6 +74,12 @@ type Client struct {
 	room      string
 	colorIdx  int
 	avatarIdx int
+	wx        float64
+	wy        float64
+	ws        float64
+	onFoot    bool
+	updatedAt int64
+	hasPos    bool
 }
 
 type Hub struct {
@@ -59,14 +87,18 @@ type Hub struct {
 	rooms        map[string]map[*Client]struct{}
 	worlds       *world.Store
 	accounts     *auth.Store
+	intruders    *intruders.Store
+	lastPos      map[string]PlayerPos
 	onVoxelHooks []func(room string, ev VoxelEvent)
 }
 
-func New(worlds *world.Store, accounts *auth.Store) *Hub {
+func New(worlds *world.Store, accounts *auth.Store, intruderStore *intruders.Store) *Hub {
 	return &Hub{
-		rooms:    make(map[string]map[*Client]struct{}),
-		worlds:   worlds,
-		accounts: accounts,
+		rooms:     make(map[string]map[*Client]struct{}),
+		worlds:    worlds,
+		accounts:  accounts,
+		intruders: intruderStore,
+		lastPos:   make(map[string]PlayerPos),
 	}
 }
 
@@ -129,6 +161,171 @@ func (h *Hub) RoomSummaries() []RoomSummary {
 		})
 	}
 	return out
+}
+
+func (h *Hub) RoomPlayers(room string) []OnlinePlayer {
+	slug := world.SanitizeRoom(room)
+	h.mu.RLock()
+	peers := h.rooms[slug]
+	out := make([]OnlinePlayer, 0, len(peers))
+	for c := range peers {
+		out = append(out, OnlinePlayer{
+			ID:        c.id,
+			AccountID: c.accountID,
+			Name:      c.name,
+			WX:        c.wx,
+			WY:        c.wy,
+			WS:        c.ws,
+			OnFoot:    c.onFoot,
+		})
+	}
+	h.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func (h *Hub) updateClientPos(c *Client, wx, wy, ws float64, onFoot bool) {
+	if math.IsNaN(wx) || math.IsInf(wx, 0) || math.IsNaN(wy) || math.IsInf(wy, 0) || math.IsNaN(ws) || math.IsInf(ws, 0) {
+		return
+	}
+	now := time.Now().Unix()
+	pos := PlayerPos{
+		WX:        wx,
+		WY:        wy,
+		WS:        ws,
+		OnFoot:    onFoot,
+		Room:      c.room,
+		UpdatedAt: now,
+	}
+	h.mu.Lock()
+	c.wx = wx
+	c.wy = wy
+	c.ws = ws
+	c.onFoot = onFoot
+	c.updatedAt = now
+	c.hasPos = true
+	if c.id != "" {
+		h.lastPos[c.id] = pos
+	}
+	if c.accountID != "" {
+		h.lastPos[c.accountID] = pos
+	}
+	h.mu.Unlock()
+}
+
+func (h *Hub) ResolvePlayerPosition(accountID, clientID string) (PlayerPos, bool, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	online := false
+	for _, peers := range h.rooms {
+		for c := range peers {
+			matched := (accountID != "" && c.accountID == accountID) || (accountID == "" && clientID != "" && c.id == clientID)
+			if !matched && clientID != "" && c.id == clientID {
+				matched = true
+			}
+			if matched {
+				online = true
+				if c.hasPos {
+					return PlayerPos{
+						WX:        c.wx,
+						WY:        c.wy,
+						WS:        c.ws,
+						OnFoot:    c.onFoot,
+						Room:      c.room,
+						UpdatedAt: c.updatedAt,
+					}, true, true
+				}
+			}
+		}
+	}
+
+	if accountID != "" {
+		if pos, ok := h.lastPos[accountID]; ok {
+			return pos, true, online
+		}
+	}
+	if clientID != "" {
+		if pos, ok := h.lastPos[clientID]; ok {
+			return pos, true, online
+		}
+	}
+	return PlayerPos{}, false, online
+}
+
+func (h *Hub) EnrichIntruderRecord(rec intruders.Record) intruders.EnrichedRecord {
+	pos, found, online := h.ResolvePlayerPosition(rec.IntruderAccountID, rec.IntruderClientID)
+	out := intruders.EnrichedRecord{
+		Record: rec,
+		Online: online,
+	}
+	if found {
+		wx, wy, ws := pos.WX, pos.WY, pos.WS
+		out.LiveWX = &wx
+		out.LiveWY = &wy
+		out.LiveWS = &ws
+		out.LastSeen = pos.UpdatedAt
+	}
+	return out
+}
+
+func (h *Hub) sendToAccount(accountID string, msg []byte) {
+	if accountID == "" {
+		return
+	}
+	h.mu.RLock()
+	var targets []*Client
+	for _, peers := range h.rooms {
+		for c := range peers {
+			if c.accountID == accountID {
+				targets = append(targets, c)
+			}
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, c := range targets {
+		select {
+		case c.send <- msg:
+		default:
+		}
+	}
+}
+
+func (h *Hub) RecordIntrusion(
+	room, ownerID, intruderAccountID, intruderClientID, intruderName string,
+	gx, gy, gz, blockType int,
+	action string,
+) {
+	if h.intruders == nil || ownerID == "" || ownerID == intruderAccountID {
+		return
+	}
+	saved := h.intruders.Add(intruders.Record{
+		Room:              world.SanitizeRoom(room),
+		OwnerID:           ownerID,
+		IntruderAccountID: intruderAccountID,
+		IntruderClientID:  intruderClientID,
+		IntruderName:      intruderName,
+		GX:                gx,
+		GY:                gy,
+		GZ:                world.WrapGZ(gz),
+		BlockType:         blockType,
+		Action:            action,
+	})
+	enriched := h.EnrichIntruderRecord(saved)
+	alert, err := json.Marshal(map[string]any{
+		"t":      "intruder_alert",
+		"record": enriched,
+	})
+	if err != nil {
+		return
+	}
+	h.sendToAccount(ownerID, alert)
 }
 
 func (h *Hub) BroadcastVoxel(room string, ev VoxelEvent, exclude *Client) {
@@ -283,13 +480,17 @@ func (c *Client) readPump() {
 		_ = c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		var env struct {
-			T    string `json:"t"`
-			Op   string `json:"op"`
-			GX   int    `json:"gx"`
-			GY   int    `json:"gy"`
-			GZ   int    `json:"gz"`
-			B    int    `json:"b"`
-			Name string `json:"name"`
+			T      string   `json:"t"`
+			Op     string   `json:"op"`
+			GX     int      `json:"gx"`
+			GY     int      `json:"gy"`
+			GZ     int      `json:"gz"`
+			B      int      `json:"b"`
+			Name   string   `json:"name"`
+			WX     *float64 `json:"wx"`
+			WY     *float64 `json:"wy"`
+			WS     *float64 `json:"ws"`
+			OnFoot bool     `json:"onFoot"`
 		}
 		if err := json.Unmarshal(raw, &env); err != nil {
 			continue
@@ -301,6 +502,11 @@ func (c *Client) readPump() {
 			select {
 			case c.send <- pong:
 			default:
+			}
+
+		case "pos":
+			if env.WX != nil && env.WY != nil && env.WS != nil {
+				c.hub.updateClientPos(c, *env.WX, *env.WY, *env.WS, env.OnFoot)
 			}
 
 		case "vox":
@@ -336,13 +542,16 @@ func (c *Client) readPump() {
 
 			switch env.Op {
 			case "set":
-				ok, _, _, rej := rw.SetBlockChecked(env.GX, env.GY, env.GZ, env.B, c.accountID, c.name, lookup)
+				ok, prev, hadPrev, rej := rw.SetBlockChecked(env.GX, env.GY, env.GZ, env.B, c.accountID, c.name, lookup)
 				if rej != nil {
 					sendRejected("set", env.GX, env.GY, env.GZ, rej)
 					continue
 				}
 				if ok {
 					changed = true
+					if hadPrev && prev.OwnerID != "" && prev.OwnerID != c.accountID {
+						c.hub.RecordIntrusion(c.room, prev.OwnerID, c.accountID, c.id, c.name, env.GX, env.GY, env.GZ, prev.Type, "overwrite")
+					}
 					if c.accountID != "" {
 						ev.OwnerID = c.accountID
 						ev.OwnerName = c.name
@@ -357,6 +566,9 @@ func (c *Client) readPump() {
 				}
 				if ok {
 					changed = true
+					if prev.OwnerID != "" && prev.OwnerID != c.accountID {
+						c.hub.RecordIntrusion(c.room, prev.OwnerID, c.accountID, c.id, c.name, env.GX, env.GY, env.GZ, prev.Type, "break")
+					}
 					if c.accountID != "" {
 						c.hub.accounts.OnBlockBroken(c.accountID, prev.Type)
 					}
@@ -377,7 +589,9 @@ func (c *Client) readPump() {
 
 		case "state", "hit", "item":
 			if env.Name != "" {
+				c.hub.mu.Lock()
 				c.name = env.Name
+				c.hub.mu.Unlock()
 			}
 			c.hub.broadcastRaw(c.room, raw, c)
 		}

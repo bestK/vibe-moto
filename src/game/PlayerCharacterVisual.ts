@@ -1,9 +1,21 @@
 import * as THREE from 'three';
 import { getAvatarCharacterModel, getSharedBasicVertexMat, getSharedVertexColorMat } from './AvatarModels';
+import {
+  buildCustomAvatarCharacterModel,
+  CustomAvatarSkin,
+  getCustomSkinKey,
+} from './CustomAvatarSystem';
 import { BLOCK_SPEC_BY_ID, BlockType } from './VoxelWorld';
 
 function parseHex(hex: string): number {
   return Number.parseInt(hex.startsWith('#') ? hex.slice(1) : hex, 16) || 0xffffff;
+}
+
+function darkenHex(hex: number, factor = 0.62): number {
+  const r = Math.max(0, Math.round(((hex >> 16) & 0xff) * factor));
+  const g = Math.max(0, Math.round(((hex >> 8) & 0xff) * factor));
+  const b = Math.max(0, Math.round((hex & 0xff) * factor));
+  return (r << 16) | (g << 8) | b;
 }
 
 /**
@@ -25,6 +37,7 @@ export class PlayerCharacterVisual {
   private readonly armR: THREE.Mesh;
   private readonly legL: THREE.Mesh;
   private readonly legR: THREE.Mesh;
+  private readonly bootMat: THREE.MeshLambertMaterial;
   private readonly heldBlockMesh: THREE.Mesh;
   private readonly heldBlockMat: THREE.MeshLambertMaterial;
 
@@ -35,6 +48,7 @@ export class PlayerCharacterVisual {
   private readonly fpArmMat: THREE.MeshLambertMaterial;
 
   private lastAvatarIdx = -1;
+  private lastCustomSkinKey = '';
   private lastBlock: BlockType = 3;
   private hasFloatingMarks = false;
 
@@ -67,11 +81,14 @@ export class PlayerCharacterVisual {
 
     const armGeo = new THREE.BoxGeometry(0.16, 0.56, 0.16);
     armGeo.translate(0, -0.24, 0);
-    const legGeo = new THREE.BoxGeometry(0.2, 0.68, 0.2);
-    legGeo.translate(0, -0.34, 0);
+    const legGeo = new THREE.BoxGeometry(0.2, 0.52, 0.2);
+    legGeo.translate(0, -0.26, 0);
+    const bootGeo = new THREE.BoxGeometry(0.22, 0.18, 0.24);
+    bootGeo.translate(0, -0.59, -0.02);
 
     const initArmMat = new THREE.MeshLambertMaterial({ color: 0x232838, flatShading: true });
     const initLegMat = new THREE.MeshLambertMaterial({ color: 0x1a2030, flatShading: true });
+    this.bootMat = new THREE.MeshLambertMaterial({ color: 0x111520, flatShading: true });
 
     this.leftArmPivot.position.set(-0.32, 1.24, 0);
     this.armL = new THREE.Mesh(armGeo, initArmMat);
@@ -91,11 +108,13 @@ export class PlayerCharacterVisual {
     this.leftLegPivot.position.set(-0.14, 0.68, 0);
     this.legL = new THREE.Mesh(legGeo, initLegMat);
     this.leftLegPivot.add(this.legL);
+    this.leftLegPivot.add(new THREE.Mesh(bootGeo, this.bootMat));
     this.bodyPivot.add(this.leftLegPivot);
 
     this.rightLegPivot.position.set(0.14, 0.68, 0);
     this.legR = new THREE.Mesh(legGeo, initLegMat);
     this.rightLegPivot.add(this.legR);
+    this.rightLegPivot.add(new THREE.Mesh(bootGeo, this.bootMat));
     this.bodyPivot.add(this.rightLegPivot);
 
     // First-person held block viewmodel (bottom-right of camera)
@@ -113,14 +132,19 @@ export class PlayerCharacterVisual {
     this.fpHandGroup.visible = false;
   }
 
-  setAvatar(avatarIdx: number): void {
-    if (avatarIdx === this.lastAvatarIdx) return;
+  setAvatar(avatarIdx: number, customSkin?: CustomAvatarSkin | null): void {
+    const skinKey = customSkin ? getCustomSkinKey(customSkin) : '';
+    if (avatarIdx === this.lastAvatarIdx && skinKey === this.lastCustomSkinKey) return;
     this.lastAvatarIdx = avatarIdx;
-    const model = getAvatarCharacterModel(avatarIdx);
+    this.lastCustomSkinKey = skinKey;
+    const model = customSkin
+      ? buildCustomAvatarCharacterModel(customSkin)
+      : getAvatarCharacterModel(avatarIdx);
     this.upperMesh.geometry = model.upperNoArmsGeo;
     if (model.floatGeo) {
       this.floatMesh.geometry = model.floatGeo;
       this.floatMesh.visible = true;
+      this.floatMesh.position.y = 1.46;
     } else {
       this.floatMesh.visible = false;
     }
@@ -128,8 +152,10 @@ export class PlayerCharacterVisual {
 
     const jacketHex = parseHex(model.outfit.jacket);
     const pantsHex = parseHex(model.outfit.pants);
+    const bootsHex = customSkin ? parseHex(customSkin.boots) : darkenHex(pantsHex);
     (this.armL.material as THREE.MeshLambertMaterial).color.setHex(jacketHex);
     (this.legL.material as THREE.MeshLambertMaterial).color.setHex(pantsHex);
+    this.bootMat.color.setHex(bootsHex);
     this.fpArmMat.color.setHex(jacketHex);
   }
 

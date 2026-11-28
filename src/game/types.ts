@@ -226,3 +226,15 @@ export interface FallenCargo {
   life: number;
   colorIdx: number;
 }
+
+export interface IntruderSiteVisual {
+  id: string;
+  gx: number;
+  gy: number;
+  gz: number;
+  intruderName: string;
+  liveWx?: number;
+  liveWs?: number;
+  online?: boolean;
+  createdAt: number;
+}

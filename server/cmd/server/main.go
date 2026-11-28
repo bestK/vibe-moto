@@ -15,6 +15,7 @@ import (
 	"vibe-moto-server/internal/auth"
 	"vibe-moto-server/internal/economy"
 	"vibe-moto-server/internal/hub"
+	"vibe-moto-server/internal/intruders"
 	"vibe-moto-server/internal/mcproto"
 	"vibe-moto-server/internal/sshproxy"
 	"vibe-moto-server/internal/world"
@@ -35,14 +36,15 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 
 func economyPayload(st economy.EconomyState, extra map[string]any) map[string]any {
 	out := map[string]any{
-		"ok":          true,
-		"coins":       st.Coins,
-		"inventory":   st.Inventory,
-		"caps":        st.Caps,
-		"bagCapacity": st.BagCapacity,
-		"savedItems":  st.SavedItems,
-		"shieldUntil": st.ShieldUntil,
-		"shop":        st.Shop,
+		"ok":            true,
+		"coins":         st.Coins,
+		"inventory":     st.Inventory,
+		"caps":          st.Caps,
+		"bagCapacity":   st.BagCapacity,
+		"savedItems":    st.SavedItems,
+		"shieldUntil":   st.ShieldUntil,
+		"teleportCards": st.TeleportCards,
+		"shop":          st.Shop,
 	}
 	for k, v := range extra {
 		out[k] = v
@@ -56,7 +58,11 @@ func economyErrorStatus(err error) int {
 		return http.StatusUnauthorized
 	case errors.Is(err, economy.ErrForbidden):
 		return http.StatusForbidden
-	case errors.Is(err, economy.ErrListingNotFound), errors.Is(err, economy.ErrBlueprintNotFound), errors.Is(err, auth.ErrAccountNotFound):
+	case errors.Is(err, economy.ErrListingNotFound),
+		errors.Is(err, economy.ErrBlueprintNotFound),
+		errors.Is(err, auth.ErrAccountNotFound),
+		errors.Is(err, auth.ErrMarkerNotFound),
+		errors.Is(err, auth.ErrAvatarNotFound):
 		return http.StatusNotFound
 	default:
 		return http.StatusBadRequest
@@ -88,6 +94,7 @@ func buildHandler(
 	accounts *auth.Store,
 	worlds *world.Store,
 	econ *economy.Store,
+	intruderStore *intruders.Store,
 	wsHub *hub.Hub,
 	mcSrv *mcproto.Server,
 	startedAt time.Time,
@@ -333,6 +340,242 @@ func buildHandler(
 		}))
 	})
 
+	mux.HandleFunc("/api/economy/teleport/use", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		acc, err := accounts.VerifyToken(extractBearer(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		st, err := econ.UseTeleportCard(acc.ID)
+		if err != nil {
+			writeJSON(w, economyErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, economyPayload(st, map[string]any{
+			"state": st,
+		}))
+	})
+
+	// ── World Map Markers & Online Players ──
+	mux.HandleFunc("/api/map/markers", func(w http.ResponseWriter, r *http.Request) {
+		acc, err := accounts.VerifyToken(extractBearer(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":      true,
+				"markers": accounts.GetMapMarkers(acc.ID),
+			})
+		case http.MethodPost:
+			var req struct {
+				Name  string  `json:"name"`
+				WX    float64 `json:"wx"`
+				WY    float64 `json:"wy"`
+				WS    float64 `json:"ws"`
+				Color string  `json:"color"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+				return
+			}
+			marker, all, err := accounts.AddMapMarker(acc.ID, req.Name, req.WX, req.WY, req.WS, req.Color)
+			if err != nil {
+				writeJSON(w, economyErrorStatus(err), map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"ok":      true,
+				"marker":  marker,
+				"markers": all,
+			})
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/map/markers/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		acc, err := accounts.VerifyToken(extractBearer(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		markerID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/map/markers/"))
+		all, err := accounts.DeleteMapMarker(acc.ID, markerID)
+		if err != nil {
+			writeJSON(w, economyErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"id":      markerID,
+			"markers": all,
+		})
+	})
+
+	mux.HandleFunc("/api/map/players", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		slug := world.SanitizeRoom(r.URL.Query().Get("room"))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"room":    slug,
+			"players": wsHub.RoomPlayers(slug),
+		})
+	})
+
+	// ── Intruder Records ──
+	mux.HandleFunc("/api/intruders", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		acc, err := accounts.VerifyToken(extractBearer(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		rawRecords := []intruders.Record{}
+		if intruderStore != nil {
+			rawRecords = intruderStore.ListByOwner(acc.ID, r.URL.Query().Get("room"))
+		}
+		enriched := make([]intruders.EnrichedRecord, 0, len(rawRecords))
+		for _, rec := range rawRecords {
+			enriched = append(enriched, wsHub.EnrichIntruderRecord(rec))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"records": enriched,
+		})
+	})
+
+	mux.HandleFunc("/api/intruders/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		acc, err := accounts.VerifyToken(extractBearer(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		recID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/intruders/"))
+		if intruderStore == nil || !intruderStore.Delete(acc.ID, recID) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "入侵记录不存在"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true,
+			"id": recID,
+		})
+	})
+
+	// ── Multiple Saved Custom Avatars ──
+	mux.HandleFunc("/api/avatars", func(w http.ResponseWriter, r *http.Request) {
+		acc, err := accounts.VerifyToken(extractBearer(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			avatars, activeID := accounts.GetCustomAvatars(acc.ID)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":       true,
+				"avatars":  avatars,
+				"activeId": activeID,
+			})
+		case http.MethodPost:
+			var req struct {
+				Name            string                `json:"name"`
+				Prompt          string                `json:"prompt"`
+				PortraitDataUrl string                `json:"portraitDataUrl"`
+				Skin            auth.CustomAvatarSkin `json:"skin"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+				return
+			}
+			av, all, activeID, err := accounts.SaveCustomAvatar(acc.ID, req.Name, req.Prompt, req.PortraitDataUrl, req.Skin)
+			if err != nil {
+				writeJSON(w, economyErrorStatus(err), map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"ok":       true,
+				"avatar":   av,
+				"avatars":  all,
+				"activeId": activeID,
+			})
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/avatars/active", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut && r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		acc, err := accounts.VerifyToken(extractBearer(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+			return
+		}
+		activeID, err := accounts.SetActiveCustomAvatar(acc.ID, req.ID)
+		if err != nil {
+			writeJSON(w, economyErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":       true,
+			"activeId": activeID,
+		})
+	})
+
+	mux.HandleFunc("/api/avatars/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		acc, err := accounts.VerifyToken(extractBearer(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		avID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/avatars/"))
+		all, activeID, err := accounts.DeleteCustomAvatar(acc.ID, avID)
+		if err != nil {
+			writeJSON(w, economyErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":       true,
+			"id":       avID,
+			"avatars":  all,
+			"activeId": activeID,
+		})
+	})
+
 	// ── Player Marketplace ──
 	mux.HandleFunc("/api/market/listings", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -558,7 +801,7 @@ func buildHandler(
 
 			switch req.Op {
 			case "set":
-				ok, _, _, rej := rw.SetBlockChecked(req.GX, req.GY, req.GZ, req.B, actorID, actorName, lookup)
+				ok, prev, hadPrev, rej := rw.SetBlockChecked(req.GX, req.GY, req.GZ, req.B, actorID, actorName, lookup)
 				if rej != nil {
 					writeJSON(w, http.StatusForbidden, map[string]any{
 						"ok":           false,
@@ -571,6 +814,9 @@ func buildHandler(
 				}
 				if ok {
 					changed = true
+					if hadPrev && prev.OwnerID != "" && prev.OwnerID != actorID {
+						wsHub.RecordIntrusion(slug, prev.OwnerID, actorID, "", actorName, req.GX, req.GY, req.GZ, prev.Type, "overwrite")
+					}
 					if actorID != "" {
 						ev.OwnerID = actorID
 						ev.OwnerName = actorName
@@ -591,6 +837,9 @@ func buildHandler(
 				}
 				if ok {
 					changed = true
+					if prev.OwnerID != "" && prev.OwnerID != actorID {
+						wsHub.RecordIntrusion(slug, prev.OwnerID, actorID, "", actorName, req.GX, req.GY, req.GZ, prev.Type, "break")
+					}
 					if actorID != "" {
 						accounts.OnBlockBroken(actorID, prev.Type)
 					}
@@ -665,14 +914,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("init economy store: %v", err)
 	}
+	intruderStore, err := intruders.NewStore(dataDir)
+	if err != nil {
+		log.Fatalf("init intruder store: %v", err)
+	}
 
-	wsHub := hub.New(worlds, accounts)
+	wsHub := hub.New(worlds, accounts, intruderStore)
 	mcSrv := mcproto.NewServer(mcAddr, mcMotd, publicHost, worlds, wsHub)
 	if err := mcSrv.Start(); err != nil {
 		log.Printf("[mc] warning: failed to start Minecraft protocol listener on %s: %v", mcAddr, err)
 	}
 
-	handler := buildHandler(accounts, worlds, econ, wsHub, mcSrv, startedAt, publicHost)
+	handler := buildHandler(accounts, worlds, econ, intruderStore, wsHub, mcSrv, startedAt, publicHost)
 
 	srv := &http.Server{
 		Addr:              httpAddr,

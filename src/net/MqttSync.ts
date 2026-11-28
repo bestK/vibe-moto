@@ -11,6 +11,7 @@ import {
 } from '../game/types';
 import { ROAD_HALF_WIDTH, dsForMeters } from '../game/RoadMath';
 import { AVATAR_COUNT, isValidCustomAvatarDataUrl } from '../game/PixelAvatars';
+import { sanitizeCustomSkin, type CustomAvatarSkin } from '../game/CustomAvatarSystem';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline';
 
@@ -54,6 +55,7 @@ export interface MqttCallbacks {
   onItemEvent?(ev: ItemNetEvent): void;
   onVoxelEvent?(ev: VoxelNetEvent): void;
   onRemoteCustomAvatar?(peerId: string, dataUrl: string | null): void;
+  onRemoteCustomSkin?(peerId: string, skin: CustomAvatarSkin | null): void;
   onRoomPasswordRequired?(
     roomSlug: string,
     reason?: 'password_required' | 'wrong_password'
@@ -561,6 +563,46 @@ function isFreshLockedMeta(meta: RoomMeta | null): boolean {
   );
 }
 
+function packCustomSkin(skin: CustomAvatarSkin): string[] {
+  return [
+    skin.head,
+    skin.face,
+    skin.hair,
+    skin.jacket,
+    skin.stripe,
+    skin.pants,
+    skin.boots,
+    skin.bikePrimary,
+    skin.bikeAccent,
+    skin.visor,
+    skin.accessory,
+  ];
+}
+
+function unpackCustomSkin(raw: unknown): CustomAvatarSkin | null {
+  if (!raw) return null;
+  if (Array.isArray(raw) && raw.length >= 11) {
+    return sanitizeCustomSkin({
+      head: raw[0],
+      face: raw[1],
+      hair: raw[2],
+      jacket: raw[3],
+      stripe: raw[4],
+      pants: raw[5],
+      boots: raw[6],
+      bikePrimary: raw[7],
+      bikeAccent: raw[8],
+      visor: raw[9],
+      accessory: raw[10],
+    });
+  }
+  return sanitizeCustomSkin(raw);
+}
+
+function customSkinSignature(skin: CustomAvatarSkin | null): string {
+  return skin ? packCustomSkin(skin).join('|') : '';
+}
+
 export class MqttSync {
   readonly clientId: string;
 
@@ -641,6 +683,8 @@ export class MqttSync {
   private colorIdx: number;
   private avatarIdx: number;
   private customAvatar: string | null;
+  private customSkin: CustomAvatarSkin | null = null;
+  private customSkinSig = '';
   private lastPublishedKos = 0;
 
   private seq = 0;
@@ -656,6 +700,8 @@ export class MqttSync {
 
   private readonly profiles = new Map<string, PeerProfile>();
   private readonly customAvatars = new Map<string, string>();
+  private readonly customSkins = new Map<string, CustomAvatarSkin>();
+  private readonly customSkinSigs = new Map<string, string>();
   private readonly peers = new Map<string, RemotePeer>();
   private readonly lobbyRooms = new Map<string, RemoteLobbyRoom>();
   private readonly remoteList: RiderRenderState[] = [];
@@ -1004,6 +1050,15 @@ export class MqttSync {
     this.publishCustomAvatar();
   }
 
+  setCustomSkin(skin: CustomAvatarSkin | null): void {
+    const next = skin ? sanitizeCustomSkin(skin) : null;
+    const nextSig = customSkinSignature(next);
+    if (nextSig === this.customSkinSig) return;
+    this.customSkin = next;
+    this.customSkinSig = nextSig;
+    this.publishProfile(monotonicNow());
+  }
+
   tick(local: RiderRenderState, nowMs: number, dt: number): void {
     if (this.disposed) return;
 
@@ -1067,6 +1122,12 @@ export class MqttSync {
         }
         if (this.customAvatars.delete(peerId)) {
           this.callbacks.onRemoteCustomAvatar?.(peerId, null);
+        }
+        if (this.customSkins.delete(peerId)) {
+          this.customSkinSigs.delete(peerId);
+          this.callbacks.onRemoteCustomSkin?.(peerId, null);
+        } else {
+          this.customSkinSigs.delete(peerId);
         }
         continue;
       }
@@ -1220,6 +1281,8 @@ export class MqttSync {
     this.peers.clear();
     this.profiles.clear();
     this.customAvatars.clear();
+    this.customSkins.clear();
+    this.customSkinSigs.clear();
     this.remoteList.length = 0;
     this.setStatus('offline');
   }
@@ -1319,9 +1382,14 @@ export class MqttSync {
     for (const peerId of this.customAvatars.keys()) {
       this.callbacks.onRemoteCustomAvatar?.(peerId, null);
     }
+    for (const peerId of this.customSkins.keys()) {
+      this.callbacks.onRemoteCustomSkin?.(peerId, null);
+    }
     this.peers.clear();
     this.profiles.clear();
     this.customAvatars.clear();
+    this.customSkins.clear();
+    this.customSkinSigs.clear();
     this.remoteList.length = 0;
 
     // Reconfigure topics, LWT & pre-allocated binary header, and re-arm 5m behind-last-player discovery
@@ -2055,15 +2123,17 @@ export class MqttSync {
   private publishProfile(clockMs: number): void {
     if (!this.isRoomActive()) return;
     this.lastProfilePublishMs = clockMs;
-    const payload = textEncoder.encode(
-      JSON.stringify({
-        n: this.name,
-        c: this.colorIdx,
-        a: this.avatarIdx,
-        ko: this.lastPublishedKos,
-        ts: Date.now(),
-      })
-    );
+    const body: Record<string, unknown> = {
+      n: this.name,
+      c: this.colorIdx,
+      a: this.avatarIdx,
+      ko: this.lastPublishedKos,
+      ts: Date.now(),
+    };
+    if (this.customSkin !== null) {
+      body.sk = packCustomSkin(this.customSkin);
+    }
+    const payload = textEncoder.encode(JSON.stringify(body));
     this.sendRaw(buildPublishPacket(this.topicProfileBytes, payload, true));
   }
 
@@ -2365,6 +2435,10 @@ export class MqttSync {
     if (pendingCustomAvatar !== null) {
       this.callbacks.onRemoteCustomAvatar?.(peerId, pendingCustomAvatar);
     }
+    const pendingCustomSkin = this.customSkins.get(peerId) ?? null;
+    if (pendingCustomSkin !== null) {
+      this.callbacks.onRemoteCustomSkin?.(peerId, pendingCustomSkin);
+    }
 
     if (this.isRoomHost) {
       this.publishRoomInfo(arrivalMs);
@@ -2435,6 +2509,27 @@ export class MqttSync {
       peer.render.colorIdx = colorIdx;
       peer.render.avatarIdx = avatarIdx;
       peer.render.kos = kos;
+    }
+
+    const nextSkin = obj.sk !== undefined ? unpackCustomSkin(obj.sk) : null;
+    const nextSig = customSkinSignature(nextSkin);
+    const prevSig = this.customSkinSigs.get(peerId) ?? '';
+    if (nextSig !== prevSig) {
+      if (nextSkin) {
+        if (!this.customSkins.has(peerId) && this.customSkins.size >= MAX_CACHED_CUSTOM_AVATARS) {
+          const oldestKey = this.customSkins.keys().next().value;
+          if (oldestKey !== undefined) {
+            this.customSkins.delete(oldestKey);
+            this.customSkinSigs.delete(oldestKey);
+          }
+        }
+        this.customSkins.set(peerId, nextSkin);
+        this.customSkinSigs.set(peerId, nextSig);
+      } else {
+        this.customSkins.delete(peerId);
+        this.customSkinSigs.delete(peerId);
+      }
+      this.callbacks.onRemoteCustomSkin?.(peerId, nextSkin);
     }
   }
 
@@ -2663,6 +2758,12 @@ export class MqttSync {
     this.profiles.delete(peerId);
     if (this.customAvatars.delete(peerId)) {
       this.callbacks.onRemoteCustomAvatar?.(peerId, null);
+    }
+    if (this.customSkins.delete(peerId)) {
+      this.customSkinSigs.delete(peerId);
+      this.callbacks.onRemoteCustomSkin?.(peerId, null);
+    } else {
+      this.customSkinSigs.delete(peerId);
     }
     if (peerId === this._roomHostId) {
       this.reconcileRoomHost();

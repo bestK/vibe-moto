@@ -65,7 +65,13 @@ export type PixelIconId =
   | 'sparkle'
   | 'blueprint'
   | 'bag'
-  | 'harvest';
+  | 'harvest'
+  | 'map'
+  | 'pin'
+  | 'teleport'
+  | 'intruder'
+  | 'avatarStudio'
+  | 'camera';
 
 /**
  * Handcrafted 16x16 pixel-art SVG primitives (`shape-rendering="crispEdges"`).
@@ -688,6 +694,75 @@ const ICON_BODIES: Readonly<Record<PixelIconId, string>> = {
     '<rect x="3" y="11" width="10" height="3" fill="#475569"/>' +
     '<rect x="4" y="14" width="8" height="1" fill="#1e293b"/>' +
     '<rect x="11" y="2" width="2" height="2" fill="#ffbe3b"/>',
+
+  map:
+    '<rect x="1" y="3" width="4" height="11" fill="#33415e"/>' +
+    '<rect x="5" y="2" width="6" height="11" fill="#1e293b"/>' +
+    '<rect x="11" y="3" width="4" height="11" fill="#33415e"/>' +
+    '<rect x="2" y="4" width="3" height="9" fill="#46d97c"/>' +
+    '<rect x="5" y="3" width="6" height="9" fill="#38a169"/>' +
+    '<rect x="11" y="4" width="3" height="9" fill="#46d97c"/>' +
+    '<rect x="2" y="8" width="3" height="3" fill="#38bdf8"/>' +
+    '<rect x="5" y="9" width="4" height="2" fill="#38bdf8"/>' +
+    '<rect x="6" y="3" width="2" height="9" fill="#ffbe3b"/>' +
+    '<rect x="11" y="5" width="2" height="2" fill="#ff3b5c"/>' +
+    '<rect x="12" y="5" width="1" height="1" fill="#ffffff"/>',
+
+  pin:
+    '<rect x="5" y="1" width="6" height="2" fill="#ff3b5c"/>' +
+    '<rect x="3" y="3" width="10" height="5" fill="#ff3b5c"/>' +
+    '<rect x="4" y="8" width="8" height="2" fill="#d62828"/>' +
+    '<rect x="5" y="10" width="6" height="2" fill="#b91c1c"/>' +
+    '<rect x="6" y="12" width="4" height="2" fill="#991b1b"/>' +
+    '<rect x="7" y="14" width="2" height="1" fill="#7f1d1d"/>' +
+    '<rect x="6" y="4" width="4" height="3" fill="#ffffff"/>' +
+    '<rect x="7" y="5" width="2" height="1" fill="#ffd166"/>',
+
+  teleport:
+    '<rect x="5" y="1" width="6" height="2" fill="#38e2d4"/>' +
+    '<rect x="3" y="3" width="10" height="10" fill="#7c3aed"/>' +
+    '<rect x="2" y="5" width="12" height="6" fill="#8b5cf6"/>' +
+    '<rect x="5" y="13" width="6" height="2" fill="#38e2d4"/>' +
+    '<rect x="4" y="4" width="8" height="8" fill="#1e1b4b"/>' +
+    '<rect x="5" y="5" width="6" height="6" fill="#38e2d4"/>' +
+    '<rect x="6" y="6" width="4" height="4" fill="#c4b5fd"/>' +
+    '<rect x="7" y="7" width="2" height="2" fill="#ffffff"/>' +
+    '<rect x="1" y="2" width="2" height="2" fill="#ffbe3b"/>' +
+    '<rect x="13" y="12" width="2" height="2" fill="#ffbe3b"/>',
+
+  intruder:
+    '<rect x="4" y="1" width="8" height="2" fill="#ff3b5c"/>' +
+    '<rect x="2" y="3" width="12" height="9" fill="#ff3b5c"/>' +
+    '<rect x="3" y="4" width="10" height="7" fill="#1e1b2e"/>' +
+    '<rect x="4" y="6" width="3" height="2" fill="#ffbe3b"/>' +
+    '<rect x="9" y="6" width="3" height="2" fill="#ffbe3b"/>' +
+    '<rect x="5" y="6" width="1" height="1" fill="#ffffff"/>' +
+    '<rect x="10" y="6" width="1" height="1" fill="#ffffff"/>' +
+    '<rect x="5" y="9" width="6" height="1" fill="#ff3b5c"/>' +
+    '<rect x="3" y="12" width="10" height="2" fill="#b91c1c"/>' +
+    '<rect x="7" y="13" width="2" height="2" fill="#ffbe3b"/>',
+
+  avatarStudio:
+    '<rect x="5" y="1" width="6" height="2" fill="#f472b6"/>' +
+    '<rect x="4" y="3" width="8" height="5" fill="#fde68a"/>' +
+    '<rect x="5" y="5" width="2" height="2" fill="#11131a"/>' +
+    '<rect x="9" y="5" width="2" height="2" fill="#11131a"/>' +
+    '<rect x="3" y="8" width="10" height="5" fill="#38e2d4"/>' +
+    '<rect x="5" y="9" width="6" height="4" fill="#7c3aed"/>' +
+    '<rect x="4" y="13" width="3" height="2" fill="#33415e"/>' +
+    '<rect x="9" y="13" width="3" height="2" fill="#33415e"/>' +
+    '<rect x="12" y="1" width="2" height="2" fill="#ffbe3b"/>' +
+    '<rect x="13" y="3" width="2" height="1" fill="#ffe66d"/>',
+
+  camera:
+    '<rect x="5" y="2" width="6" height="2" fill="#cbd5e1"/>' +
+    '<rect x="1" y="4" width="14" height="10" fill="#cbd5e1"/>' +
+    '<rect x="2" y="5" width="12" height="8" fill="#1e293b"/>' +
+    '<rect x="11" y="5" width="2" height="2" fill="#ffbe3b"/>' +
+    '<rect x="5" y="6" width="6" height="6" fill="#38e2d4"/>' +
+    '<rect x="6" y="7" width="4" height="4" fill="#0f172a"/>' +
+    '<rect x="6" y="7" width="2" height="2" fill="#e0fffc"/>' +
+    '<rect x="3" y="6" width="1" height="2" fill="#ff3b5c"/>',
 };
 
 export const ITEM_ICON_MAP: Readonly<Record<ItemType, PixelIconId>> = {

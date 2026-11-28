@@ -20,6 +20,8 @@ export interface ParkedBikeState {
   yaw: number;
 }
 
+export type OnFootCameraMode = 0 | 1 | 2; // 0: First Person, 1: Third Person Rear, 2: Third Person Front/Selfie
+
 export interface OnFootState {
   active: boolean;
   wx: number;
@@ -35,6 +37,7 @@ export interface OnFootState {
   moveSpeed: number;
   swingTimer: number; // > 0 when breaking/placing block
   firstPerson: boolean;
+  cameraMode: OnFootCameraMode;
   selectedBlock: BlockType;
   aimHit: VoxelRaycastHit | null;
   parkedBike: ParkedBikeState;
@@ -71,6 +74,7 @@ export class OnFootController {
     moveSpeed: 0,
     swingTimer: 0,
     firstPerson: true,
+    cameraMode: 0,
     selectedBlock: 3, // Oak planks default
     aimHit: null,
     parkedBike: { wx: 0, wy: 0, ws: 20, yaw: 0 },
@@ -165,9 +169,75 @@ export class OnFootController {
     return this.state.selectedBlock;
   }
 
+  cycleCameraMode(): 0 | 1 | 2 {
+    const next = (((this.state.cameraMode + 1) % 3) as 0 | 1 | 2);
+    this.state.cameraMode = next;
+    this.state.firstPerson = next === 0;
+    return next;
+  }
+
+  setCameraMode(mode: OnFootCameraMode): void {
+    this.state.cameraMode = mode;
+    this.state.firstPerson = mode === 0;
+  }
+
   togglePerspective(): boolean {
-    this.state.firstPerson = !this.state.firstPerson;
+    const next: OnFootCameraMode = this.state.cameraMode === 0 ? 1 : 0;
+    this.state.cameraMode = next;
+    this.state.firstPerson = next === 0;
     return this.state.firstPerson;
+  }
+
+  teleportTo(wx: number, ws: number, voxels: VoxelWorld): void {
+    if (!Number.isFinite(wx) || !Number.isFinite(ws)) return;
+    const st = this.state;
+    const groundY = openWorldGroundY(wx, ws);
+    let safeY = Math.max(
+      groundY,
+      voxels.getSupportHeight(wx, ws, PLAYER_HALF_W, PLAYER_HALF_W, groundY + 64)
+    );
+    let guard = 0;
+    while (
+      guard < 32 &&
+      voxels.overlapsBox(wx, safeY + 0.05, ws, PLAYER_HALF_W, PLAYER_HEIGHT - 0.05, PLAYER_HALF_W)
+    ) {
+      safeY += 1.0;
+      guard++;
+    }
+
+    st.wx = wx;
+    st.wy = safeY;
+    st.ws = ws;
+    st.vx = 0;
+    st.vy = 0;
+    st.vs = 0;
+    st.grounded = true;
+    st.moveSpeed = 0;
+    st.swingTimer = 0;
+    st.aimHit = null;
+    this.prevJump = false;
+    this.stepAccum = 0;
+
+    // Move parked bike cleanly beside the player on safe ground
+    const rightX = Math.cos(st.yaw);
+    const rightS = Math.sin(st.yaw);
+    const bx = wx + rightX * 2.1;
+    const bs = ws + rightS * 2.1;
+    const bikeGround = openWorldGroundY(bx, bs);
+    let by = Math.max(
+      bikeGround,
+      voxels.getSupportHeight(bx, bs, 0.45, 0.85, bikeGround + 64)
+    );
+    let bGuard = 0;
+    while (bGuard < 32 && voxels.overlapsBox(bx, by + 0.05, bs, 0.45, 1.4, 0.45)) {
+      by += 1.0;
+      bGuard++;
+    }
+    st.parkedBike.wx = bx;
+    st.parkedBike.wy = by;
+    st.parkedBike.ws = bs;
+    st.parkedBike.yaw = st.yaw;
+    st.distToBike = Math.hypot(st.wx - bx, st.wy - by, signedTrackDelta(st.ws, bs));
   }
 
   triggerSwing(): void {

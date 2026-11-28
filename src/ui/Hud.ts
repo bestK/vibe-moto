@@ -107,6 +107,8 @@ export interface HudCallbacks {
   onAccountLogout?(): void;
   onOpenEconomy?(tab?: 'shop' | 'market' | 'bag' | 'blueprints'): void;
   onOpenAiBuilder?(): void;
+  onOpenWorldMap?(): void;
+  onOpenAvatarStudio?(): void;
   onInteract?(): void;
   onStashItem?(): void;
 }
@@ -271,12 +273,19 @@ export class Hud {
   private readonly netCountEl: HTMLSpanElement;
   private readonly muteBtnEl: HTMLButtonElement;
   private readonly pxBtnEl: HTMLButtonElement;
+  private readonly camBtnEl: HTMLButtonElement;
+  private readonly camLabelEl: HTMLSpanElement;
   private readonly camPips: HTMLSpanElement[] = [];
   private readonly weatherBtnEl: HTMLButtonElement;
   private readonly weatherIconEl: HTMLSpanElement;
   private readonly weatherLabelEl: HTMLSpanElement;
   private readonly weatherFxEl: HTMLDivElement;
   private readonly homeBtnEl: HTMLButtonElement;
+  private readonly mapBtnEl: HTMLButtonElement;
+  private readonly mapLabelEl: HTMLSpanElement;
+  private readonly mapBadgeEl: HTMLSpanElement;
+  private readonly avatarStudioBtnEl: HTMLButtonElement;
+  private readonly avatarStudioLabelEl: HTMLSpanElement;
   private readonly langBtnEl: HTMLButtonElement;
   private readonly gyroBtnEl: HTMLButtonElement;
   private readonly regroupBtnEl: HTMLButtonElement;
@@ -342,6 +351,9 @@ export class Hud {
   private readonly footPlaceLabelEl: HTMLSpanElement;
   private readonly footBreakLabelEl: HTMLSpanElement;
   private readonly footJumpLabelEl: HTMLSpanElement;
+  private readonly footCamBtnEl: HTMLButtonElement;
+  private readonly footCamLabelEl: HTMLSpanElement;
+  private readonly footCamModeEl: HTMLSpanElement;
   private readonly footInteractBtnEl: HTMLButtonElement;
   private readonly footInteractLabelEl: HTMLSpanElement;
   private readonly interactPillEl: HTMLButtonElement;
@@ -351,6 +363,9 @@ export class Hud {
   private readonly bagStashLabelEl: HTMLSpanElement;
   private isOnFoot = false;
   private isFreeRoam = false;
+  private trackInfoHidden = false;
+  private onFootCamMode: 0 | 1 | 2 = 0;
+  private intruderBadgeCount = 0;
   private lastSelectedBlock: BlockType = 3;
   private lastBikeFar = false;
   private lastHasAimTarget = false;
@@ -775,12 +790,13 @@ export class Hud {
       this.pxBtnEl.blur();
     });
 
-    const camBtnEl = document.createElement('button');
-    camBtnEl.type = 'button';
-    camBtnEl.className = 'vm-btn vm-btn-cam';
-    camBtnEl.title = 'Camera';
-    const camLabel = document.createElement('span');
-    camLabel.textContent = 'CAM';
+    this.camBtnEl = document.createElement('button');
+    this.camBtnEl.type = 'button';
+    this.camBtnEl.className = 'vm-btn vm-btn-cam';
+    this.camBtnEl.title = 'Camera';
+    this.camLabelEl = document.createElement('span');
+    this.camLabelEl.className = 'vm-cam-label';
+    this.camLabelEl.textContent = 'CAM';
     const camPipsWrap = document.createElement('span');
     camPipsWrap.className = 'vm-cam-pips';
     for (let i = 0; i < 3; i++) {
@@ -789,11 +805,15 @@ export class Hud {
       this.camPips.push(pip);
       camPipsWrap.appendChild(pip);
     }
-    camBtnEl.append(camLabel, camPipsWrap);
-    camBtnEl.addEventListener('click', () => {
+    this.camBtnEl.append(this.camLabelEl, camPipsWrap);
+    this.camBtnEl.addEventListener('click', () => {
       const nextMode = this.callbacks.onCycleCamera();
-      this.applyCameraMode(nextMode);
-      camBtnEl.blur();
+      if (this.isOnFoot) {
+        this.setOnFootCameraMode((((Math.floor(nextMode) % 3) + 3) % 3) as 0 | 1 | 2);
+      } else {
+        this.applyCameraMode(nextMode);
+      }
+      this.camBtnEl.blur();
     });
 
     this.weatherBtnEl = document.createElement('button');
@@ -968,6 +988,47 @@ export class Hud {
       this.shopBtnEl.blur();
     });
 
+    // World Map button (N) with unread intruder alert badge
+    this.mapBtnEl = document.createElement('button');
+    this.mapBtnEl.type = 'button';
+    this.mapBtnEl.className = 'vm-btn vm-btn-map';
+    this.mapBtnEl.title = t('worldMapBtnTitle');
+    this.mapBtnEl.setAttribute('aria-label', 'World Map');
+    const mapIcon = document.createElement('span');
+    mapIcon.className = 'vm-btn-icon';
+    mapIcon.innerHTML = getPixelIconSvg('map', 'vm-icon-sm');
+    this.mapLabelEl = document.createElement('span');
+    this.mapLabelEl.className = 'vm-map-label';
+    this.mapLabelEl.textContent = t('worldMapBtn');
+    this.mapBadgeEl = document.createElement('span');
+    this.mapBadgeEl.className = 'vm-badge-count is-hidden';
+    const mapKey = document.createElement('span');
+    mapKey.className = 'vm-btn-key-tag';
+    mapKey.textContent = 'N';
+    this.mapBtnEl.append(mapIcon, this.mapLabelEl, this.mapBadgeEl, mapKey);
+    this.mapBtnEl.addEventListener('click', () => {
+      this.callbacks.onOpenWorldMap?.();
+      this.mapBtnEl.blur();
+    });
+
+    // Custom AI Avatar Studio button
+    this.avatarStudioBtnEl = document.createElement('button');
+    this.avatarStudioBtnEl.type = 'button';
+    this.avatarStudioBtnEl.className = 'vm-btn vm-btn-avatar-studio';
+    this.avatarStudioBtnEl.title = t('avatarStudioBtnTitle');
+    this.avatarStudioBtnEl.setAttribute('aria-label', 'Custom Avatar Studio');
+    const studioIcon = document.createElement('span');
+    studioIcon.className = 'vm-btn-icon';
+    studioIcon.innerHTML = getPixelIconSvg('avatarStudio', 'vm-icon-sm');
+    this.avatarStudioLabelEl = document.createElement('span');
+    this.avatarStudioLabelEl.className = 'vm-avatar-studio-label';
+    this.avatarStudioLabelEl.textContent = t('avatarStudioBtn');
+    this.avatarStudioBtnEl.append(studioIcon, this.avatarStudioLabelEl);
+    this.avatarStudioBtnEl.addEventListener('click', () => {
+      this.callbacks.onOpenAvatarStudio?.();
+      this.avatarStudioBtnEl.blur();
+    });
+
     // AI Builder button
     this.aiBuildBtnEl = document.createElement('button');
     this.aiBuildBtnEl.type = 'button';
@@ -988,14 +1049,16 @@ export class Hud {
 
     actions.append(
       this.homeBtnEl,
+      this.mapBtnEl,
       this.shopBtnEl,
       this.dismountBtnEl,
+      this.avatarStudioBtnEl,
       this.aiBuildBtnEl,
       this.returnTrackBtnEl,
       this.serverBtnEl,
       this.muteBtnEl,
       this.pxBtnEl,
-      camBtnEl,
+      this.camBtnEl,
       this.weatherBtnEl,
       this.langBtnEl,
       this.gyroBtnEl,
@@ -1926,6 +1989,31 @@ export class Hud {
       this.callbacks.onInteract?.();
     });
 
+    this.footCamBtnEl = document.createElement('button');
+    this.footCamBtnEl.type = 'button';
+    this.footCamBtnEl.className = 'vm-foot-act-btn vm-foot-cam-btn';
+    this.footCamBtnEl.title = t('camFpOnFoot');
+    this.footCamBtnEl.dataset.camMode = '0';
+    this.footCamBtnEl.setAttribute('aria-label', 'Switch on-foot camera');
+    const footCamIcon = document.createElement('span');
+    footCamIcon.className = 'vm-btn-icon';
+    footCamIcon.innerHTML = getPixelIconSvg('camera', 'vm-icon-sm');
+    this.footCamLabelEl = document.createElement('span');
+    this.footCamLabelEl.className = 'vm-foot-cam-label';
+    this.footCamLabelEl.textContent = t('footCamBtn');
+    this.footCamModeEl = document.createElement('span');
+    this.footCamModeEl.className = 'vm-foot-cam-mode';
+    this.footCamModeEl.textContent = '1P';
+    this.footCamBtnEl.append(footCamIcon, this.footCamLabelEl, this.footCamModeEl);
+    this.footCamBtnEl.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const nextMode = this.callbacks.onCycleCamera();
+      if (typeof nextMode === 'number' && Number.isFinite(nextMode)) {
+        this.setOnFootCameraMode((((Math.floor(nextMode) % 3) + 3) % 3) as 0 | 1 | 2);
+      }
+    });
+
     const footJumpBtn = document.createElement('button');
     footJumpBtn.type = 'button';
     footJumpBtn.className = 'vm-foot-act-btn vm-foot-act-jump';
@@ -1945,7 +2033,7 @@ export class Hud {
     footJumpBtn.addEventListener('pointerup', endJump);
     footJumpBtn.addEventListener('pointercancel', endJump);
 
-    footTopRow.append(this.footInteractBtnEl, footJumpBtn);
+    footTopRow.append(this.footInteractBtnEl, this.footCamBtnEl, footJumpBtn);
 
     const footActionRow = document.createElement('div');
     footActionRow.className = 'vm-foot-touch-row';
@@ -2677,6 +2765,7 @@ export class Hud {
           ? t('summonBikeBtn')
           : t('mountBtn')
         : t('dismountBtn');
+      this.syncCameraIndicator();
     }
 
     if (freeRoam !== this.isFreeRoam) {
@@ -2777,6 +2866,69 @@ export class Hud {
     this.interactLabelEl.textContent = clean;
     this.interactPillEl.classList.remove('is-hidden');
     this.footInteractBtnEl.classList.remove('is-hidden');
+  }
+
+  setIntruderBadge(count: number): void {
+    const safe = Math.max(0, Math.floor(Number.isFinite(count) ? count : 0));
+    if (safe === this.intruderBadgeCount) return;
+    this.intruderBadgeCount = safe;
+    if (safe > 0) {
+      this.mapBadgeEl.textContent = safe > 99 ? '99+' : String(safe);
+      this.mapBadgeEl.classList.remove('is-hidden');
+      this.mapBtnEl.classList.add('has-alert');
+    } else {
+      this.mapBadgeEl.textContent = '';
+      this.mapBadgeEl.classList.add('is-hidden');
+      this.mapBtnEl.classList.remove('has-alert');
+    }
+  }
+
+  setOnFootCameraMode(mode: 0 | 1 | 2): void {
+    const normalized = (((Math.floor(mode) % 3) + 3) % 3) as 0 | 1 | 2;
+    this.onFootCamMode = normalized;
+    this.syncCameraIndicator();
+  }
+
+  setTrackInfoHidden(hidden: boolean): void {
+    const next = Boolean(hidden);
+    if (next === this.trackInfoHidden) return;
+    this.trackInfoHidden = next;
+    this.root.classList.toggle('is-offtrack-quiet', next);
+  }
+
+  private getOnFootCamShortLabel(mode: 0 | 1 | 2): string {
+    if (mode === 0) return '1P';
+    if (mode === 1) return '3P';
+    return getLang() === 'zh' ? '自拍' : 'SELF';
+  }
+
+  private syncCameraIndicator(): void {
+    const shortLabel = this.getOnFootCamShortLabel(this.onFootCamMode);
+    const footTitle =
+      this.onFootCamMode === 0
+        ? t('camFpOnFoot')
+        : this.onFootCamMode === 1
+          ? t('camTpRearOnFoot')
+          : t('camTpFrontOnFoot');
+    this.footCamModeEl.textContent = shortLabel;
+    this.footCamBtnEl.dataset.camMode = String(this.onFootCamMode);
+    this.footCamBtnEl.title = footTitle;
+
+    if (this.isOnFoot) {
+      this.camLabelEl.textContent = shortLabel;
+      this.camBtnEl.title = footTitle;
+      this.camBtnEl.classList.add('is-on-foot-cam');
+      for (let i = 0; i < this.camPips.length; i++) {
+        this.camPips[i].classList.toggle('is-on', i === this.onFootCamMode);
+      }
+    } else {
+      this.camLabelEl.textContent = 'CAM';
+      this.camBtnEl.title = 'Camera';
+      this.camBtnEl.classList.remove('is-on-foot-cam');
+      for (let i = 0; i < this.camPips.length; i++) {
+        this.camPips[i].classList.toggle('is-on', i === this.cameraMode);
+      }
+    }
   }
 
   private syncBagStashBtn(): void {
@@ -3027,6 +3179,10 @@ export class Hud {
     this.shieldPillEl.title = t('shieldTitle');
     this.shopBtnEl.title = t('shopBtnTitle');
     this.shopLabelEl.textContent = t('shopBtn');
+    this.mapBtnEl.title = t('worldMapBtnTitle');
+    this.mapLabelEl.textContent = t('worldMapBtn');
+    this.avatarStudioBtnEl.title = t('avatarStudioBtnTitle');
+    this.avatarStudioLabelEl.textContent = t('avatarStudioBtn');
     this.aiBuildBtnEl.title = t('aiBuildBtnTitle');
     this.aiBuildLabelEl.textContent = t('aiBuildBtn');
     this.bagStashBtnEl.title = t('stashItemTitle');
@@ -3037,7 +3193,9 @@ export class Hud {
     this.footBreakLabelEl.textContent = t('breakBtn');
     this.footPlaceLabelEl.textContent = t('placeBtn');
     this.footJumpLabelEl.textContent = t('jumpBtn');
+    this.footCamLabelEl.textContent = t('footCamBtn');
     this.footInteractLabelEl.textContent = t('interactBtn');
+    this.syncCameraIndicator();
     const spec = BLOCK_SPEC_BY_ID[this.lastSelectedBlock];
     if (spec) {
       this.buildBlockLabelEl.textContent = getLang() === 'zh' ? spec.zhName : spec.enName;
@@ -3586,9 +3744,7 @@ export class Hud {
 
   private applyCameraMode(mode: number): void {
     this.cameraMode = ((mode % 3) + 3) % 3;
-    for (let i = 0; i < this.camPips.length; i++) {
-      this.camPips[i].classList.toggle('is-on', i === this.cameraMode);
-    }
+    this.syncCameraIndicator();
   }
 
   private syncRegroupState(enabled: boolean): void {

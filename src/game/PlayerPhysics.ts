@@ -11,6 +11,7 @@ import {
   roadY,
   sampleRoadFrame,
   signedTrackDelta,
+  wrapTrackS,
 } from './RoadMath';
 import { AVATAR_COUNT } from './PixelAvatars';
 import { FallenCargo, RiderRenderState, TrafficCar, WEAPONS, WeaponType } from './types';
@@ -336,6 +337,85 @@ export class PlayerPhysics {
     const st = this.state;
     const targetS = Math.max(0, st.freeRoam ? this.freeWs : st.s);
     this.spawnAt(targetS, 1.9, 18);
+  }
+
+  teleportToWorld(wx: number, ws: number, voxels?: VoxelWorld): void {
+    if (!Number.isFinite(wx) || !Number.isFinite(ws)) return;
+    const st = this.state;
+    const targetWs = ws < 0 ? wrapTrackS(ws) : ws;
+    const groundY = openWorldGroundY(wx, targetWs);
+    let safeY = groundY;
+    if (voxels) {
+      safeY = Math.max(
+        groundY,
+        voxels.getSupportHeight(wx, targetWs, 0.48, 0.88, groundY + 64)
+      );
+      let guard = 0;
+      while (guard < 32 && voxels.overlapsBox(wx, safeY + 0.08, targetWs, 0.45, 1.4, 0.45)) {
+        safeY += 1.0;
+        guard++;
+      }
+    }
+
+    const lat = wx - roadX(targetWs);
+    const roadBase = roadY(targetWs);
+    const onRoad =
+      Math.abs(lat) <= ROAD_HALF_WIDTH - 0.5 && Math.abs(safeY - roadBase) < 1.5;
+    const yaw = roadForwardYaw(targetWs);
+
+    // Clear crash, combat & velocity state cleanly
+    st.crashed = false;
+    st.crashTimer = 0;
+    st.hp = Math.max(st.hp, 100);
+    st.invulnTimer = Math.max(st.invulnTimer, SPAWN_INVULN);
+    st.vx = 0;
+    st.lean = 0;
+    st.braking = false;
+    st.nitroActive = false;
+    st.wheelie = 0;
+    st.wheelieCharge = 0;
+    st.spinOutTimer = 0;
+    st.attackSide = 0;
+    st.attackPhase = 0;
+    st.onFoot = false;
+
+    this.vy = 0;
+    this.hopCooldown = 0;
+    this.wheelieHoldTime = 0;
+    this.attackTimer = 0;
+    this.attackCooldown = 0;
+    this.pendingSwingSide = 0;
+    this.boostPadTimer = 0;
+    this.blockHitCooldown = 0;
+    this.slowBlockTimer = 0;
+    this.asphaltBoostTimer = 0;
+    this.voxelSupportY = 0;
+    this.hitIdsThisSwing.clear();
+
+    this.freeWx = wx;
+    this.freeWy = safeY;
+    this.freeWs = targetWs;
+    this.freeYaw = yaw;
+    this.freeRejoinCooldown = 0.6;
+
+    st.worldX = wx;
+    st.worldY = safeY;
+    st.worldS = targetWs;
+    st.s = targetWs;
+
+    if (onRoad) {
+      st.freeRoam = false;
+      st.heading = 0;
+      st.x = clamp(lat, -ROAD_HALF_WIDTH + 0.8, ROAD_HALF_WIDTH - 0.8);
+      st.y = Math.max(0, safeY - roadBase);
+      st.speed = 14;
+    } else {
+      st.freeRoam = true;
+      st.heading = yaw;
+      st.x = lat;
+      st.y = Math.max(0, safeY - groundY);
+      st.speed = 0;
+    }
   }
 
   private enterFreeRoam(cb: PlayerCallbacks): void {

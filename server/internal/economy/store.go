@@ -26,20 +26,22 @@ var (
 	ErrInvalidItem       = errors.New("无效的商品或道具")
 	ErrInsufficientCoins = errors.New("金币不足")
 	ErrInsufficientStock = errors.New("材料库存不足")
-	ErrCapExceeded       = errors.New("已达该材料携带上限")
-	ErrBagNotOwned       = errors.New("请先在世界商店购买道具道路袋")
-	ErrBagFull           = errors.New("道具道路袋已满")
-	ErrBagMaxed          = errors.New("道具道路袋已达最大容量")
-	ErrInvalidBagSlot    = errors.New("无效的道具槽位")
-	ErrInvalidReward     = errors.New("无效的奖励类型")
-	ErrListingNotFound   = errors.New("该商品不存在或已被买走")
-	ErrOwnListing        = errors.New("不能购买自己挂售的商品，请直接下架")
-	ErrForbidden         = errors.New("无权操作他人数据")
-	ErrTooManyListings   = errors.New("挂售数量已达上限")
-	ErrInvalidListing    = errors.New("挂售参数无效")
-	ErrInvalidBlueprint  = errors.New("蓝图数据无效")
-	ErrTooManyBlueprints = errors.New("蓝图数量已达上限 (30)")
-	ErrBlueprintNotFound = errors.New("蓝图不存在")
+	ErrCapExceeded        = errors.New("已达该材料携带上限")
+	ErrBagNotOwned        = errors.New("请先在世界商店购买道具袋")
+	ErrBagFull            = errors.New("道具袋已满")
+	ErrBagMaxed           = errors.New("道具袋已达最大容量")
+	ErrInvalidBagSlot     = errors.New("无效的道具槽位")
+	ErrInvalidReward      = errors.New("无效的奖励类型")
+	ErrListingNotFound    = errors.New("该商品不存在或已被买走")
+	ErrOwnListing         = errors.New("不能购买自己挂售的商品，请直接下架")
+	ErrForbidden          = errors.New("无权操作他人数据")
+	ErrTooManyListings    = errors.New("挂售数量已达上限")
+	ErrInvalidListing     = errors.New("挂售参数无效")
+	ErrInvalidBlueprint   = errors.New("蓝图数据无效")
+	ErrTooManyBlueprints  = errors.New("蓝图数量已达上限 (30)")
+	ErrBlueprintNotFound  = errors.New("蓝图不存在")
+	ErrTeleportCardsMaxed = errors.New("传送卡数量已达上限 (50)")
+	ErrNoTeleportCards    = errors.New("传送卡不足，请在世界商店购买")
 )
 
 var allowedBagItems = map[string]bool{
@@ -55,7 +57,7 @@ var allowedBagItems = map[string]bool{
 
 type ShopItemSpec struct {
 	ID          string `json:"id"`
-	Kind        string `json:"kind"` // "block" | "bag" | "shield"
+	Kind        string `json:"kind"` // "block" | "bag" | "shield" | "teleport"
 	BlockType   int    `json:"blockType,omitempty"`
 	Qty         int    `json:"qty,omitempty"`
 	Price       int    `json:"price"`
@@ -65,13 +67,14 @@ type ShopItemSpec struct {
 }
 
 type EconomyState struct {
-	Coins       int            `json:"coins"`
-	Inventory   map[int]int    `json:"inventory"`
-	Caps        map[int]int    `json:"caps"`
-	BagCapacity int            `json:"bagCapacity"`
-	SavedItems  []string       `json:"savedItems"`
-	ShieldUntil int64          `json:"shieldUntil"`
-	Shop        []ShopItemSpec `json:"shop"`
+	Coins         int            `json:"coins"`
+	Inventory     map[int]int    `json:"inventory"`
+	Caps          map[int]int    `json:"caps"`
+	BagCapacity   int            `json:"bagCapacity"`
+	SavedItems    []string       `json:"savedItems"`
+	ShieldUntil   int64          `json:"shieldUntil"`
+	TeleportCards int            `json:"teleportCards"`
+	Shop          []ShopItemSpec `json:"shop"`
 }
 
 type BlockReward struct {
@@ -100,9 +103,11 @@ var shopCatalog = []ShopItemSpec{
 	{ID: "block_8", Kind: "block", BlockType: 8, Qty: 1, Price: 22, ZhName: "霓虹灯块", EnName: "Neon Lamp"},
 	{ID: "block_9", Kind: "block", BlockType: 9, Qty: 1, Price: 12, ZhName: "赛道沥青", EnName: "Asphalt"},
 	{ID: "block_10", Kind: "block", BlockType: 10, Qty: 1, Price: 180, ZhName: "电脑终端", EnName: "Computer Terminal"},
-	{ID: "item_bag", Kind: "bag", Qty: 3, Price: 300, ZhName: "道具道路袋 (+3格)", EnName: "Item Bag (+3 Slots)"},
+	{ID: "item_bag", Kind: "bag", Qty: 3, Price: 300, ZhName: "道具袋 (+3格)", EnName: "Item Bag (+3 Slots)"},
 	{ID: "shield_10m", Kind: "shield", Price: 250, ZhName: "建筑防护盾 (+10分钟)", EnName: "Build Shield (+10m)", DurationSec: 600},
 	{ID: "shield_30m", Kind: "shield", Price: 600, ZhName: "建筑防护盾 (+30分钟)", EnName: "Build Shield (+30m)", DurationSec: 1800},
+	{ID: "teleport_card", Kind: "teleport", Qty: 1, Price: 120, ZhName: "传送卡 (x1)", EnName: "Teleport Card (x1)"},
+	{ID: "teleport_pack3", Kind: "teleport", Qty: 3, Price: 300, ZhName: "传送卡礼包 (x3)", EnName: "Teleport Pack (x3)"},
 }
 
 func ShopCatalog() []ShopItemSpec {
@@ -122,13 +127,14 @@ func findShopItem(id string) (ShopItemSpec, bool) {
 
 func GuestDefaultState() EconomyState {
 	return EconomyState{
-		Coins:       auth.InitialCoins,
-		Inventory:   auth.DefaultStarterInventory(),
-		Caps:        auth.MaterialCaps(),
-		BagCapacity: 0,
-		SavedItems:  []string{},
-		ShieldUntil: 0,
-		Shop:        ShopCatalog(),
+		Coins:         auth.InitialCoins,
+		Inventory:     auth.DefaultStarterInventory(),
+		Caps:          auth.MaterialCaps(),
+		BagCapacity:   0,
+		SavedItems:    []string{},
+		ShieldUntil:   0,
+		TeleportCards: auth.InitialTeleportCards,
+		Shop:          ShopCatalog(),
 	}
 }
 
@@ -136,13 +142,14 @@ func stateFromAccount(acc *auth.Account) EconomyState {
 	saved := make([]string, len(acc.SavedItems))
 	copy(saved, acc.SavedItems)
 	return EconomyState{
-		Coins:       acc.Coins,
-		Inventory:   auth.CloneInventory(acc.Inventory),
-		Caps:        auth.MaterialCaps(),
-		BagCapacity: acc.BagCapacity,
-		SavedItems:  saved,
-		ShieldUntil: acc.ShieldUntil,
-		Shop:        ShopCatalog(),
+		Coins:         acc.Coins,
+		Inventory:     auth.CloneInventory(acc.Inventory),
+		Caps:          auth.MaterialCaps(),
+		BagCapacity:   acc.BagCapacity,
+		SavedItems:    saved,
+		ShieldUntil:   acc.ShieldUntil,
+		TeleportCards: acc.TeleportCards,
+		Shop:          ShopCatalog(),
 	}
 }
 
@@ -348,9 +355,34 @@ func (s *Store) BuyShopItem(accountID, itemID string, qty int) (EconomyState, er
 			acc.Coins -= cost
 			acc.ShieldUntil = base + int64(qty)*spec.DurationSec
 
+		case "teleport":
+			perPack := spec.Qty
+			if perPack <= 0 {
+				perPack = 1
+			}
+			addCards := qty * perPack
+			if acc.TeleportCards+addCards > auth.MaxTeleportCards {
+				return ErrTeleportCardsMaxed
+			}
+			acc.Coins -= cost
+			acc.TeleportCards += addCards
+
 		default:
 			return ErrInvalidItem
 		}
+		st = stateFromAccount(acc)
+		return nil
+	})
+	return st, err
+}
+
+func (s *Store) UseTeleportCard(accountID string) (EconomyState, error) {
+	var st EconomyState
+	err := s.accounts.WithAccount(accountID, func(acc *auth.Account) error {
+		if acc.TeleportCards <= 0 {
+			return ErrNoTeleportCards
+		}
+		acc.TeleportCards--
 		st = stateFromAccount(acc)
 		return nil
 	})

@@ -346,6 +346,9 @@ func (s *Server) handleLogin(conn net.Conn, br *bufio.Reader, clientProto int32)
 						writeVarInt(&body, world.BlockTypeToMCStateID(prev.Type))
 						client.writeRaw(framePacket(0x09, body.Bytes()))
 					} else if ok {
+						if prev.OwnerID != "" {
+							s.hub.RecordIntrusion("global", prev.OwnerID, "", "mc_"+username, username, x, y, gz, prev.Type, "break")
+						}
 						s.hub.BroadcastVoxel("global", hub.VoxelEvent{
 							Op:   "del",
 							GX:   x,
@@ -365,13 +368,16 @@ func (s *Server) handleLogin(conn net.Conn, br *bufio.Reader, clientProto int32)
 						nx, ny, nz := faceOffset(face)
 						px, py, pz := x+nx, y+ny, z+nz
 						gz := world.WrapGZ(-pz)
-						ok, prev, _, rej := rw.SetBlockChecked(px, py, gz, 3, "", "", s.hub.ShieldLookup())
+						ok, prev, hadPrev, rej := rw.SetBlockChecked(px, py, gz, 3, "", "", s.hub.ShieldLookup())
 						if rej != nil {
 							var body bytes.Buffer
 							writeMCBlockPos(&body, px, py, pz)
 							writeVarInt(&body, world.BlockTypeToMCStateID(prev.Type))
 							client.writeRaw(framePacket(0x09, body.Bytes()))
 						} else if ok {
+							if hadPrev && prev.OwnerID != "" {
+								s.hub.RecordIntrusion("global", prev.OwnerID, "", "mc_"+username, username, px, py, gz, prev.Type, "overwrite")
+							}
 							s.hub.BroadcastVoxel("global", hub.VoxelEvent{
 								Op:   "set",
 								GX:   px,

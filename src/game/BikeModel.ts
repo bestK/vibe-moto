@@ -8,6 +8,13 @@ import {
   mergeColoredBoxes,
 } from './AvatarModels';
 import { getChinaAtlas } from './ChinaTextures';
+import {
+  buildCustomAvatarCharacterModel,
+  CustomAvatarSkin,
+  getCustomSkinKey,
+  getCustomSkinVersion,
+  getPeerCustomSkin,
+} from './CustomAvatarSystem';
 import { getAvatarVersion } from './PixelAvatars';
 import { drawNameplateCanvas, getPixelAtlas } from './PixelTextures';
 import { BIKE_PALETTES, BOT_PALETTE, BikePalette, RiderRenderState, WeaponType } from './types';
@@ -241,15 +248,25 @@ function getMergedBikeBodyGeo(
 }
 
 // Cached merged idle legs (2 leg meshes -> 1 draw call when not kicking!)
-const _idleLegsGeoCache = new Map<number, THREE.BufferGeometry>();
-function getMergedIdleLegsGeo(pantsHex: number): THREE.BufferGeometry {
-  const cached = _idleLegsGeoCache.get(pantsHex);
+const _idleLegsGeoCache = new Map<string, THREE.BufferGeometry>();
+function getMergedIdleLegsGeo(pantsHex: number, bootsHex?: number): THREE.BufferGeometry {
+  const key = `${pantsHex}|${bootsHex ?? -1}`;
+  const cached = _idleLegsGeoCache.get(key);
   if (cached) return cached;
-  const geo = mergeColoredBoxes([
-    { w: 0.18, h: 0.52, d: 0.2, x: -0.26, y: -0.18, z: -0.06, rx: 0.45, color: pantsHex },
-    { w: 0.18, h: 0.52, d: 0.2, x: 0.26, y: -0.18, z: -0.06, rx: 0.45, color: pantsHex },
-  ]);
-  _idleLegsGeoCache.set(pantsHex, geo);
+  const parts: BoxSpec[] =
+    bootsHex !== undefined
+      ? [
+          { w: 0.18, h: 0.36, d: 0.2, x: -0.26, y: -0.11, z: -0.09, rx: 0.45, color: pantsHex },
+          { w: 0.18, h: 0.36, d: 0.2, x: 0.26, y: -0.11, z: -0.09, rx: 0.45, color: pantsHex },
+          { w: 0.2, h: 0.18, d: 0.24, x: -0.26, y: -0.34, z: 0.02, rx: 0.45, color: bootsHex },
+          { w: 0.2, h: 0.18, d: 0.24, x: 0.26, y: -0.34, z: 0.02, rx: 0.45, color: bootsHex },
+        ]
+      : [
+          { w: 0.18, h: 0.52, d: 0.2, x: -0.26, y: -0.18, z: -0.06, rx: 0.45, color: pantsHex },
+          { w: 0.18, h: 0.52, d: 0.2, x: 0.26, y: -0.18, z: -0.06, rx: 0.45, color: pantsHex },
+        ];
+  const geo = mergeColoredBoxes(parts);
+  _idleLegsGeoCache.set(key, geo);
   return geo;
 }
 
@@ -352,10 +369,15 @@ export class BikeVisual {
   private lastPlateHp = -1;
   private lastPlateAvatar = -1;
   private lastPlateAvatarVer = -1;
+  private lastPlateSkinVer = -1;
   private lastPlateEnraged = false;
   private lastPlateLang: Lang | '' = '';
   private lastColorIdx = -1;
   private lastAvatarIdx = -1;
+  private lastCustomSkinKey = '';
+  private lastPeerId = '';
+  private lastSkinVer = -1;
+  private cachedPeerSkin: CustomAvatarSkin | null = null;
   private isBot = false;
   private deliveryRole: 'meituan' | 'eleme' | null = null;
   private hasFloatingMarks = false;
@@ -556,13 +578,17 @@ export class BikeVisual {
     colorIdx: number,
     isBot: boolean,
     deliveryRole: 'meituan' | 'eleme' | null = null,
-    avatarIdx = 0
+    avatarIdx = 0,
+    customSkin: CustomAvatarSkin | null = null
   ): void {
+    const activeCustomSkin = !isBot && !deliveryRole && customSkin ? customSkin : null;
+    const skinKey = activeCustomSkin ? getCustomSkinKey(activeCustomSkin) : '';
     if (
       this.lastColorIdx === colorIdx &&
       this.isBot === isBot &&
       this.deliveryRole === deliveryRole &&
-      this.lastAvatarIdx === avatarIdx
+      this.lastAvatarIdx === avatarIdx &&
+      this.lastCustomSkinKey === skinKey
     ) {
       return;
     }
@@ -570,6 +596,7 @@ export class BikeVisual {
     this.isBot = isBot;
     this.deliveryRole = deliveryRole;
     this.lastAvatarIdx = avatarIdx;
+    this.lastCustomSkinKey = skinKey;
 
     const geos = getSharedGeos();
 
@@ -606,8 +633,10 @@ export class BikeVisual {
       this.deliveryBoxMesh.visible = true;
       this.activeAccentColor = p.primary;
     } else {
-      // Avatar-matched 3D character appearance (local player, remote peers & regular AI bots!)
-      const charModel = getAvatarCharacterModel(avatarIdx);
+      // Custom 3D AI/User Skin or built-in avatar-matched 3D character appearance!
+      const charModel = activeCustomSkin
+        ? buildCustomAvatarCharacterModel(activeCustomSkin)
+        : getAvatarCharacterModel(avatarIdx);
       const outfit = charModel.outfit;
       const fallbackPal = isBot
         ? BOT_PALETTE
@@ -619,6 +648,7 @@ export class BikeVisual {
       const visorHex = parseHexColor(outfit.visor);
       const jacketHex = parseHexColor(outfit.jacket);
       const pantsHex = parseHexColor(outfit.pants);
+      const bootsHex = activeCustomSkin ? parseHexColor(activeCustomSkin.boots) : undefined;
 
       this.bikeBodyMesh.geometry = getMergedBikeBodyGeo(primaryHex, secondaryHex, accentHex, visorHex);
       this.upperWithArmsGeo = charModel.upperWithArmsGeo;
@@ -629,7 +659,7 @@ export class BikeVisual {
       this.armLMesh.material = armMat;
       this.armRMesh.material = armMat;
 
-      this.idleLegsMesh.geometry = getMergedIdleLegsGeo(pantsHex);
+      this.idleLegsMesh.geometry = getMergedIdleLegsGeo(pantsHex, bootsHex);
       const legMat = getCachedLambertMat(pantsHex);
       this.legLMesh.material = legMat;
       this.legRMesh.material = legMat;
@@ -654,7 +684,13 @@ export class BikeVisual {
 
   updateVisuals(state: RiderRenderState, timeSec: number): void {
     const role = state.deliveryRole ?? null;
-    this.setPalette(state.colorIdx, state.isBot, role, state.avatarIdx);
+    const skinVer = getCustomSkinVersion();
+    if (skinVer !== this.lastSkinVer || state.id !== this.lastPeerId) {
+      this.lastSkinVer = skinVer;
+      this.lastPeerId = state.id;
+      this.cachedPeerSkin = !state.isBot && !role ? getPeerCustomSkin(state.id) : null;
+    }
+    this.setPalette(state.colorIdx, state.isBot, role, state.avatarIdx, this.cachedPeerSkin);
     const enraged = Boolean(state.enraged);
 
     // Enraged glowing red/amber visor flash for delivery riders
@@ -770,6 +806,7 @@ export class BikeVisual {
         hpBucket !== this.lastPlateHp ||
         state.avatarIdx !== this.lastPlateAvatar ||
         avatarVer !== this.lastPlateAvatarVer ||
+        skinVer !== this.lastPlateSkinVer ||
         enraged !== this.lastPlateEnraged ||
         lang !== this.lastPlateLang
       ) {
@@ -777,6 +814,7 @@ export class BikeVisual {
         this.lastPlateHp = hpBucket;
         this.lastPlateAvatar = state.avatarIdx;
         this.lastPlateAvatarVer = avatarVer;
+        this.lastPlateSkinVer = skinVer;
         this.lastPlateEnraged = enraged;
         this.lastPlateLang = lang;
         drawNameplateCanvas(

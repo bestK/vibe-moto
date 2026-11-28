@@ -1,5 +1,10 @@
 import type { BlockType } from '../game/VoxelWorld';
 import type { ItemType } from '../game/types';
+import {
+  sanitizeCustomSkin,
+  type CustomAvatarSkin,
+  type SavedCustomAvatar,
+} from '../game/CustomAvatarSystem';
 
 export const DEFAULT_SERVER_URL = 'https://moto.linkof.link';
 const STORAGE_SERVER_URL_KEY = 'vibemoto_server_url';
@@ -7,6 +12,9 @@ const STORAGE_AUTH_TOKEN_KEY = 'vibemoto_auth_token';
 const STORAGE_AUTH_ACCOUNT_KEY = 'vibemoto_auth_account';
 const STORAGE_GUEST_ECONOMY_KEY = 'vibemoto_guest_economy_v1';
 const STORAGE_GUEST_BLUEPRINTS_KEY = 'vibemoto_guest_blueprints_v1';
+const STORAGE_GUEST_MARKERS_KEY = 'vibemoto_guest_markers_v1';
+const STORAGE_GUEST_AVATARS_KEY = 'vibemoto_guest_avatars_v1';
+const STORAGE_GUEST_ACTIVE_AVATAR_KEY = 'vibemoto_guest_active_avatar_v1';
 
 export type VoxelBlockId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 
@@ -55,7 +63,7 @@ export function isValidItemType(val: unknown): val is ItemType {
 
 export interface ShopItemSpec {
   id: string;
-  kind: 'block' | 'bag' | 'shield';
+  kind: 'block' | 'bag' | 'shield' | 'teleport';
   blockType?: number;
   qty?: number;
   price: number;
@@ -71,7 +79,48 @@ export interface EconomyState {
   bagCapacity: number;
   savedItems: ItemType[];
   shieldUntil: number;
+  teleportCards: number;
   shop: ShopItemSpec[];
+}
+
+export interface MapMarker {
+  id: string;
+  name: string;
+  wx: number;
+  wy: number;
+  ws: number;
+  color: string;
+  createdAt: number;
+}
+
+export interface IntruderRecord {
+  id: string;
+  room: string;
+  ownerId: string;
+  intruderAccountId?: string;
+  intruderClientId?: string;
+  intruderName: string;
+  gx: number;
+  gy: number;
+  gz: number;
+  blockType: number;
+  action: string;
+  createdAt: number;
+  liveWx?: number;
+  liveWy?: number;
+  liveWs?: number;
+  online?: boolean;
+  lastSeen?: number;
+}
+
+export interface MapOnlinePlayer {
+  id: string;
+  accountId?: string;
+  name: string;
+  wx: number;
+  wy: number;
+  ws: number;
+  onFoot?: boolean;
 }
 
 export interface MarketListing {
@@ -138,9 +187,11 @@ export const DEFAULT_SHOP_ITEMS: readonly ShopItemSpec[] = [
   { id: 'block_8', kind: 'block', blockType: 8, qty: 6, price: 90, zhName: '霓虹块 x6', enName: 'Neon x6' },
   { id: 'block_9', kind: 'block', blockType: 9, qty: 10, price: 70, zhName: '赛道砖 x10', enName: 'Asphalt x10' },
   { id: 'block_10', kind: 'block', blockType: 10, qty: 1, price: 220, zhName: '电脑终端 x1', enName: 'Computer x1' },
-  { id: 'item_bag', kind: 'bag', qty: 3, price: 300, zhName: '道具道路袋 (+3格)', enName: 'Item Bag (+3)' },
+  { id: 'item_bag', kind: 'bag', qty: 3, price: 300, zhName: '道具袋 (+3格)', enName: 'Item Bag (+3)' },
   { id: 'shield_10m', kind: 'shield', durationSec: 600, price: 250, zhName: '建筑防护盾 (+10分钟)', enName: 'Shield (+10m)' },
   { id: 'shield_30m', kind: 'shield', durationSec: 1800, price: 600, zhName: '建筑防护盾 (+30分钟)', enName: 'Shield (+30m)' },
+  { id: 'teleport_card', kind: 'teleport', qty: 1, price: 120, zhName: '传送卡 (x1)', enName: 'Teleport Card (x1)' },
+  { id: 'teleport_pack3', kind: 'teleport', qty: 3, price: 300, zhName: '传送卡礼包 (x3)', enName: 'Teleport Pack (x3)' },
 ];
 
 export function createDefaultEconomyState(): EconomyState {
@@ -157,6 +208,7 @@ export function createDefaultEconomyState(): EconomyState {
     bagCapacity: 0,
     savedItems: [],
     shieldUntil: 0,
+    teleportCards: 1,
     shop: DEFAULT_SHOP_ITEMS.map((item) => ({ ...item })),
   };
 }
@@ -205,24 +257,34 @@ export function normalizeEconomyState(raw: unknown): EconomyState {
       if (!s || typeof s !== 'object') continue;
       const item = s as Record<string, unknown>;
       const kind = item.kind;
-      if (kind !== 'block' && kind !== 'bag' && kind !== 'shield') continue;
+      if (kind !== 'block' && kind !== 'bag' && kind !== 'shield' && kind !== 'teleport') continue;
+      const rawZh = String(item.zhName || item.id || '');
       parsed.push({
         id: String(item.id || ''),
         kind,
         blockType: item.blockType !== undefined ? Number(item.blockType) : undefined,
         qty: item.qty !== undefined ? Number(item.qty) : undefined,
         price: Math.max(0, Math.floor(Number(item.price) || 0)),
-        zhName: String(item.zhName || item.id || ''),
-        enName: String(item.enName || item.zhName || item.id || ''),
+        zhName: rawZh,
+        enName: String(item.enName || rawZh || item.id || ''),
         durationSec: item.durationSec !== undefined ? Number(item.durationSec) : undefined,
       });
     }
-    if (parsed.length > 0) shop = parsed;
+    if (parsed.length > 0) {
+      const hasTeleport = parsed.some((p) => p.kind === 'teleport');
+      if (!hasTeleport) {
+        for (const tp of DEFAULT_SHOP_ITEMS) {
+          if (tp.kind === 'teleport') parsed.push({ ...tp });
+        }
+      }
+      shop = parsed;
+    }
   }
 
   const coins = Number(src.coins);
   const bagCapacity = Number(src.bagCapacity);
   const shieldUntil = Number(src.shieldUntil);
+  const teleportCards = Number(src.teleportCards);
 
   return {
     coins: Number.isFinite(coins) ? Math.max(0, Math.floor(coins)) : def.coins,
@@ -231,6 +293,9 @@ export function normalizeEconomyState(raw: unknown): EconomyState {
     bagCapacity: Number.isFinite(bagCapacity) ? Math.max(0, Math.min(12, Math.floor(bagCapacity))) : 0,
     savedItems,
     shieldUntil: Number.isFinite(shieldUntil) ? Math.max(0, Math.floor(shieldUntil)) : 0,
+    teleportCards: Number.isFinite(teleportCards)
+      ? Math.max(0, Math.min(999, Math.floor(teleportCards)))
+      : def.teleportCards,
     shop,
   };
 }
@@ -286,6 +351,7 @@ export interface ServerClientCallbacks {
   onWorldSnapshot?(room: string, blocks: ServerWorldBlockTuple[]): void;
   onVoxelUpdate?(ev: ServerVoxelMsg): void;
   onVoxelRejected?(reason: string, ownerName: string, remainingSec: number): void;
+  onIntruderAlert?(record: IntruderRecord): void;
 }
 
 export function normalizeServerUrl(raw: string): string {
@@ -360,6 +426,144 @@ function saveGuestBlueprints(list: ServerBlueprint[]): void {
   safeWrite(STORAGE_GUEST_BLUEPRINTS_KEY, JSON.stringify(list));
 }
 
+function loadGuestMarkers(): MapMarker[] {
+  const raw = safeRead(STORAGE_GUEST_MARKERS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: MapMarker[] = [];
+    for (const item of parsed) {
+      const m = normalizeMapMarker(item);
+      if (m) out.push(m);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function saveGuestMarkers(list: MapMarker[]): void {
+  safeWrite(STORAGE_GUEST_MARKERS_KEY, JSON.stringify(list.slice(0, 30)));
+}
+
+function loadGuestCustomAvatars(): { avatars: SavedCustomAvatar[]; activeId: string } {
+  const raw = safeRead(STORAGE_GUEST_AVATARS_KEY);
+  const activeId = safeRead(STORAGE_GUEST_ACTIVE_AVATAR_KEY) || '';
+  if (!raw) return { avatars: [], activeId };
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return { avatars: [], activeId };
+    const avatars: SavedCustomAvatar[] = [];
+    for (const item of parsed) {
+      const av = normalizeSavedCustomAvatar(item);
+      if (av) avatars.push(av);
+    }
+    const validActive = avatars.some((a) => a.id === activeId) ? activeId : '';
+    return { avatars, activeId: validActive };
+  } catch {
+    return { avatars: [], activeId: '' };
+  }
+}
+
+function saveGuestCustomAvatars(avatars: SavedCustomAvatar[], activeId?: string): void {
+  safeWrite(STORAGE_GUEST_AVATARS_KEY, JSON.stringify(avatars.slice(0, 16)));
+  if (activeId !== undefined) {
+    safeWrite(STORAGE_GUEST_ACTIVE_AVATAR_KEY, activeId);
+  }
+}
+
+function normalizeMapMarker(raw: unknown): MapMarker | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const id = String(o.id || '');
+  const wx = Number(o.wx);
+  const wy = Number(o.wy ?? 0);
+  const ws = Number(o.ws);
+  if (!id || !Number.isFinite(wx) || !Number.isFinite(ws)) return null;
+  const colorRaw = typeof o.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(o.color.trim())
+    ? o.color.trim()
+    : '#ffbe3b';
+  return {
+    id,
+    name: String(o.name || '标记点').trim().slice(0, 28) || '标记点',
+    wx,
+    wy: Number.isFinite(wy) ? wy : 0,
+    ws,
+    color: colorRaw,
+    createdAt: Number(o.createdAt) || Math.floor(Date.now() / 1000),
+  };
+}
+
+function normalizeIntruderRecord(raw: unknown): IntruderRecord | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const id = String(o.id || '');
+  if (!id) return null;
+  const liveWx = o.liveWx !== undefined && o.liveWx !== null ? Number(o.liveWx) : undefined;
+  const liveWy = o.liveWy !== undefined && o.liveWy !== null ? Number(o.liveWy) : undefined;
+  const liveWs = o.liveWs !== undefined && o.liveWs !== null ? Number(o.liveWs) : undefined;
+  const lastSeen = o.lastSeen !== undefined && o.lastSeen !== null ? Number(o.lastSeen) : undefined;
+  return {
+    id,
+    room: String(o.room || 'global'),
+    ownerId: String(o.ownerId || ''),
+    intruderAccountId: typeof o.intruderAccountId === 'string' && o.intruderAccountId ? o.intruderAccountId : undefined,
+    intruderClientId: typeof o.intruderClientId === 'string' && o.intruderClientId ? o.intruderClientId : undefined,
+    intruderName: String(o.intruderName || 'Unknown'),
+    gx: Math.floor(Number(o.gx) || 0),
+    gy: Math.floor(Number(o.gy) || 0),
+    gz: Math.floor(Number(o.gz) || 0),
+    blockType: Math.max(1, Math.min(10, Math.floor(Number(o.blockType) || 1))),
+    action: String(o.action || 'break'),
+    createdAt: Number(o.createdAt) || Math.floor(Date.now() / 1000),
+    liveWx: liveWx !== undefined && Number.isFinite(liveWx) ? liveWx : undefined,
+    liveWy: liveWy !== undefined && Number.isFinite(liveWy) ? liveWy : undefined,
+    liveWs: liveWs !== undefined && Number.isFinite(liveWs) ? liveWs : undefined,
+    online: typeof o.online === 'boolean' ? o.online : undefined,
+    lastSeen: lastSeen !== undefined && Number.isFinite(lastSeen) ? lastSeen : undefined,
+  };
+}
+
+function normalizeMapPlayer(raw: unknown): MapOnlinePlayer | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const id = String(o.id || '');
+  const wx = Number(o.wx);
+  const wy = Number(o.wy ?? 0);
+  const ws = Number(o.ws);
+  if (!id || !Number.isFinite(wx) || !Number.isFinite(ws)) return null;
+  return {
+    id,
+    accountId: typeof o.accountId === 'string' && o.accountId ? o.accountId : undefined,
+    name: String(o.name || 'Rider'),
+    wx,
+    wy: Number.isFinite(wy) ? wy : 0,
+    ws,
+    onFoot: typeof o.onFoot === 'boolean' ? o.onFoot : undefined,
+  };
+}
+
+function normalizeSavedCustomAvatar(raw: unknown): SavedCustomAvatar | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const id = String(o.id || '');
+  const skin = sanitizeCustomSkin(o.skin);
+  if (!id || !skin) return null;
+  const portrait =
+    typeof o.portraitDataUrl === 'string' && o.portraitDataUrl.startsWith('data:image/')
+      ? o.portraitDataUrl.slice(0, 32768)
+      : undefined;
+  return {
+    id,
+    name: String(o.name || '自定义形象').trim().slice(0, 28) || '自定义形象',
+    prompt: typeof o.prompt === 'string' ? o.prompt.slice(0, 200) : undefined,
+    portraitDataUrl: portrait,
+    skin,
+    createdAt: Number(o.createdAt) || Math.floor(Date.now() / 1000),
+  };
+}
+
 function normalizeBlueprint(raw: unknown): ServerBlueprint | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
@@ -418,6 +622,8 @@ export class ServerClient {
   private disposed = false;
   private readonly cb: ServerClientCallbacks;
   private lastEconomyState: EconomyState;
+  private lastPosSendMs = 0;
+  private lastPosOnFoot: boolean | null = null;
 
   constructor(clientId: string, playerName: string, cb: ServerClientCallbacks) {
     this.clientId = clientId;
@@ -779,13 +985,18 @@ export class ServerClient {
         st.inventory[b] = Math.min(cap, cur + add);
         st.coins -= totalPrice;
       } else if (spec.kind === 'bag') {
-        if (st.bagCapacity >= 12) return { ok: false, state: st, error: '道具道路袋已达最大容量 (12格)' };
+        if (st.bagCapacity >= 12) return { ok: false, state: st, error: '道具袋已达最大容量 (12格)' };
         st.bagCapacity = Math.min(12, st.bagCapacity + (spec.qty ?? 3) * safeQty);
         st.coins -= totalPrice;
       } else if (spec.kind === 'shield') {
         const now = Math.floor(Date.now() / 1000);
         const base = Math.max(now, st.shieldUntil || 0);
         st.shieldUntil = base + (spec.durationSec ?? 600) * safeQty;
+        st.coins -= totalPrice;
+      } else if (spec.kind === 'teleport') {
+        const cur = st.teleportCards ?? 0;
+        if (cur >= 50) return { ok: false, state: st, error: '传送卡数量已达上限 (50张)' };
+        st.teleportCards = Math.min(50, cur + (spec.qty ?? 1) * safeQty);
         st.coins -= totalPrice;
       }
       saveGuestEconomyState(st);
@@ -822,8 +1033,8 @@ export class ServerClient {
   async stashBagItem(item: ItemType): Promise<{ ok: boolean; state: EconomyState; error?: string }> {
     const stashLocal = (): { ok: boolean; state: EconomyState; error?: string } => {
       const st = loadGuestEconomyState();
-      if (st.bagCapacity <= 0) return { ok: false, state: st, error: '请先在商店购买道具道路袋' };
-      if (st.savedItems.length >= st.bagCapacity) return { ok: false, state: st, error: '道具道路袋已满' };
+      if (st.bagCapacity <= 0) return { ok: false, state: st, error: '请先在商店购买道具袋' };
+      if (st.savedItems.length >= st.bagCapacity) return { ok: false, state: st, error: '道具袋已满' };
       st.savedItems.push(item);
       saveGuestEconomyState(st);
       this.lastEconomyState = st;
@@ -1122,6 +1333,417 @@ export class ServerClient {
     return st;
   }
 
+  // -------------------------------------------------------------------------
+  // TELEPORT CARDS, WORLD MAP MARKERS, INTRUDER TRACKING & CUSTOM AVATARS
+  // -------------------------------------------------------------------------
+
+  async useTeleportCard(): Promise<{ ok: boolean; state?: EconomyState; error?: string }> {
+    const useLocal = (): { ok: boolean; state: EconomyState; error?: string } => {
+      const st = loadGuestEconomyState();
+      if ((st.teleportCards ?? 0) <= 0) {
+        return { ok: false, state: st, error: '传送卡不足，请前往世界商店购买' };
+      }
+      st.teleportCards = Math.max(0, (st.teleportCards ?? 0) - 1);
+      saveGuestEconomyState(st);
+      this.lastEconomyState = st;
+      return { ok: true, state: st };
+    };
+
+    if (!this.token) {
+      return useLocal();
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/economy/teleport/use`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return {
+          ok: false,
+          state: this.lastEconomyState,
+          error: String(data.error || `HTTP ${res.status}`),
+        };
+      }
+      const state = normalizeEconomyState(data);
+      this.lastEconomyState = state;
+      return { ok: true, state };
+    } catch {
+      return useLocal();
+    }
+  }
+
+  async getMapMarkers(): Promise<MapMarker[]> {
+    if (!this.token) {
+      return loadGuestMarkers();
+    }
+    try {
+      const res = await fetch(`${this.serverUrl}/api/map/markers`, {
+        method: 'GET',
+        headers: this.authHeaders(false),
+      });
+      if (!res.ok) return loadGuestMarkers();
+      const data = (await res.json()) as Record<string, unknown>;
+      const rawList = Array.isArray(data.markers)
+        ? data.markers
+        : Array.isArray(data)
+          ? data
+          : [];
+      const markers: MapMarker[] = [];
+      for (const item of rawList) {
+        const m = normalizeMapMarker(item);
+        if (m) markers.push(m);
+      }
+      return markers;
+    } catch {
+      return loadGuestMarkers();
+    }
+  }
+
+  async saveMapMarker(m: {
+    name: string;
+    wx: number;
+    wy: number;
+    ws: number;
+    color?: string;
+  }): Promise<{ ok: boolean; marker?: MapMarker; error?: string }> {
+    const cleanName = m.name.trim().slice(0, 28) || '标记点';
+    const cleanColor =
+      typeof m.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(m.color.trim())
+        ? m.color.trim()
+        : '#ffbe3b';
+
+    const saveLocal = (): { ok: boolean; marker?: MapMarker; error?: string } => {
+      const existing = loadGuestMarkers();
+      if (existing.length >= 30) {
+        return { ok: false, error: '最多保存 30 个地图标记' };
+      }
+      const created: MapMarker = {
+        id: `local_mk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: cleanName,
+        wx: Number.isFinite(m.wx) ? m.wx : 0,
+        wy: Number.isFinite(m.wy) ? m.wy : 0,
+        ws: Number.isFinite(m.ws) ? m.ws : 0,
+        color: cleanColor,
+        createdAt: Math.floor(Date.now() / 1000),
+      };
+      existing.unshift(created);
+      saveGuestMarkers(existing);
+      return { ok: true, marker: created };
+    };
+
+    if (!this.token) {
+      return saveLocal();
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/map/markers`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({
+          name: cleanName,
+          wx: m.wx,
+          wy: m.wy,
+          ws: m.ws,
+          color: cleanColor,
+        }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      const created = normalizeMapMarker(data.marker ?? data);
+      if (created) return { ok: true, marker: created };
+      return saveLocal();
+    } catch {
+      return saveLocal();
+    }
+  }
+
+  async deleteMapMarker(id: string): Promise<{ ok: boolean; error?: string }> {
+    const deleteLocal = (): void => {
+      const next = loadGuestMarkers().filter((m) => m.id !== id);
+      saveGuestMarkers(next);
+    };
+
+    if (!this.token || id.startsWith('local_mk_')) {
+      deleteLocal();
+      return { ok: true };
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/map/markers/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: this.authHeaders(false),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : '删除标记失败' };
+    }
+  }
+
+  async getIntruderRecords(room?: string): Promise<IntruderRecord[]> {
+    if (!this.token) return [];
+    const targetRoom = room ?? this.roomSlug;
+    try {
+      const res = await fetch(
+        `${this.serverUrl}/api/intruders?room=${encodeURIComponent(targetRoom)}`,
+        {
+          method: 'GET',
+          headers: this.authHeaders(false),
+        }
+      );
+      if (!res.ok) return [];
+      const data = (await res.json()) as Record<string, unknown>;
+      const rawList = Array.isArray(data.records)
+        ? data.records
+        : Array.isArray(data)
+          ? data
+          : [];
+      const records: IntruderRecord[] = [];
+      for (const item of rawList) {
+        const rec = normalizeIntruderRecord(item);
+        if (rec) records.push(rec);
+      }
+      return records;
+    } catch {
+      return [];
+    }
+  }
+
+  async dismissIntruderRecord(id: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.token) return { ok: true };
+    try {
+      const res = await fetch(`${this.serverUrl}/api/intruders/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: this.authHeaders(false),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : '移除入侵记录失败' };
+    }
+  }
+
+  async getMapPlayers(room?: string): Promise<MapOnlinePlayer[]> {
+    const targetRoom = room ?? this.roomSlug;
+    try {
+      const res = await fetch(
+        `${this.serverUrl}/api/map/players?room=${encodeURIComponent(targetRoom)}`,
+        {
+          method: 'GET',
+          headers: this.authHeaders(false),
+        }
+      );
+      if (!res.ok) return [];
+      const data = (await res.json()) as Record<string, unknown>;
+      const rawList = Array.isArray(data.players)
+        ? data.players
+        : Array.isArray(data)
+          ? data
+          : [];
+      const players: MapOnlinePlayer[] = [];
+      for (const item of rawList) {
+        const p = normalizeMapPlayer(item);
+        if (p) players.push(p);
+      }
+      return players;
+    } catch {
+      return [];
+    }
+  }
+
+  async getCustomAvatars(): Promise<{ avatars: SavedCustomAvatar[]; activeId: string }> {
+    if (!this.token) {
+      return loadGuestCustomAvatars();
+    }
+    try {
+      const res = await fetch(`${this.serverUrl}/api/avatars`, {
+        method: 'GET',
+        headers: this.authHeaders(false),
+      });
+      if (!res.ok) return loadGuestCustomAvatars();
+      const data = (await res.json()) as Record<string, unknown>;
+      const rawList = Array.isArray(data.avatars) ? data.avatars : [];
+      const avatars: SavedCustomAvatar[] = [];
+      for (const item of rawList) {
+        const av = normalizeSavedCustomAvatar(item);
+        if (av) avatars.push(av);
+      }
+      const activeId = typeof data.activeId === 'string' ? data.activeId : '';
+      return { avatars, activeId };
+    } catch {
+      return loadGuestCustomAvatars();
+    }
+  }
+
+  async saveCustomAvatar(
+    av: Omit<SavedCustomAvatar, 'id' | 'createdAt'>
+  ): Promise<{
+    ok: boolean;
+    avatar?: SavedCustomAvatar;
+    avatars?: SavedCustomAvatar[];
+    activeId?: string;
+    error?: string;
+  }> {
+    const cleanSkin = sanitizeCustomSkin(av.skin);
+    if (!cleanSkin) {
+      return { ok: false, error: '自定义形象数据无效' };
+    }
+    const payload: Omit<SavedCustomAvatar, 'id' | 'createdAt'> = {
+      name: av.name.trim().slice(0, 28) || '自定义形象',
+      prompt: av.prompt ? av.prompt.trim().slice(0, 200) : undefined,
+      portraitDataUrl:
+        av.portraitDataUrl && av.portraitDataUrl.startsWith('data:image/')
+          ? av.portraitDataUrl.slice(0, 32768)
+          : undefined,
+      skin: cleanSkin,
+    };
+
+    const saveLocal = (): {
+      ok: boolean;
+      avatar?: SavedCustomAvatar;
+      avatars?: SavedCustomAvatar[];
+      activeId?: string;
+      error?: string;
+    } => {
+      const cur = loadGuestCustomAvatars();
+      const created: SavedCustomAvatar = {
+        ...payload,
+        id: `local_av_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        createdAt: Math.floor(Date.now() / 1000),
+      };
+      const next = [created, ...cur.avatars].slice(0, 16);
+      saveGuestCustomAvatars(next, created.id);
+      return { ok: true, avatar: created, avatars: next, activeId: created.id };
+    };
+
+    if (!this.token) {
+      return saveLocal();
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/avatars`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify(payload),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      const created = normalizeSavedCustomAvatar(data.avatar) ?? undefined;
+      const avatars: SavedCustomAvatar[] | undefined = Array.isArray(data.avatars)
+        ? (data.avatars
+            .map((item) => normalizeSavedCustomAvatar(item))
+            .filter((x): x is SavedCustomAvatar => x !== null))
+        : undefined;
+      const activeId = typeof data.activeId === 'string' ? data.activeId : created?.id;
+      return { ok: true, avatar: created, avatars, activeId };
+    } catch {
+      return saveLocal();
+    }
+  }
+
+  async setActiveCustomAvatar(
+    id: string
+  ): Promise<{ ok: boolean; activeId?: string; error?: string }> {
+    const cleanId = id.trim();
+    const setLocal = (): { ok: boolean; activeId: string } => {
+      const cur = loadGuestCustomAvatars();
+      const nextActive = cleanId && cur.avatars.some((a) => a.id === cleanId) ? cleanId : '';
+      saveGuestCustomAvatars(cur.avatars, nextActive);
+      return { ok: true, activeId: nextActive };
+    };
+
+    if (!this.token) {
+      return setLocal();
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/avatars/active`, {
+        method: 'PUT',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({ id: cleanId }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      const activeId = typeof data.activeId === 'string' ? data.activeId : cleanId;
+      return { ok: true, activeId };
+    } catch {
+      return setLocal();
+    }
+  }
+
+  async deleteCustomAvatar(
+    id: string
+  ): Promise<{ ok: boolean; avatars?: SavedCustomAvatar[]; activeId?: string; error?: string }> {
+    const deleteLocal = (): { ok: boolean; avatars: SavedCustomAvatar[]; activeId: string } => {
+      const cur = loadGuestCustomAvatars();
+      const next = cur.avatars.filter((a) => a.id !== id);
+      const nextActive = cur.activeId === id ? '' : cur.activeId;
+      saveGuestCustomAvatars(next, nextActive);
+      return { ok: true, avatars: next, activeId: nextActive };
+    };
+
+    if (!this.token || id.startsWith('local_av_')) {
+      return deleteLocal();
+    }
+
+    try {
+      const res = await fetch(`${this.serverUrl}/api/avatars/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: this.authHeaders(false),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: String(data.error || `HTTP ${res.status}`) };
+      }
+      const avatars: SavedCustomAvatar[] | undefined = Array.isArray(data.avatars)
+        ? (data.avatars
+            .map((item) => normalizeSavedCustomAvatar(item))
+            .filter((x): x is SavedCustomAvatar => x !== null))
+        : undefined;
+      const activeId = typeof data.activeId === 'string' ? data.activeId : undefined;
+      return { ok: true, avatars, activeId };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : '删除形象失败' };
+    }
+  }
+
+  sendPlayerPosition(wx: number, wy: number, ws: number, onFoot: boolean): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!Number.isFinite(wx) || !Number.isFinite(wy) || !Number.isFinite(ws)) return;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const minInterval = this.lastPosOnFoot !== null && this.lastPosOnFoot !== onFoot ? 250 : 950;
+    if (now - this.lastPosSendMs < minInterval) return;
+    this.lastPosSendMs = now;
+    this.lastPosOnFoot = onFoot;
+    try {
+      this.ws.send(
+        JSON.stringify({
+          t: 'pos',
+          wx: Math.round(wx * 100) / 100,
+          wy: Math.round(wy * 100) / 100,
+          ws: Math.round(ws * 100) / 100,
+          onFoot,
+        })
+      );
+    } catch {
+      // Ignore send error
+    }
+  }
+
   sendVoxel(
     op: 'set' | 'del' | 'clear',
     gx = 0,
@@ -1277,6 +1899,11 @@ export class ServerClient {
             String(msg.ownerName || ''),
             Math.max(0, Math.floor(Number(msg.remainingSec) || 0))
           );
+        } else if (msg.t === 'intruder_alert' && msg.record) {
+          const rec = normalizeIntruderRecord(msg.record);
+          if (rec) {
+            this.cb.onIntruderAlert?.(rec);
+          }
         }
       } catch {
         // Ignore malformed messages
