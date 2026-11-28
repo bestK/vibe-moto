@@ -18,8 +18,8 @@ HD-pixel 3D multiplayer Road Rash on a 2400m cyclic Chinese national highway, bu
 | Chinese Gas Station (`中国加油`) & Delivery Riders | Overloaded Tarp Freight Truck & `国道饭店` Diner |
 | :---: | :---: |
 | ![Chinese gas station canopy, 24H store, delivery riders and crossing dog alert](docs/screenshots/china-gas-station.png) | ![Overloaded tarp cargo truck closeup and roadside Chinese diner ahead](docs/screenshots/china-truck-diner.png) |
-| **Mobile Dual Virtual Joysticks & Sky Telemetry** | **Multi-Item 30s Tray & Bot Sniper Lock** |
-| ![Mobile landscape dual virtual joysticks and slim sky HP/Nitro telemetry](docs/screenshots/mobile-dual-joysticks.png) | ![Multi-item 30s tray, bot sniper laser warning and lap standings](docs/screenshots/multi-items-bot-sniper.png) |
+| **Mobile Dual Joysticks, Pixel Icons & Wide Standings** | **Room Lobby, Password Rooms & Live `EN / 中` i18n** |
+| ![Mobile landscape dual virtual joysticks, pixel SVG icons and expanded standings](docs/screenshots/mobile-dual-joysticks.png) | ![In-game Room Lobby modal with password protection and live English i18n](docs/screenshots/room-lobby-password.png) |
 | **Instant-Play Highway & 9 Pixel Avatars** | **EMQX 5m Pack Spawn & Custom Avatar Sync** |
 | ![Instant-play HD-pixel highway with 9 code-generated pixel avatars](docs/screenshots/gameplay-avatars.png) | ![Dual-client EMQX 5m pack spawn with synced custom avatar](docs/screenshots/multiplayer-5m-spawn.png) |
 
@@ -36,7 +36,9 @@ HD-pixel 3D multiplayer Road Rash on a 2400m cyclic Chinese national highway, bu
 - **Mobile Dual Virtual Joysticks & Zero-Obstruction Sky HUD** — Semi-transparent simultaneous multi-touch joysticks on both sides (**Left**: proportional steer + Up Nitro + Down Brake; **Right**: Left/Right attack + Up Wheelie Charge / Release Slam + Down Use Item + Center Tap Auto-Strike), a slim `HP` / `N2O` / `KM/H` sky telemetry strip, single-row bottom weapon dock, plus optional `🧭` gyroscope tilt steering (portrait/landscape auto-calibration) and open-canvas tap-to-attack.
 - **9 Pure-Code Pixel Avatars + Custom Base64 Sync** — Rename inline, pick from 9 procedural 32×32 pixel avatars, or upload any custom image—center-cropped & compressed on the frontend to WebP/JPEG (`<3.2 KB`) and synced over EMQX to standings & 3D nameplates.
 - **Studio Hybrid Audio (`vibe-motion/sound`)** — Pairs **18 CC0 studio SFX** (`152 KB` total, lazy-loaded via [`vibe-motion/sound`](https://github.com/vibe-motion/sound)) with a triple-oscillator boxer motorcycle engine synth, `DynamicsCompressorNode` master bus, stereo Doppler sweeps, and seamless procedural fallback.
-- **Zero-Config EMQX Multiplayer & High Performance** — Connects to `wss://broker.emqx.io:8084/mqtt` with **5m behind-last-player spawn**, one-click regroup (`⌖`), and fast tab-close cleanup. Sole runtime dependency is `three`, featuring a zero-dep native WebSocket MQTT 3.1.1 client, instanced traffic/scenery/animals/crates, progressive road LOD, steady **60 FPS**, and **~13 MB JS heap**.
+- **44 Pixel-Art SVG Icons & Live `中 / EN` i18n** — Zero system emojis across the entire UI: every weapon, powerup, animal, alert, and toolbar button uses handcrafted 16×16 `crispEdges` inline SVGs, paired with an instant reload-free `中 / EN` toggle covering HUD, standings, 3D nameplates, and room lobby.
+- **In-Game Room Lobby & Password-Protected Rooms** — Open the Home modal anytime to generate or create custom rooms with optional password protection (client-side SHA-256 topic isolation on EMQX with zero plaintext password in the URL or wire), copy 1-click invite links, and jump between recent rooms or the public hall.
+- **Zero-Config EMQX Multiplayer & High Performance** — Connects to `wss://broker.emqx.io:8084/mqtt` with **5m behind-last-player spawn**, one-click regroup, and fast tab-close cleanup. Sole runtime dependency is `three`, featuring a zero-dep native WebSocket MQTT 3.1.1 client, instanced traffic/scenery/animals/crates, progressive road LOD, steady **60 FPS**, and **~13 MB JS heap**.
 
 ### Controls
 
@@ -61,7 +63,7 @@ HD-pixel 3D multiplayer Road Rash on a 2400m cyclic Chinese national highway, bu
 
 ### Multiplayer Rooms
 
-Share a URL with `?room=<name>` to race in an isolated room:
+Click the **Home** icon in the top toolbar to create/join a custom room, set an optional password (SHA-256 client-side topic isolation; passwords never appear in invite URLs or broker traffic), copy an invite link, or switch recent rooms. You can also share a direct room link:
 
 ```text
 https://bestk.github.io/vibe-moto/?room=friday-night
@@ -99,7 +101,9 @@ pnpm build
 - **移动端双虚拟摇杆 + 天空区零遮挡状态栏** — 两侧半透明多点触控双摇杆（**左摇杆**：线性转向 / 上推氮气 / 下拉刹车；**右摇杆**：左右挥击 / 上推翘头蓄力松手猛压 / 下拉使用道具 / 轻点中心自动攻击），搭配顶部天空区超窄 `HP` / `N2O` / 车速条与底部单行武器栏，零遮挡赛道视野；同时保留 `🧭` 陀螺仪重力转向（横竖屏自动校准）与空地轻触攻击。
 - **9 款纯代码像素头像 + 自定义头像压缩同步** — 点击左上角名牌快捷改名并切换 9 款 32×32 纯代码像素头像，也可上传自定义图片——前端自动居中裁切压缩为 `<3.2 KB` WebP/JPEG base64，经 EMQX 实时同步到全员排行榜与 3D 车手名牌。
 - **工作室级混合音频引擎（`vibe-motion/sound`）** — 内置经 [`vibe-motion/sound`](https://github.com/vibe-motion/sound) 精选压制的 **18 条 CC0 工作室级音效**（总计仅 `152 KB`，首交互懒加载），搭配三振荡器水平对置摩托引擎合成器、`DynamicsCompressorNode` 母线动态压缩、立体声多普勒扫频与零延迟程序化回退。
-- **免配置 EMQX 实时联机与极致性能** — 直连 `wss://broker.emqx.io:8084/mqtt`，自动空降到最后一名在线玩家后方 **5 米**，支持一键归队（`⌖`）与关页秒级退房清理。唯一运行时依赖为 `three`，自研零依赖原生 WebSocket MQTT 3.1.1 客户端、全实例化车流/动物/场景/货箱、渐进式公路 LOD，稳跑 **60 FPS**、仅占约 **13 MB JS 堆内存**。
+- **44 枚手绘 16×16 像素 SVG 图标与实时 `中 / EN` 切换** — 全界面零系统 Emoji，所有武器、道具、动物、播报与工具栏图标均采用自绘 `crispEdges` 内联像素 SVG；点击 `中 / EN` 即可无刷新热切换全套界面、排行榜、3D 车手名牌与房间大厅语言。
+- **内置房间大厅与密码私密房** — 随时点击顶部主页图标创建/加入自定义房间，可选设置密码（客户端 SHA-256 主题隔离，URL 与网络报文全程零明文密码），支持一键复制邀请链接、最近房间快捷切换与一键返回公共大厅。
+- **免配置 EMQX 实时联机与极致性能** — 直连 `wss://broker.emqx.io:8084/mqtt`，自动空降到最后一名在线玩家后方 **5 米**，支持一键归队与关页秒级退房清理。唯一运行时依赖为 `three`，自研零依赖原生 WebSocket MQTT 3.1.1 客户端、全实例化车流/动物/场景/货箱、渐进式公路 LOD，稳跑 **60 FPS**、仅占约 **13 MB JS 堆内存**。
 
 ### 操作按键
 
@@ -124,7 +128,7 @@ pnpm build
 
 ### 自定义联机房间
 
-在网址后追加 `?room=<房间名>` 即可与好友进入同一独立房间：
+点击顶部**主页**图标即可创建或加入自定义房间、设置可选密码（客户端 SHA-256 隔离，邀请链接与网络包均不含明文密码）、一键复制邀请链接或切换最近房间；也可直接分享带参网址：
 
 ```text
 https://bestk.github.io/vibe-moto/?room=friday-night

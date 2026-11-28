@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { getLang, type Lang } from '../i18n';
 import { BIKE_PALETTES, BOT_PALETTE, BikePalette, RiderRenderState, WeaponType } from './types';
 import { getChinaAtlas } from './ChinaTextures';
 import { getAvatarVersion } from './PixelAvatars';
@@ -199,6 +200,7 @@ export class BikeVisual {
   private lastPlateAvatar = -1;
   private lastPlateAvatarVer = -1;
   private lastPlateEnraged = false;
+  private lastPlateLang: Lang | '' = '';
   private lastColorIdx = -1;
   private isBot = false;
   private deliveryRole: 'meituan' | 'eleme' | null = null;
@@ -642,22 +644,25 @@ export class BikeVisual {
       this.updateCombatLimbs(state.weapon, state.attackSide, state.attackPhase);
     }
 
-    // Update nameplate sprite only when name, rounded HP, avatar index, custom avatar version, or rage changes
+    // Update nameplate sprite only when name, rounded HP, avatar, rage, or UI language changes
     if (this.plateSprite && this.plateCanvas && this.plateTex) {
       const hpBucket = Math.round(state.hp / 4) * 4;
       const avatarVer = getAvatarVersion(state.id);
+      const lang = getLang();
       if (
         state.name !== this.lastPlateName ||
         hpBucket !== this.lastPlateHp ||
         state.avatarIdx !== this.lastPlateAvatar ||
         avatarVer !== this.lastPlateAvatarVer ||
-        enraged !== this.lastPlateEnraged
+        enraged !== this.lastPlateEnraged ||
+        lang !== this.lastPlateLang
       ) {
         this.lastPlateName = state.name;
         this.lastPlateHp = hpBucket;
         this.lastPlateAvatar = state.avatarIdx;
         this.lastPlateAvatarVer = avatarVer;
         this.lastPlateEnraged = enraged;
+        this.lastPlateLang = lang;
         const p =
           role === 'meituan'
             ? MEITUAN_PALETTE

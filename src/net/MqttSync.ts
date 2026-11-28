@@ -21,6 +21,14 @@ export interface PackSpawnTarget {
   speed: number;
 }
 
+export interface RoomJoinResult {
+  ok: boolean;
+  error?: 'password_required' | 'wrong_password' | 'invalid_room';
+  room: string;
+  locked: boolean;
+  created?: boolean;
+}
+
 export interface MqttCallbacks {
   onStatus(status: ConnectionStatus): void;
   onInitialPackSpawn(target: PackSpawnTarget): void;
@@ -28,10 +36,17 @@ export interface MqttCallbacks {
   onPeerEvent?(msg: string): void;
   onItemEvent?(ev: ItemNetEvent): void;
   onRemoteCustomAvatar?(peerId: string, dataUrl: string | null): void;
+  onRoomPasswordRequired?(roomSlug: string): void;
 }
 
 const BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';
 const TOPIC_VERSION = 'vmoto/v2';
+const META_TOPIC_PREFIX = `${TOPIC_VERSION}/meta/`;
+const ROOM_META_TTL_MS = 86_400_000; // 24 hours
+const META_POST_SUBACK_WAIT_MS = 320;
+const META_QUERY_HARD_TIMEOUT_MS = 1_500;
+const CONNECT_WAIT_TIMEOUT_MS = 5_000;
+
 const STATE_PACKET_MIN_BYTES = 32;
 const STATE_PACKET_BYTES = 34;
 
@@ -70,6 +85,125 @@ const EMPTY_BYTES = new Uint8Array(0);
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+
+// ---- Pure-TS Deterministic SHA-256 (works on HTTPS, localhost & plain HTTP LAN) ----
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+const SHA256_W = new Uint32Array(64);
+
+function hashHex(input: string, len = 12): string {
+  const bytes = textEncoder.encode(input);
+  const bitLen = bytes.byteLength * 8;
+  const paddedLen = (((bytes.byteLength + 9 + 63) >>> 6) << 6);
+  const buf = new Uint8Array(paddedLen);
+  buf.set(bytes, 0);
+  buf[bytes.byteLength] = 0x80;
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(paddedLen - 8, Math.floor(bitLen / 0x1_0000_0000), false);
+  dv.setUint32(paddedLen - 4, bitLen >>> 0, false);
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+
+  for (let off = 0; off < paddedLen; off += 64) {
+    for (let i = 0; i < 16; i++) {
+      SHA256_W[i] = dv.getUint32(off + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const w15 = SHA256_W[i - 15];
+      const w2 = SHA256_W[i - 2];
+      const s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
+      const s1 = ((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10);
+      SHA256_W[i] = (SHA256_W[i - 16] + s0 + SHA256_W[i - 7] + s1) >>> 0;
+    }
+
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + SHA256_K[i] + SHA256_W[i]) >>> 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) >>> 0;
+
+      h = g;
+      g = f;
+      f = e;
+      e = (d + t1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (t1 + t2) >>> 0;
+    }
+
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+
+  const hex =
+    h0.toString(16).padStart(8, '0') +
+    h1.toString(16).padStart(8, '0') +
+    h2.toString(16).padStart(8, '0') +
+    h3.toString(16).padStart(8, '0') +
+    h4.toString(16).padStart(8, '0') +
+    h5.toString(16).padStart(8, '0') +
+    h6.toString(16).padStart(8, '0') +
+    h7.toString(16).padStart(8, '0');
+  return hex.slice(0, len);
+}
+
+function verifyHash(slug: string, pwd: string): string {
+  return hashHex(`vmoto:v2:verify:${slug}:${pwd}`, 16);
+}
+
+function channelHash(slug: string, pwd: string): string {
+  return hashHex(`vmoto:v2:chan:${slug}:${pwd}`, 12);
+}
+
+interface RoomMeta {
+  l: boolean;
+  h: string;
+  ts: number;
+}
+
+interface PendingMetaQuery {
+  topic: string;
+  packetId: number;
+  subackReceived: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  hardTimer: ReturnType<typeof setTimeout> | null;
+  resolve: (meta: RoomMeta | null) => void;
+}
 
 interface PeerProfile {
   name: string;
@@ -198,6 +332,19 @@ function buildSubscribePacket(packetId: number, topicFilter: string): Uint8Array
   return pkt;
 }
 
+function buildUnsubscribePacket(packetId: number, topicFilter: string): Uint8Array {
+  const topicBytes = textEncoder.encode(topicFilter);
+  const remaining = 2 + 2 + topicBytes.byteLength;
+  const pkt = new Uint8Array(1 + varIntSize(remaining) + remaining);
+  let o = 0;
+  pkt[o++] = 0xa2; // UNSUBSCRIBE (reserved flags MUST be 0x02 in MQTT 3.1.1)
+  o = writeVarInt(pkt, o, remaining);
+  pkt[o++] = (packetId >>> 8) & 0xff;
+  pkt[o++] = packetId & 0xff;
+  writeMqttString(pkt, o, topicBytes);
+  return pkt;
+}
+
 function buildPublishPacket(topicBytes: Uint8Array, payloadBytes: Uint8Array, retain: boolean): Uint8Array {
   const remaining = 2 + topicBytes.byteLength + payloadBytes.byteLength;
   const pkt = new Uint8Array(1 + varIntSize(remaining) + remaining);
@@ -263,22 +410,25 @@ function createEmptySnapshot(): StateSnapshot {
   };
 }
 
-function sanitizeRoom(raw: string | null): string {
-  if (!raw) return 'global';
+function sanitizeRoom(raw: string | null | undefined): string {
+  if (!raw) return '';
   const cleaned = raw
+    .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 24)
-    .replace(/-+$/g, '');
-  return cleaned.length > 0 ? cleaned : 'global';
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/_{2,}/g, '_') // Reserve '__' exclusively for locked channel isolation
+    .replace(/^[-_]+|[-_]+$/g, '')
+    .slice(0, 20)
+    .replace(/[-_]+$/g, '');
+  if (!cleaned || cleaned === 'meta') return '';
+  return cleaned;
 }
 
 function readRoomFromLocation(): string {
   if (typeof window === 'undefined' || !window.location?.search) return 'global';
   try {
     const params = new URLSearchParams(window.location.search);
-    return sanitizeRoom(params.get('room'));
+    return sanitizeRoom(params.get('room')) || 'global';
   } catch {
     return 'global';
   }
@@ -324,43 +474,80 @@ function isValidItemType(val: unknown): val is ItemType {
   return typeof val === 'string' && Object.prototype.hasOwnProperty.call(ITEM_BY_ID, val);
 }
 
+function parseRoomMeta(payload: Uint8Array): RoomMeta | null {
+  if (payload.byteLength === 0) return null;
+  try {
+    const parsed = JSON.parse(textDecoder.decode(payload));
+    if (!parsed || typeof parsed !== 'object') return null;
+    const obj = parsed as Record<string, unknown>;
+    const l = Boolean(obj.l);
+    const h = typeof obj.h === 'string' ? obj.h : '';
+    const ts = typeof obj.ts === 'number' && Number.isFinite(obj.ts) ? obj.ts : 0;
+    return { l, h, ts };
+  } catch {
+    return null;
+  }
+}
+
+function isFreshLockedMeta(meta: RoomMeta | null): boolean {
+  return (
+    meta !== null &&
+    meta.l === true &&
+    meta.h.length > 0 &&
+    Date.now() - meta.ts < ROOM_META_TTL_MS
+  );
+}
+
 export class MqttSync {
   readonly clientId: string;
-  readonly room: string;
+
+  private _displayRoom: string;
+  private _isRoomLocked = false;
+  private channelRoom: string;
 
   private readonly callbacks: MqttCallbacks;
-  private readonly topicPrefix: string;
-  private readonly topicState: string;
-  private readonly topicProfile: string;
-  private readonly topicAvatar: string;
-  private readonly topicEvents: string;
-  private readonly topicWildcard: string;
-  private readonly statePrefix: string;
-  private readonly profilePrefix: string;
-  private readonly avatarPrefix: string;
 
-  // Pre-encoded topic byte slices & zero-GC reusable binary state PUBLISH packet
-  private readonly topicProfileBytes: Uint8Array;
-  private readonly topicAvatarBytes: Uint8Array;
-  private readonly topicEventsBytes: Uint8Array;
-  private readonly clearAvatarPacket: Uint8Array;
-  private readonly unloadCoalescedPacket: Uint8Array;
-  private readonly disposeCoalescedPacket: Uint8Array;
-  private readonly statePacketBuf: Uint8Array;
-  private readonly statePayloadView: DataView;
+  // Dynamic room topic strings & pre-allocated zero-GC binary state PUBLISH packet
+  private topicPrefix = '';
+  private topicState = '';
+  private topicProfile = '';
+  private topicAvatar = '';
+  private topicEvents = '';
+  private topicWildcard = '';
+  private statePrefix = '';
+  private profilePrefix = '';
+  private avatarPrefix = '';
+
+  private topicProfileBytes!: Uint8Array;
+  private topicAvatarBytes!: Uint8Array;
+  private topicEventsBytes!: Uint8Array;
+  private clearAvatarPacket!: Uint8Array;
+  private unloadCoalescedPacket!: Uint8Array;
+  private disposeCoalescedPacket!: Uint8Array;
+  private statePacketBuf!: Uint8Array;
+  private statePayloadView!: DataView;
   private readonly pubackBuf = new Uint8Array([0x40, 0x02, 0x00, 0x00]);
 
   private ws: WebSocket | null = null;
   private mqttConnected = false;
+  private activeInRoom = false;
+  private pendingInitialMetaCheck = false;
+  private awaitingPassword = false;
   private status: ConnectionStatus = 'offline';
   private disposed = false;
   private didSendBye = false;
   private connectStarted = false;
 
   private packetId = 1;
+  private roomSubPacketId = 0;
+  private roomSwitchGen = 0;
   private reconnectAttempt = 0;
   private awaitingPingResp = false;
   private rxRemainder: Uint8Array | null = null;
+
+  private connectWaiters: Array<() => void> = [];
+  private metaQuery: PendingMetaQuery | null = null;
+  private pendingMetaPacket: Uint8Array | null = null;
 
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -379,7 +566,7 @@ export class MqttSync {
   private prevLocalAttackSide: 0 | 1 | 2 = 0;
   private prevLocalCrashed = false;
 
-  // Initial pack discovery window state (runs ONCE per session)
+  // Initial pack discovery window state (runs once per joined room)
   private initialSpawnDone = false;
   private subackAtMs: number | null = null;
   private firstLivePeerAtMs: number | null = null;
@@ -401,7 +588,10 @@ export class MqttSync {
     initialCustomAvatar: string | null = null
   ) {
     this.clientId = generateClientId();
-    this.room = readRoomFromLocation();
+    const initialSlug = readRoomFromLocation();
+    this._displayRoom = initialSlug;
+    this.channelRoom = initialSlug;
+    this.pendingInitialMetaCheck = initialSlug !== 'global';
     this.callbacks = callbacks;
 
     this.name = sanitizeName(initialName, fallbackPeerName(this.clientId));
@@ -414,49 +604,19 @@ export class MqttSync {
         ? initialCustomAvatar
         : null;
 
-    this.topicPrefix = `${TOPIC_VERSION}/${this.room}`;
-    this.topicState = `${this.topicPrefix}/s/${this.clientId}`;
-    this.topicProfile = `${this.topicPrefix}/p/${this.clientId}`;
-    this.topicAvatar = `${this.topicPrefix}/a/${this.clientId}`;
-    this.topicEvents = `${this.topicPrefix}/e`;
-    this.topicWildcard = `${this.topicPrefix}/#`;
-    this.statePrefix = `${this.topicPrefix}/s/`;
-    this.profilePrefix = `${this.topicPrefix}/p/`;
-    this.avatarPrefix = `${this.topicPrefix}/a/`;
+    this.configureTopics(this.channelRoom);
+  }
 
-    this.topicProfileBytes = textEncoder.encode(this.topicProfile);
-    this.topicAvatarBytes = textEncoder.encode(this.topicAvatar);
-    this.topicEventsBytes = textEncoder.encode(this.topicEvents);
-    const clearProfilePacket = buildPublishPacket(this.topicProfileBytes, EMPTY_BYTES, true);
-    this.clearAvatarPacket = buildPublishPacket(this.topicAvatarBytes, EMPTY_BYTES, true);
-    const byeEventPacket = buildPublishPacket(
-      this.topicEventsBytes,
-      textEncoder.encode(JSON.stringify({ t: 'bye', id: this.clientId })),
-      false
-    );
+  get room(): string {
+    return this.channelRoom;
+  }
 
-    // Coalesce unload cleanup into a single atomic WS frame WITHOUT DISCONNECT so EMQX LWT always backs up tab close
-    const unloadLen = byeEventPacket.byteLength + clearProfilePacket.byteLength + this.clearAvatarPacket.byteLength;
-    this.unloadCoalescedPacket = new Uint8Array(unloadLen);
-    this.unloadCoalescedPacket.set(byeEventPacket, 0);
-    this.unloadCoalescedPacket.set(clearProfilePacket, byeEventPacket.byteLength);
-    this.unloadCoalescedPacket.set(this.clearAvatarPacket, byeEventPacket.byteLength + clearProfilePacket.byteLength);
+  get displayRoom(): string {
+    return this._displayRoom;
+  }
 
-    // Coalesce programmatic dispose cleanup WITH MQTT DISCONNECT
-    this.disposeCoalescedPacket = new Uint8Array(unloadLen + PKT_DISCONNECT.byteLength);
-    this.disposeCoalescedPacket.set(this.unloadCoalescedPacket, 0);
-    this.disposeCoalescedPacket.set(PKT_DISCONNECT, unloadLen);
-
-    // Pre-allocate fixed PUBLISH frame for 34-byte binary state (0 bytes allocated per tick!)
-    const topicStateBytes = textEncoder.encode(this.topicState);
-    const stateRemaining = 2 + topicStateBytes.byteLength + STATE_PACKET_BYTES;
-    const headerLen = 1 + varIntSize(stateRemaining);
-    this.statePacketBuf = new Uint8Array(headerLen + stateRemaining);
-    let o = 0;
-    this.statePacketBuf[o++] = 0x30; // PUBLISH QoS 0, retain=false
-    o = writeVarInt(this.statePacketBuf, o, stateRemaining);
-    o = writeMqttString(this.statePacketBuf, o, topicStateBytes);
-    this.statePayloadView = new DataView(this.statePacketBuf.buffer, o, STATE_PACKET_BYTES);
+  get isRoomLocked(): boolean {
+    return this._isRoomLocked;
   }
 
   connect(): void {
@@ -470,6 +630,106 @@ export class MqttSync {
     }
 
     this.openSocket();
+  }
+
+  async joinRoom(rawRoom: string, password = ''): Promise<RoomJoinResult> {
+    if (this.disposed) {
+      return { ok: false, error: 'invalid_room', room: '', locked: false };
+    }
+
+    const slug = sanitizeRoom(rawRoom);
+    if (!slug) {
+      return { ok: false, error: 'invalid_room', room: '', locked: false };
+    }
+
+    if (!this.connectStarted) {
+      this.connect();
+    }
+
+    const gen = ++this.roomSwitchGen;
+    const pwd = password.trim();
+
+    // Public hall 'global' is always open & unlocked
+    if (slug === 'global') {
+      this.pendingInitialMetaCheck = false;
+      this.awaitingPassword = false;
+      if (this.channelRoom === 'global' && this.activeInRoom) {
+        this._displayRoom = 'global';
+        this._isRoomLocked = false;
+        return { ok: true, room: 'global', locked: false, created: false };
+      }
+      await this.switchChannel('global', 'global', false, gen);
+      return { ok: true, room: 'global', locked: false, created: false };
+    }
+
+    // Ensure WebSocket is connected before querying room metadata
+    const online = await this.waitForConnected(CONNECT_WAIT_TIMEOUT_MS);
+    if (this.disposed || gen !== this.roomSwitchGen) {
+      return { ok: false, error: 'invalid_room', room: slug, locked: false };
+    }
+
+    const meta = online ? await this.queryRoomMeta(slug) : null;
+    if (this.disposed || gen !== this.roomSwitchGen) {
+      return { ok: false, error: 'invalid_room', room: slug, locked: false };
+    }
+
+    if (meta !== null && isFreshLockedMeta(meta)) {
+      if (!pwd) {
+        return { ok: false, error: 'password_required', room: slug, locked: true };
+      }
+      if (verifyHash(slug, pwd) !== meta.h) {
+        return { ok: false, error: 'wrong_password', room: slug, locked: true };
+      }
+      const isolatedChannel = `${slug}__${channelHash(slug, pwd)}`;
+      this.pendingInitialMetaCheck = false;
+      this.awaitingPassword = false;
+      if (this.channelRoom === isolatedChannel && this.activeInRoom) {
+        this._displayRoom = slug;
+        this._isRoomLocked = true;
+        return { ok: true, room: slug, locked: true, created: false };
+      }
+      await this.switchChannel(slug, isolatedChannel, true, gen);
+      return { ok: true, room: slug, locked: true, created: false };
+    }
+
+    // New or expired/unlocked room
+    this.pendingInitialMetaCheck = false;
+    this.awaitingPassword = false;
+
+    if (pwd) {
+      // Lock the room with retained verifyHash metadata (NEVER plaintext password!)
+      const metaTopicBytes = textEncoder.encode(`${META_TOPIC_PREFIX}${slug}`);
+      const metaPayload = textEncoder.encode(
+        JSON.stringify({
+          l: true,
+          h: verifyHash(slug, pwd),
+          ts: Date.now(),
+        })
+      );
+      this.pendingMetaPacket = buildPublishPacket(metaTopicBytes, metaPayload, true);
+      const isolatedChannel = `${slug}__${channelHash(slug, pwd)}`;
+      await this.switchChannel(slug, isolatedChannel, true, gen);
+      return { ok: true, room: slug, locked: true, created: true };
+    }
+
+    // Clear stale expired lock metadata if present
+    if (meta !== null && meta.l) {
+      const metaTopicBytes = textEncoder.encode(`${META_TOPIC_PREFIX}${slug}`);
+      this.pendingMetaPacket = buildPublishPacket(metaTopicBytes, EMPTY_BYTES, true);
+      if (this.channelRoom === slug && this.activeInRoom && this.isConnected()) {
+        this.sendRaw(this.pendingMetaPacket);
+        this.pendingMetaPacket = null;
+      }
+    }
+
+    if (this.channelRoom === slug && this.activeInRoom) {
+      this._displayRoom = slug;
+      this._isRoomLocked = false;
+      return { ok: true, room: slug, locked: false, created: !meta };
+    }
+
+    await this.switchChannel(slug, slug, false, gen);
+    return { ok: true, room: slug, locked: false, created: !meta };
   }
 
   setName(name: string): void {
@@ -507,11 +767,11 @@ export class MqttSync {
     const clockMs = this.resolveClockMs(nowMs);
     const clampedDt = clamp(Number.isFinite(dt) ? dt : 0, 0, 0.1);
 
-    // 1. Check initial pack discovery window (fires at most once)
+    // 1. Check initial pack discovery window (fires at most once per room join)
     this.checkInitialDiscovery(clockMs);
 
     // 2. Adaptive local state publish (15Hz active / 2.5Hz idle) & retained profile refresh
-    if (this.isConnected()) {
+    if (this.isRoomActive()) {
       const kos = Math.max(0, Math.trunc(local.kos));
       if (kos !== this.lastPublishedKos || clockMs - this.lastProfilePublishMs >= PROFILE_REFRESH_MS) {
         this.lastPublishedKos = kos;
@@ -559,7 +819,7 @@ export class MqttSync {
   }
 
   publishHit(ev: Omit<CombatHitEvent, 't' | 'from' | 'fromName' | 'ts'>): void {
-    if (this.disposed || !this.isConnected()) return;
+    if (this.disposed || !this.isRoomActive()) return;
     const packet: CombatHitEvent = {
       t: 'hit',
       from: this.clientId,
@@ -579,7 +839,7 @@ export class MqttSync {
   }
 
   publishItemEvent(ev: Omit<ItemNetEvent, 'from' | 'fromName' | 'ts'>): void {
-    if (this.disposed || !this.isConnected()) return;
+    if (this.disposed || !this.isRoomActive()) return;
     const packet: ItemNetEvent = {
       ...ev,
       from: this.clientId,
@@ -650,6 +910,8 @@ export class MqttSync {
       window.removeEventListener('beforeunload', this.handleUnload);
     }
 
+    this.cancelMetaQuery(null);
+    this.flushConnectWaiters();
     this.sendCleanDisconnect(true);
     this.clearTimers();
 
@@ -657,6 +919,7 @@ export class MqttSync {
       const ws = this.ws;
       this.ws = null;
       this.mqttConnected = false;
+      this.activeInRoom = false;
       ws.onopen = null;
       ws.onmessage = null;
       ws.onerror = null;
@@ -676,10 +939,235 @@ export class MqttSync {
     this.setStatus('offline');
   }
 
+  // ---- Room Switching & Lock Metadata Helpers ----
+
+  private configureTopics(channelRoom: string): void {
+    this.channelRoom = channelRoom;
+    this.topicPrefix = `${TOPIC_VERSION}/${channelRoom}`;
+    this.topicState = `${this.topicPrefix}/s/${this.clientId}`;
+    this.topicProfile = `${this.topicPrefix}/p/${this.clientId}`;
+    this.topicAvatar = `${this.topicPrefix}/a/${this.clientId}`;
+    this.topicEvents = `${this.topicPrefix}/e`;
+    this.topicWildcard = `${this.topicPrefix}/#`;
+    this.statePrefix = `${this.topicPrefix}/s/`;
+    this.profilePrefix = `${this.topicPrefix}/p/`;
+    this.avatarPrefix = `${this.topicPrefix}/a/`;
+
+    this.topicProfileBytes = textEncoder.encode(this.topicProfile);
+    this.topicAvatarBytes = textEncoder.encode(this.topicAvatar);
+    this.topicEventsBytes = textEncoder.encode(this.topicEvents);
+    const clearProfilePacket = buildPublishPacket(this.topicProfileBytes, EMPTY_BYTES, true);
+    this.clearAvatarPacket = buildPublishPacket(this.topicAvatarBytes, EMPTY_BYTES, true);
+    const byeEventPacket = buildPublishPacket(
+      this.topicEventsBytes,
+      textEncoder.encode(JSON.stringify({ t: 'bye', id: this.clientId })),
+      false
+    );
+
+    // Coalesce unload cleanup into a single atomic WS frame WITHOUT DISCONNECT so EMQX LWT always backs up tab close
+    const unloadLen = byeEventPacket.byteLength + clearProfilePacket.byteLength + this.clearAvatarPacket.byteLength;
+    this.unloadCoalescedPacket = new Uint8Array(unloadLen);
+    this.unloadCoalescedPacket.set(byeEventPacket, 0);
+    this.unloadCoalescedPacket.set(clearProfilePacket, byeEventPacket.byteLength);
+    this.unloadCoalescedPacket.set(this.clearAvatarPacket, byeEventPacket.byteLength + clearProfilePacket.byteLength);
+
+    // Coalesce programmatic dispose / room-switch cleanup WITH MQTT DISCONNECT
+    this.disposeCoalescedPacket = new Uint8Array(unloadLen + PKT_DISCONNECT.byteLength);
+    this.disposeCoalescedPacket.set(this.unloadCoalescedPacket, 0);
+    this.disposeCoalescedPacket.set(PKT_DISCONNECT, unloadLen);
+
+    // Pre-allocate fixed PUBLISH frame for 34-byte binary state (0 bytes allocated per tick!)
+    const topicStateBytes = textEncoder.encode(this.topicState);
+    const stateRemaining = 2 + topicStateBytes.byteLength + STATE_PACKET_BYTES;
+    const headerLen = 1 + varIntSize(stateRemaining);
+    this.statePacketBuf = new Uint8Array(headerLen + stateRemaining);
+    let o = 0;
+    this.statePacketBuf[o++] = 0x30; // PUBLISH QoS 0, retain=false
+    o = writeVarInt(this.statePacketBuf, o, stateRemaining);
+    o = writeMqttString(this.statePacketBuf, o, topicStateBytes);
+    this.statePayloadView = new DataView(this.statePacketBuf.buffer, o, STATE_PACKET_BYTES);
+  }
+
+  private async switchChannel(
+    displayRoom: string,
+    newChannelRoom: string,
+    locked: boolean,
+    gen: number
+  ): Promise<void> {
+    this.cancelMetaQuery(null);
+
+    // Cleanly announce departure & clear old retained profile/avatar if we were active in a previous room
+    if (this.activeInRoom && this.isConnected()) {
+      this.sendCleanDisconnect(true);
+    } else if (this.isConnected()) {
+      this.sendRaw(PKT_DISCONNECT);
+    }
+
+    // Tear down existing socket quietly before opening a fresh socket with updated LWT
+    this.clearTimers();
+    if (this.ws) {
+      const oldWs = this.ws;
+      this.ws = null;
+      this.mqttConnected = false;
+      this.activeInRoom = false;
+      oldWs.onopen = null;
+      oldWs.onmessage = null;
+      oldWs.onerror = null;
+      oldWs.onclose = null;
+      try {
+        oldWs.close(1000);
+      } catch {
+        // Ignore
+      }
+    }
+
+    // Clear all remote state from the previous room
+    for (const peerId of this.customAvatars.keys()) {
+      this.callbacks.onRemoteCustomAvatar?.(peerId, null);
+    }
+    this.peers.clear();
+    this.profiles.clear();
+    this.customAvatars.clear();
+    this.remoteList.length = 0;
+
+    // Reconfigure topics, LWT & pre-allocated binary header, and re-arm 5m behind-last-player discovery
+    this._displayRoom = displayRoom;
+    this._isRoomLocked = locked;
+    this.configureTopics(newChannelRoom);
+
+    this.didSendBye = false;
+    this.initialSpawnDone = false;
+    this.subackAtMs = null;
+    this.firstLivePeerAtMs = null;
+    this.lastStatePublishMs = -Infinity;
+    this.lastProfilePublishMs = -Infinity;
+    this.seq = 0;
+    this.roomSubPacketId = 0;
+
+    if (this.disposed || gen !== this.roomSwitchGen) return;
+
+    this.openSocket();
+    await this.waitForConnected(CONNECT_WAIT_TIMEOUT_MS);
+  }
+
+  private waitForConnected(timeoutMs: number): Promise<boolean> {
+    if (this.isConnected()) return Promise.resolve(true);
+    if (this.disposed) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(this.isConnected()), timeoutMs);
+      this.connectWaiters.push(() => finish(this.isConnected()));
+    });
+  }
+
+  private flushConnectWaiters(): void {
+    if (this.connectWaiters.length === 0) return;
+    const waiters = this.connectWaiters;
+    this.connectWaiters = [];
+    for (let i = 0; i < waiters.length; i++) {
+      waiters[i]();
+    }
+  }
+
+  private queryRoomMeta(slug: string): Promise<RoomMeta | null> {
+    this.cancelMetaQuery(null);
+    if (!this.isConnected() || this.disposed) {
+      return Promise.resolve(null);
+    }
+
+    const topic = `${META_TOPIC_PREFIX}${slug}`;
+    const packetId = this.nextPacketId();
+
+    return new Promise<RoomMeta | null>((resolve) => {
+      const q: PendingMetaQuery = {
+        topic,
+        packetId,
+        subackReceived: false,
+        timer: null,
+        hardTimer: null,
+        resolve,
+      };
+      q.hardTimer = setTimeout(() => {
+        if (this.metaQuery === q) {
+          this.finishMetaQuery(null);
+        }
+      }, META_QUERY_HARD_TIMEOUT_MS);
+
+      this.metaQuery = q;
+      this.sendRaw(buildSubscribePacket(packetId, topic));
+    });
+  }
+
+  private finishMetaQuery(meta: RoomMeta | null): void {
+    const q = this.metaQuery;
+    if (!q) return;
+    this.metaQuery = null;
+    if (q.timer !== null) clearTimeout(q.timer);
+    if (q.hardTimer !== null) clearTimeout(q.hardTimer);
+    if (this.isConnected()) {
+      this.sendRaw(buildUnsubscribePacket(this.nextPacketId(), q.topic));
+    }
+    q.resolve(meta);
+  }
+
+  private cancelMetaQuery(meta: RoomMeta | null): void {
+    const q = this.metaQuery;
+    if (!q) return;
+    this.metaQuery = null;
+    if (q.timer !== null) clearTimeout(q.timer);
+    if (q.hardTimer !== null) clearTimeout(q.hardTimer);
+    q.resolve(meta);
+  }
+
+  private enterActiveRoom(): void {
+    if (this.disposed || !this.isConnected()) return;
+    if (this.pendingMetaPacket !== null) {
+      this.sendRaw(this.pendingMetaPacket);
+      this.pendingMetaPacket = null;
+    }
+    this.activeInRoom = true;
+    const pid = this.nextPacketId();
+    this.roomSubPacketId = pid;
+    this.sendRaw(buildSubscribePacket(pid, this.topicWildcard));
+    this.publishProfile(monotonicNow());
+    if (this.customAvatar !== null) {
+      this.publishCustomAvatar();
+    }
+    this.lastStatePublishMs = -Infinity;
+  }
+
+  private async runInitialUrlLockCheck(slug: string, gen: number): Promise<void> {
+    const meta = await this.queryRoomMeta(slug);
+    if (this.disposed || gen !== this.roomSwitchGen || !this.isConnected()) return;
+
+    this.pendingInitialMetaCheck = false;
+    if (isFreshLockedMeta(meta)) {
+      this._isRoomLocked = true;
+      this.awaitingPassword = true;
+      this.activeInRoom = false;
+      this.callbacks.onRoomPasswordRequired?.(slug);
+      return;
+    }
+
+    this._isRoomLocked = false;
+    this.awaitingPassword = false;
+    this.enterActiveRoom();
+  }
+
   // ---- Native MQTT 3.1.1 WebSocket Transport ----
 
   private isConnected(): boolean {
     return this.mqttConnected && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  private isRoomActive(): boolean {
+    return this.activeInRoom && this.isConnected();
   }
 
   private nextPacketId(): number {
@@ -693,6 +1181,7 @@ export class MqttSync {
 
     this.clearTimers();
     this.mqttConnected = false;
+    this.activeInRoom = false;
     this.awaitingPingResp = false;
     this.rxRemainder = null;
     this.setStatus('connecting');
@@ -744,7 +1233,9 @@ export class MqttSync {
       if (this.ws !== ws) return;
       this.ws = null;
       this.mqttConnected = false;
+      this.activeInRoom = false;
       this.rxRemainder = null;
+      this.cancelMetaQuery(null);
       this.clearTimers();
       if (!this.disposed) {
         this.setStatus('offline');
@@ -896,21 +1387,47 @@ export class MqttSync {
         this.setStatus('online');
         this.startKeepalive();
 
-        // Subscribe to room wildcard (QoS 0)
-        this.sendRaw(buildSubscribePacket(this.nextPacketId(), this.topicWildcard));
-        this.publishProfile(monotonicNow());
-        if (this.customAvatar !== null) {
-          this.publishCustomAvatar();
+        if (this.pendingInitialMetaCheck) {
+          this.flushConnectWaiters();
+          // Verify whether initial URL ?room=<slug> is password-locked before entering
+          void this.runInitialUrlLockCheck(this._displayRoom, this.roomSwitchGen);
+        } else if (!this.awaitingPassword) {
+          this.enterActiveRoom();
+          this.flushConnectWaiters();
+        } else {
+          this.flushConnectWaiters();
         }
-        this.lastStatePublishMs = -Infinity;
         return;
       }
 
       case 9: {
         // SUBACK
         if (bodyEnd - bodyStart < 3) return;
+        const pid = (buf[bodyStart] << 8) | buf[bodyStart + 1];
         const granted = buf[bodyStart + 2];
-        if (granted !== 0x80 && !this.initialSpawnDone && this.subackAtMs === null) {
+
+        if (this.metaQuery && this.metaQuery.packetId === pid) {
+          const q = this.metaQuery;
+          q.subackReceived = true;
+          if (granted === 0x80) {
+            this.finishMetaQuery(null);
+          } else if (q.timer === null) {
+            q.timer = setTimeout(() => {
+              if (this.metaQuery === q) {
+                this.finishMetaQuery(null);
+              }
+            }, META_POST_SUBACK_WAIT_MS);
+          }
+          return;
+        }
+
+        if (
+          this.activeInRoom &&
+          pid === this.roomSubPacketId &&
+          granted !== 0x80 &&
+          !this.initialSpawnDone &&
+          this.subackAtMs === null
+        ) {
           this.subackAtMs = monotonicNow();
         }
         return;
@@ -943,6 +1460,11 @@ export class MqttSync {
         return;
       }
 
+      case 11: {
+        // UNSUBACK
+        return;
+      }
+
       case 13: {
         // PINGRESP
         this.awaitingPingResp = false;
@@ -972,13 +1494,13 @@ export class MqttSync {
   }
 
   private sendCleanDisconnect(includeMqttDisconnect: boolean): void {
-    if (this.didSendBye || !this.isConnected()) return;
+    if (this.didSendBye || !this.isRoomActive()) return;
     this.didSendBye = true;
     this.sendRaw(includeMqttDisconnect ? this.disposeCoalescedPacket : this.unloadCoalescedPacket);
   }
 
   private publishProfile(clockMs: number): void {
-    if (!this.isConnected()) return;
+    if (!this.isRoomActive()) return;
     this.lastProfilePublishMs = clockMs;
     const payload = textEncoder.encode(
       JSON.stringify({
@@ -993,7 +1515,7 @@ export class MqttSync {
   }
 
   private publishCustomAvatar(): void {
-    if (!this.isConnected()) return;
+    if (!this.isRoomActive()) return;
     if (this.customAvatar === null) {
       this.sendRaw(this.clearAvatarPacket);
       return;
@@ -1004,7 +1526,7 @@ export class MqttSync {
 
   private publishState(local: RiderRenderState): void {
     const ws = this.ws;
-    if (!this.mqttConnected || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!this.activeInRoom || !this.mqttConnected || !ws || ws.readyState !== WebSocket.OPEN) return;
     if (ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) return;
 
     const view = this.statePayloadView;
@@ -1055,6 +1577,14 @@ export class MqttSync {
   }
 
   private handleMessage(topic: string, payload: Uint8Array, isRetained: boolean): void {
+    // Intercept room lock metadata query responses first
+    if (this.metaQuery && topic === this.metaQuery.topic) {
+      this.finishMetaQuery(parseRoomMeta(payload));
+      return;
+    }
+
+    if (!this.activeInRoom) return;
+
     if (topic.startsWith(this.statePrefix)) {
       if (isRetained) return; // Never accept retained state ghosts as live riders
       const peerId = topic.slice(this.statePrefix.length);
@@ -1451,7 +1981,7 @@ export class MqttSync {
   }
 
   private checkInitialDiscovery(clockMs: number): void {
-    if (this.initialSpawnDone || this.subackAtMs === null) return;
+    if (!this.activeInRoom || this.initialSpawnDone || this.subackAtMs === null) return;
 
     const sinceSuback = clockMs - this.subackAtMs;
     const sinceFirstLive = this.firstLivePeerAtMs !== null ? clockMs - this.firstLivePeerAtMs : -1;

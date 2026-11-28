@@ -1,3 +1,5 @@
+import type { PixelIconId } from '../ui/PixelIcons';
+
 export type WeaponType = 0 | 1 | 2; // 0: Fist/Kick, 1: Spiked Bat, 2: Steel Chain
 
 export type ItemType =
@@ -15,20 +17,20 @@ export interface ItemSpec {
   idx: number;
   code: string;
   zhName: string;
-  icon: string;
+  icon: PixelIconId;
   color: string;
   needsTarget: boolean;
 }
 
 export const ITEMS: readonly ItemSpec[] = [
-  { id: 'rpg', idx: 0, code: 'RPG', zhName: 'RPG 火箭筒', icon: '🚀', color: '#ff4d00', needsTarget: false },
-  { id: 'airstrike', idx: 1, code: 'AIR', zhName: '空中支援', icon: '✈️', color: '#ff0054', needsTarget: false },
-  { id: 'sniper', idx: 2, code: 'SNP', zhName: '狙击枪', icon: '🎯', color: '#00f5d4', needsTarget: true },
-  { id: 'police', idx: 3, code: 'COP', zhName: '警车拦截', icon: '🚓', color: '#3a86ff', needsTarget: false },
-  { id: 'turbo', idx: 4, code: 'MAX', zhName: '超级加速', icon: '⚡', color: '#ffd166', needsTarget: false },
-  { id: 'trap', idx: 5, code: 'TRP', zhName: '路钉陷阱', icon: '⚙️', color: '#ef233c', needsTarget: false },
-  { id: 'magnet', idx: 6, code: 'MAG', zhName: '磁铁', icon: '🧲', color: '#9b5de5', needsTarget: false },
-  { id: 'banana', idx: 7, code: 'BAN', zhName: '香蕉皮', icon: '🍌', color: '#ffe600', needsTarget: false },
+  { id: 'rpg', idx: 0, code: 'RPG', zhName: 'RPG 火箭筒', icon: 'item_rpg', color: '#ff4d00', needsTarget: false },
+  { id: 'airstrike', idx: 1, code: 'AIR', zhName: '空中支援', icon: 'item_airstrike', color: '#ff0054', needsTarget: false },
+  { id: 'sniper', idx: 2, code: 'SNP', zhName: '狙击枪', icon: 'item_sniper', color: '#00f5d4', needsTarget: true },
+  { id: 'police', idx: 3, code: 'COP', zhName: '警车拦截', icon: 'item_police', color: '#3a86ff', needsTarget: false },
+  { id: 'turbo', idx: 4, code: 'MAX', zhName: '超级加速', icon: 'item_turbo', color: '#ffd166', needsTarget: false },
+  { id: 'trap', idx: 5, code: 'TRP', zhName: '路钉陷阱', icon: 'item_trap', color: '#ef233c', needsTarget: false },
+  { id: 'magnet', idx: 6, code: 'MAG', zhName: '磁铁', icon: 'item_magnet', color: '#9b5de5', needsTarget: false },
+  { id: 'banana', idx: 7, code: 'BAN', zhName: '香蕉皮', icon: 'item_banana', color: '#ffe600', needsTarget: false },
 ] as const;
 
 export const ITEM_BY_ID: Record<ItemType, ItemSpec> = {

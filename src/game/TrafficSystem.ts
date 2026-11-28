@@ -16,10 +16,17 @@ interface TrafficSlot {
 
 export type CarItemEffectKind = 'blast' | 'banana' | 'trap' | 'sniper' | 'police' | 'magnet';
 
+export type TruckBroadcastKey =
+  | 'truckBlast'
+  | 'truckBanana'
+  | 'truckTrap'
+  | 'truckPolice'
+  | 'truckMagnet';
+
 export interface CarItemEffectResult {
   hit: boolean;
   isTruck: boolean;
-  broadcastText: string | null;
+  broadcastKey: TruckBroadcastKey | null;
 }
 
 // 4 forward lanes (+s) with exact integer divisors of TRACK_LENGTH (2400m):
@@ -264,7 +271,7 @@ export class TrafficSystem {
   ): CarItemEffectResult {
     const slot = this.byId.get(carId);
     if (!slot) {
-      return { hit: false, isTruck: false, broadcastText: null };
+      return { hit: false, isTruck: false, broadcastKey: null };
     }
 
     const c = slot.car;
@@ -282,10 +289,10 @@ export class TrafficSystem {
           return {
             hit: true,
             isTruck: true,
-            broadcastText: '💥 轰中满载大货车！货物散落一地！',
+            broadcastKey: 'truckBlast',
           };
         }
-        return { hit: true, isTruck: false, broadcastText: null };
+        return { hit: true, isTruck: false, broadcastKey: null };
 
       case 'banana':
         c.spinTimer = Math.max(c.spinTimer ?? 0, 2.4);
@@ -294,7 +301,7 @@ export class TrafficSystem {
         return {
           hit: true,
           isTruck,
-          broadcastText: isTruck ? '🍌 满载大货车踩香蕉皮打滑甩尾！' : null,
+          broadcastKey: isTruck ? 'truckBanana' : null,
         };
 
       case 'trap':
@@ -305,7 +312,7 @@ export class TrafficSystem {
         return {
           hit: true,
           isTruck,
-          broadcastText: isTruck ? '⚙️ 满载大货车爆胎减速！' : null,
+          broadcastKey: isTruck ? 'truckTrap' : null,
         };
 
       case 'police':
@@ -314,12 +321,12 @@ export class TrafficSystem {
         return {
           hit: true,
           isTruck,
-          broadcastText: isTruck ? '🚓 警车逼停满载大货车！' : null,
+          broadcastKey: isTruck ? 'truckPolice' : null,
         };
 
       case 'magnet':
         c.bumpVel = clamp(c.bumpVel + sign * 4.8, -8, 8);
-        return { hit: true, isTruck, broadcastText: null };
+        return { hit: true, isTruck, broadcastKey: null };
     }
   }
 

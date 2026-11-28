@@ -1,3 +1,5 @@
+import { getLang, itemName, t } from '../i18n';
+import { ITEM_ICON_MAP, type PixelIconId } from '../ui/PixelIcons';
 import { LANE_CENTERS, ROAD_HALF_WIDTH, hash1, signedTrackDelta } from './RoadMath';
 import {
   ITEM_BY_ID,
@@ -35,6 +37,7 @@ export interface JetVisual {
   active: boolean;
   ownerId: string;
   ownerName: string;
+  isBotOwner: boolean;
   s: number;
   x: number;
   y: number;
@@ -48,6 +51,7 @@ export interface BombVisual {
   active: boolean;
   ownerId: string;
   ownerName: string;
+  isBotOwner: boolean;
   s: number;
   x: number;
   y: number;
@@ -60,6 +64,7 @@ export interface InterceptorVisual {
   active: boolean;
   ownerId: string;
   ownerName: string;
+  isBotOwner: boolean;
   targetId: string | null;
   s: number;
   x: number;
@@ -73,6 +78,7 @@ export interface HazardVisual {
   kind: 'trap' | 'banana';
   ownerId: string;
   ownerName: string;
+  isBotOwner: boolean;
   s: number;
   x: number;
   life: number;
@@ -108,8 +114,8 @@ export interface SniperCandidate {
 }
 
 export interface ItemCallbacks {
-  onBroadcast(text: string, accent?: 'gold' | 'cyan' | 'red' | 'green'): void;
-  onToast(text: string, accent?: 'gold' | 'cyan' | 'red'): void;
+  onBroadcast(text: string, accent?: 'gold' | 'cyan' | 'red' | 'green', icon?: PixelIconId): void;
+  onToast(text: string, accent?: 'gold' | 'cyan' | 'red', icon?: PixelIconId): void;
   onPublishNetEvent(ev: Omit<ItemNetEvent, 'from' | 'fromName' | 'ts'>): void;
   onHitRival(
     target: RiderRenderState,
@@ -121,7 +127,14 @@ export interface ItemCallbacks {
   ): void;
   onPoliceDragRival(target: RiderRenderState, dt: number, shoveX: number): void;
   onAffectTraffic?(car: TrafficCar, kind: CarItemEffectKind, dirX: number): void;
-  onLocalDamage(dmg: number, knockX: number, ko: boolean, sourceLabel: string, popup: string): void;
+  onLocalDamage(
+    dmg: number,
+    knockX: number,
+    ko: boolean,
+    sourceLabel: string,
+    popup: string,
+    icon?: PixelIconId
+  ): void;
   onLocalSpinOut(duration: number, dmg: number, sourceLabel: string): void;
   onLocalPoliceDrag(dt: number, shoveX: number): void;
   onLocalActivateTurbo(duration: number): void;
@@ -145,32 +158,42 @@ export interface ItemCallbacks {
 const CRATE_SPACING = 60.0; // 2400 / 60 = 40 exact cyclic crate slots per lap
 const CRATE_SLOTS_PER_LAP = 40;
 const CRATE_COOLDOWN_SEC = 14.0;
-const BOT_CRATE_COOLDOWN_SEC = 8.0;
+const BOT_CRATE_COOLDOWN_SEC = 10.0;
+const BOT_MAX_HELD_ITEMS = 2;
 const MAX_ROCKETS = 8;
 const MAX_JETS = 3;
 const MAX_BOMBS = 16;
 const MAX_INTERCEPTORS = 4;
 const MAX_HAZARDS = 24;
 const SNIPER_AIM_SEC = 1.15;
+const BOT_SNIPER_AIM_SEC = 1.55;
 const SNIPER_RESULT_SHOW_SEC = 0.95;
 const SNIPER_MAX_RANGE = 175.0;
+
+function cargoTruckLabel(): string {
+  return getLang() === 'zh' ? '满载大货车' : 'CARGO TRUCK';
+}
+
+function rivalFallbackLabel(): string {
+  return getLang() === 'zh' ? '对手' : 'RIVAL';
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-function addHeldItem(rider: RiderRenderState, item: ItemType): void {
+function addHeldItem(rider: RiderRenderState, item: ItemType, maxSlots = MAX_HELD_ITEMS): void {
   const list = rider.heldItems ?? (rider.heldItems = []);
   if (list.length === 0) {
     list.push({ type: item, ttl: MULTI_ITEM_TTL });
-  } else if (list.length === 1) {
+  } else if (list.length === 1 && maxSlots > 1) {
     // Transitioning 1 -> 2: existing single item starts fresh at 30s alongside the new item
     list[0].ttl = MULTI_ITEM_TTL;
     list.push({ type: item, ttl: MULTI_ITEM_TTL });
-  } else if (list.length < MAX_HELD_ITEMS) {
+  } else if (list.length < maxSlots) {
     list.push({ type: item, ttl: MULTI_ITEM_TTL });
   } else {
-    // Already at max 4: replace oldest slot [0] in-place with fresh 30s TTL
+    // Already at cap: replace oldest slot [0] in-place with fresh 30s TTL
     list[0].type = item;
     list[0].ttl = MULTI_ITEM_TTL;
   }
@@ -304,6 +327,7 @@ export class ItemSystem {
         active: false,
         ownerId: '',
         ownerName: '',
+        isBotOwner: false,
         s: 0,
         x: 0,
         y: 15,
@@ -318,6 +342,7 @@ export class ItemSystem {
         active: false,
         ownerId: '',
         ownerName: '',
+        isBotOwner: false,
         s: 0,
         x: 0,
         y: 14,
@@ -331,6 +356,7 @@ export class ItemSystem {
         active: false,
         ownerId: '',
         ownerName: '',
+        isBotOwner: false,
         targetId: null,
         s: 0,
         x: 0,
@@ -345,6 +371,7 @@ export class ItemSystem {
         kind: 'banana',
         ownerId: '',
         ownerName: '',
+        isBotOwner: false,
         s: 0,
         x: 0,
         life: 0,
@@ -361,6 +388,31 @@ export class ItemSystem {
       hazards: this.hazards,
       sniperLaser: this.sniperLaser,
     };
+  }
+
+  /**
+   * Clears all active room-scoped projectiles, hazards, jets, interceptors & sniper locks cleanly.
+   */
+  resetActiveEffects(): void {
+    this.collectedSlots.clear();
+    this.botItemCooldowns.clear();
+    for (let i = 0; i < this.rockets.length; i++) this.rockets[i].active = false;
+    for (let i = 0; i < this.jets.length; i++) this.jets[i].active = false;
+    for (let i = 0; i < this.bombs.length; i++) this.bombs[i].active = false;
+    for (let i = 0; i < this.interceptors.length; i++) this.interceptors[i].active = false;
+    for (let i = 0; i < this.hazards.length; i++) this.hazards[i].active = false;
+    this.sniperLaser.active = false;
+    this.sniperPhase = 'idle';
+    this.sniperTargetId = null;
+    this.sniperTargetName = '';
+    this.sniperTimer = 0;
+    this.sniperResult = undefined;
+    this.incomingLockTimer = 0;
+    this.incomingLockFrom = null;
+    this.remoteLaserTimer = 0;
+    this.remoteLaserFromId = null;
+    this.remoteLaserToId = null;
+    this.botSniper.active = false;
   }
 
   isSniperSelecting(): boolean {
@@ -430,7 +482,7 @@ export class ItemSystem {
     if (!target && !truckCar) return false;
     if (target && target.id === local.id) return false;
 
-    const targetName = truckCar ? '满载大货车' : target!.name;
+    const targetName = truckCar ? cargoTruckLabel() : target!.name;
 
     // Consume sniper rifle from its exact inventory slot and begin 1.15s scope lock
     consumeHeldItemAt(local, slotIdx);
@@ -450,7 +502,11 @@ export class ItemSystem {
       s: local.s,
       x: local.x,
     });
-    cb.onBroadcast(`🎯 ${local.name} 对 ${targetName} 使用了 狙击枪`, 'cyan');
+    cb.onBroadcast(
+      t('itemUseTargetFeed', { from: local.name, to: targetName, item: itemName('sniper') }),
+      'cyan',
+      'item_sniper'
+    );
     return true;
   }
 
@@ -475,7 +531,7 @@ export class ItemSystem {
           return this.selectSniperTarget(this.sniperCandidates[0].id, local, rivals, cb);
         }
         this.cancelSniper();
-        cb.onToast('附近无目标', 'gold');
+        cb.onToast(t('noTarget'), 'gold', 'warning');
         return false;
       }
       // Clicking another non-sniper slot cancels sniper selection and fires that slot immediately
@@ -485,7 +541,7 @@ export class ItemSystem {
     if (item === 'sniper') {
       this.refreshSniperCandidates(local, rivals);
       if (this.sniperCandidates.length === 0) {
-        cb.onToast('附近无狙击目标', 'gold');
+        cb.onToast(t('noTarget'), 'gold', 'warning');
         return false;
       }
       this.sniperSlotIndex = clampedIdx;
@@ -499,7 +555,8 @@ export class ItemSystem {
 
     // Consume non-sniper item from requested slot
     consumeHeldItemAt(local, clampedIdx);
-    const spec = ITEM_BY_ID[item];
+    const label = itemName(item);
+    const icon = ITEM_ICON_MAP[item];
     const seed = (Math.floor(this.timeSec * 1000) ^ (Math.floor(local.s) * 31)) & 0xffff;
 
     switch (item) {
@@ -519,14 +576,15 @@ export class ItemSystem {
         });
         cb.onBroadcast(
           target
-            ? `${spec.icon} ${local.name} 对 ${target.name} 发射了 ${spec.zhName}`
-            : `${spec.icon} ${local.name} 发射了 ${spec.zhName}`,
-          'red'
+            ? t('itemUseTargetFeed', { from: local.name, to: target.name, item: label })
+            : t('itemUseFireFeed', { from: local.name, item: label }),
+          'red',
+          icon
         );
         return true;
       }
       case 'airstrike': {
-        this.spawnBomberJet(local.id, local.name, local.s - 22, local.x);
+        this.spawnBomberJet(local.id, local.name, false, local.s - 22, local.x);
         cb.onSfx('jet');
         cb.onShake(0.28, 0.35);
         cb.onPublishNetEvent({
@@ -536,14 +594,14 @@ export class ItemSystem {
           x: local.x,
           seed,
         });
-        cb.onBroadcast(`${spec.icon} ${local.name} 呼叫了 ${spec.zhName}!`, 'red');
+        cb.onBroadcast(t('itemUseCallFeed', { from: local.name, item: label }), 'red', icon);
         return true;
       }
       case 'police': {
         const target = this.findNearestRivalAhead(local, rivals, 170) ?? this.findNearestRival(local, rivals, 170);
         const spawnS = target ? target.s - 18 : local.s + 14;
         const spawnX = target ? clamp(target.x + (target.x >= 0 ? -2.2 : 2.2), -ROAD_HALF_WIDTH + 1.2, ROAD_HALF_WIDTH - 1.2) : local.x;
-        this.spawnInterceptor(local.id, local.name, target ? target.id : null, spawnS, spawnX);
+        this.spawnInterceptor(local.id, local.name, false, target ? target.id : null, spawnS, spawnX);
         cb.onSfx('siren');
         cb.onPublishNetEvent({
           t: 'item_use',
@@ -555,9 +613,10 @@ export class ItemSystem {
         });
         cb.onBroadcast(
           target
-            ? `${spec.icon} ${local.name} 对 ${target.name} 使用了 ${spec.zhName}`
-            : `${spec.icon} ${local.name} 召唤了 ${spec.zhName}`,
-          'cyan'
+            ? t('itemUseTargetFeed', { from: local.name, to: target.name, item: label })
+            : t('itemUseCallFeed', { from: local.name, item: label }),
+          'cyan',
+          icon
         );
         return true;
       }
@@ -572,7 +631,7 @@ export class ItemSystem {
           s: local.s,
           x: local.x,
         });
-        cb.onBroadcast(`${spec.icon} ${local.name} 开启了 ${spec.zhName}!`, 'gold');
+        cb.onBroadcast(t('itemUseSelfFeed', { from: local.name, item: label }), 'gold', icon);
         return true;
       }
       case 'magnet': {
@@ -584,12 +643,12 @@ export class ItemSystem {
           s: local.s,
           x: local.x,
         });
-        cb.onBroadcast(`${spec.icon} ${local.name} 激活了 ${spec.zhName}`, 'cyan');
+        cb.onBroadcast(t('itemUseSelfFeed', { from: local.name, item: label }), 'cyan', icon);
         return true;
       }
       case 'trap': {
         const dropS = Math.max(0, local.s - 2.4);
-        this.spawnHazard('trap', local.id, local.name, dropS, local.x);
+        this.spawnHazard('trap', local.id, local.name, false, dropS, local.x);
         cb.onSfx('pickup');
         cb.onPublishNetEvent({
           t: 'item_use',
@@ -597,12 +656,12 @@ export class ItemSystem {
           s: dropS,
           x: local.x,
         });
-        cb.onBroadcast(`${spec.icon} ${local.name} 部署了 ${spec.zhName}`, 'gold');
+        cb.onBroadcast(t('itemUseDeployFeed', { from: local.name, item: label }), 'gold', icon);
         return true;
       }
       case 'banana': {
         const dropS = Math.max(0, local.s - 2.4);
-        this.spawnHazard('banana', local.id, local.name, dropS, local.x);
+        this.spawnHazard('banana', local.id, local.name, false, dropS, local.x);
         cb.onSfx('bananaSlip');
         cb.onPublishNetEvent({
           t: 'item_use',
@@ -610,7 +669,7 @@ export class ItemSystem {
           s: dropS,
           x: local.x,
         });
-        cb.onBroadcast(`${spec.icon} ${local.name} 扔出了 ${spec.zhName}`, 'gold');
+        cb.onBroadcast(t('itemUseDropFeed', { from: local.name, item: label }), 'gold', icon);
         return true;
       }
     }
@@ -623,18 +682,21 @@ export class ItemSystem {
   ): void {
     const spec = ITEM_BY_ID[ev.item];
     if (!spec) return;
+    const label = itemName(ev.item);
+    const icon = ITEM_ICON_MAP[ev.item];
 
     if (ev.t === 'item_pick') {
-      cb.onBroadcast(`📦 ${ev.fromName} 拾取了 ${spec.icon} ${spec.zhName}`, 'green');
+      cb.onBroadcast(t('itemPickFeed', { from: ev.fromName, item: label }), 'green', 'crate');
       return;
     }
 
     if (ev.t === 'item_use') {
       cb.onBroadcast(
         ev.toName
-          ? `${spec.icon} ${ev.fromName} 对 ${ev.toName} 使用了 ${spec.zhName}`
-          : `${spec.icon} ${ev.fromName} 使用了 ${spec.zhName}`,
-        ev.item === 'rpg' || ev.item === 'airstrike' ? 'red' : 'cyan'
+          ? t('itemUseTargetFeed', { from: ev.fromName, to: ev.toName, item: label })
+          : t('itemUseSelfFeed', { from: ev.fromName, item: label }),
+        ev.item === 'rpg' || ev.item === 'airstrike' ? 'red' : 'cyan',
+        icon
       );
 
       switch (ev.item) {
@@ -642,7 +704,7 @@ export class ItemSystem {
           this.spawnRocket(ev.from, ev.fromName, false, ev.to ?? null, ev.s + 2.0, ev.x);
           break;
         case 'airstrike':
-          this.spawnBomberJet(ev.from, ev.fromName, ev.s - 22, ev.x);
+          this.spawnBomberJet(ev.from, ev.fromName, false, ev.s - 22, ev.x);
           if (Math.abs(signedTrackDelta(ev.s, local.s)) < 190) cb.onSfx('jet');
           break;
         case 'sniper':
@@ -657,33 +719,31 @@ export class ItemSystem {
           }
           break;
         case 'police':
-          this.spawnInterceptor(ev.from, ev.fromName, ev.to ?? null, ev.s, ev.x);
+          this.spawnInterceptor(ev.from, ev.fromName, false, ev.to ?? null, ev.s, ev.x);
           if (ev.to === local.id || Math.abs(signedTrackDelta(ev.s, local.s)) < 120) {
             cb.onSfx('siren');
           }
           break;
         case 'trap':
-          this.spawnHazard('trap', ev.from, ev.fromName, ev.s, ev.x);
+          this.spawnHazard('trap', ev.from, ev.fromName, false, ev.s, ev.x);
           break;
         case 'banana':
-          this.spawnHazard('banana', ev.from, ev.fromName, ev.s, ev.x);
+          this.spawnHazard('banana', ev.from, ev.fromName, false, ev.s, ev.x);
           break;
       }
       return;
     }
 
     if (ev.t === 'item_hit') {
-      const targetLabel = ev.toName ?? (ev.to === local.id ? local.name : '对手');
+      const targetLabel = ev.toName ?? (ev.to === local.id ? local.name : rivalFallbackLabel());
       if (ev.item === 'sniper') {
-        cb.onBroadcast(`🎯 ${ev.fromName} 用狙击枪击倒了 ${targetLabel}!`, 'red');
-      } else if (ev.item === 'rpg') {
-        cb.onBroadcast(`💥 ${ev.fromName} 的 RPG 炸飞了 ${targetLabel}!`, 'red');
-      } else if (ev.item === 'airstrike') {
-        cb.onBroadcast(`✈️ ${ev.fromName} 的空袭轰炸了 ${targetLabel}!`, 'red');
-      } else if (ev.item === 'banana') {
-        cb.onBroadcast(`🍌 ${targetLabel} 踩中了 ${ev.fromName} 的香蕉皮!`, 'gold');
-      } else if (ev.item === 'trap') {
-        cb.onBroadcast(`⚙️ ${targetLabel} 撞上了 ${ev.fromName} 的路钉陷阱!`, 'red');
+        cb.onBroadcast(t('sniperKoFeed', { from: ev.fromName, to: targetLabel }), 'red', 'item_sniper');
+      } else {
+        cb.onBroadcast(
+          t('itemHitFeed', { from: ev.fromName, item: label, to: targetLabel }),
+          ev.item === 'banana' ? 'gold' : 'red',
+          ev.item === 'rpg' ? 'blast' : icon
+        );
       }
 
       if (ev.to === local.id) {
@@ -692,18 +752,26 @@ export class ItemSystem {
           this.incomingLockFrom = null;
           local.incomingLockName = null;
           cb.onSfx('sniperShot');
-          cb.onLocalDamage(ev.dmg ?? 75, ev.knockX ?? 12, true, `${ev.fromName} 狙击`, 'SNIPED');
+          cb.onLocalDamage(
+            ev.dmg ?? 75,
+            ev.knockX ?? 12,
+            true,
+            `${ev.fromName} ${label}`,
+            'SNIPED',
+            'item_sniper'
+          );
         } else if (ev.item === 'banana') {
           cb.onSfx('bananaSlip');
-          cb.onLocalSpinOut(1.3, ev.dmg ?? 22, `${ev.fromName} 香蕉皮`);
+          cb.onLocalSpinOut(1.3, ev.dmg ?? 22, `${ev.fromName} ${label}`);
         } else {
           cb.onSfx('explosion');
           cb.onLocalDamage(
             ev.dmg ?? 55,
             ev.knockX ?? 14,
             ev.ko ?? true,
-            `${ev.fromName} ${spec.zhName}`,
-            ev.item === 'trap' ? 'KO' : 'BOOM'
+            `${ev.fromName} ${label}`,
+            ev.item === 'trap' ? 'KO' : 'BOOM',
+            ev.item === 'rpg' ? 'blast' : icon
           );
         }
       }
@@ -711,15 +779,15 @@ export class ItemSystem {
     }
 
     if (ev.t === 'item_miss') {
-      const targetLabel = ev.toName ?? (ev.to === local.id ? local.name : '对手');
-      cb.onBroadcast(`💨 ${targetLabel} 极限躲开了 ${ev.fromName} 的狙击!`, 'green');
+      const targetLabel = ev.toName ?? (ev.to === local.id ? local.name : rivalFallbackLabel());
+      cb.onBroadcast(t('sniperDodgeFeed', { to: targetLabel, from: ev.fromName }), 'green', 'bolt');
       if (ev.to === local.id) {
         this.incomingLockTimer = 0;
         this.incomingLockFrom = null;
         local.incomingLockName = null;
         cb.onSfx('sniperShot');
         cb.onPopup('DODGED', local.s, local.x, 1.7);
-        cb.onToast('极限躲避狙击!', 'cyan');
+        cb.onToast(t('sniperDodged'), 'cyan', 'bolt');
       }
     }
   }
@@ -796,7 +864,7 @@ export class ItemSystem {
           this.sniperLaser.toS = target.s;
           this.sniperLaser.toX = target.x;
           this.sniperLaser.toY = target.y + 1.15;
-          this.sniperLaser.progress = clamp(this.botSniper.timer / SNIPER_AIM_SEC, 0, 1);
+          this.sniperLaser.progress = clamp(this.botSniper.timer / BOT_SNIPER_AIM_SEC, 0, 1);
         } else {
           this.sniperLaser.active = false;
         }
@@ -865,11 +933,12 @@ export class ItemSystem {
         this.collectedSlots.set(wSlot, this.timeSec + CRATE_COOLDOWN_SEC);
         const pickIdx = Math.floor(Math.random() * ITEMS.length);
         const spec = ITEMS[pickIdx];
-        addHeldItem(local, spec.id);
+        addHeldItem(local, spec.id, MAX_HELD_ITEMS);
+        const pickedLabel = itemName(spec.id);
         cb.onSfx('pickup');
         cb.onParticles('nitro', crateS, crateX, 1.0, local.speed * 0.4);
-        cb.onToast(`${spec.icon} ${spec.zhName}`, 'gold');
-        cb.onBroadcast(`📦 ${local.name} 拾取了 ${spec.icon} ${spec.zhName}`, 'green');
+        cb.onToast(pickedLabel, 'gold', ITEM_ICON_MAP[spec.id]);
+        cb.onBroadcast(t('itemPickFeed', { from: local.name, item: pickedLabel }), 'green', 'crate');
         cb.onPublishNetEvent({
           t: 'item_pick',
           item: spec.id,
@@ -879,28 +948,37 @@ export class ItemSystem {
         continue;
       }
 
-      // 2. AI Bot pickup check (bots visibly consume road '?' crates for ~8s!)
+      // 2. AI Bot pickup check (capped at 2 items & ~45% pickup rate per pass so bots don't spam!)
       let pickedByBot = false;
       for (let b = 0; b < rivals.length; b++) {
         const bot = rivals[b];
         if (!bot.isBot || bot.crashed) continue;
-        const botLat = bot.magnetTimer > 0 ? 11.0 : 1.7;
-        const botLon = bot.magnetTimer > 0 ? 6.0 : 2.5;
+        if ((bot.heldItems?.length ?? 0) >= BOT_MAX_HELD_ITEMS) continue;
+        const botLat = bot.magnetTimer > 0 ? 6.5 : 1.45;
+        const botLon = bot.magnetTimer > 0 ? 4.0 : 2.1;
         if (
           Math.abs(signedTrackDelta(crateS, bot.s)) < botLon &&
           Math.abs(bot.x - crateX) < botLat
         ) {
+          const passBucket = Math.floor(this.timeSec / 12);
+          const pickRoll = hash1(Math.imul(wSlot, 131) ^ Math.imul(b + 1, 977) ^ Math.imul(passBucket, 37));
+          if (pickRoll >= 0.45) continue;
+
           this.collectedSlots.set(wSlot, this.timeSec + BOT_CRATE_COOLDOWN_SEC);
           const pickIdx = Math.floor(Math.random() * ITEMS.length);
           const spec = ITEMS[pickIdx];
-          addHeldItem(bot, spec.id);
+          addHeldItem(bot, spec.id, BOT_MAX_HELD_ITEMS);
           if (!this.botItemCooldowns.has(bot.id)) {
-            this.botItemCooldowns.set(bot.id, 1.8 + Math.random() * 2.2);
+            this.botItemCooldowns.set(bot.id, 4.0 + Math.random() * 4.0);
           }
           if (Math.abs(signedTrackDelta(crateS, local.s)) < 95) {
             cb.onParticles('nitro', crateS, crateX, 1.0, bot.speed * 0.35);
           }
-          cb.onBroadcast(`📦 ${bot.name} 拾取了 ${spec.icon} ${spec.zhName}`, 'green');
+          cb.onBroadcast(
+            t('itemPickFeed', { from: bot.name, item: itemName(spec.id) }),
+            'green',
+            'crate'
+          );
           pickedByBot = true;
           break;
         }
@@ -935,7 +1013,7 @@ export class ItemSystem {
           this.incomingLockFrom = null;
           local.incomingLockName = null;
         }
-      } else if (this.botSniper.timer >= SNIPER_AIM_SEC) {
+      } else if (this.botSniper.timer >= BOT_SNIPER_AIM_SEC) {
         this.botSniper.active = false;
         if (this.botSniper.targetId === local.id) {
           this.incomingLockTimer = 0;
@@ -945,22 +1023,42 @@ export class ItemSystem {
         cb.onSfx('sniperShot');
 
         if (!target || Math.abs(signedTrackDelta(target.s, shooter.s)) > SNIPER_MAX_RANGE) {
-          cb.onBroadcast(`💨 ${this.botSniper.targetName} 脱离了 ${this.botSniper.botName} 的狙击射程!`, 'cyan');
+          cb.onBroadcast(
+            t('sniperDodgeFeed', { to: this.botSniper.targetName, from: this.botSniper.botName }),
+            'cyan',
+            'bolt'
+          );
         } else if (this.isTargetEvadingSniper(shooter, target)) {
           cb.onPopup('DODGED', target.s, target.x, 1.75);
           if (target.id === local.id) {
-            cb.onToast('极限躲避狙击!', 'cyan');
+            cb.onToast(t('sniperDodged'), 'cyan', 'bolt');
           }
-          cb.onBroadcast(`💨 ${target.name} 极限躲开了 ${this.botSniper.botName} 的狙击!`, 'green');
+          cb.onBroadcast(
+            t('sniperDodgeFeed', { to: target.name, from: this.botSniper.botName }),
+            'green',
+            'bolt'
+          );
         } else {
-          const knockX = target.x >= shooter.x ? 13 : -13;
+          const knockX = target.x >= shooter.x ? 9.5 : -9.5;
           if (target.id === local.id) {
-            cb.onLocalDamage(65, knockX, true, `${this.botSniper.botName} 狙击`, 'SNIPED');
+            // Softened bot sniper (~35% less damage, no instant full-HP wipeout)
+            cb.onLocalDamage(
+              42,
+              knockX,
+              false,
+              `${this.botSniper.botName} ${itemName('sniper')}`,
+              'SNIPED',
+              'item_sniper'
+            );
           } else {
             cb.onPopup('SNIPED', target.s, target.x, 1.85);
-            cb.onHitRival(target, 'sniper', 75, knockX, true, false);
+            cb.onHitRival(target, 'sniper', 60, knockX, true, false);
           }
-          cb.onBroadcast(`🎯 ${this.botSniper.botName} 用狙击枪击倒了 ${target.name}!`, 'red');
+          cb.onBroadcast(
+            t('sniperKoFeed', { from: this.botSniper.botName, to: target.name }),
+            'red',
+            'item_sniper'
+          );
         }
       }
     }
@@ -976,7 +1074,7 @@ export class ItemSystem {
       const list = bot.heldItems;
       if (!list || list.length === 0) continue;
 
-      let cd = (this.botItemCooldowns.get(bot.id) ?? 2.4) - dt;
+      let cd = (this.botItemCooldowns.get(bot.id) ?? 6.0) - dt;
       if (cd > 0) {
         this.botItemCooldowns.set(bot.id, cd);
         continue;
@@ -984,12 +1082,13 @@ export class ItemSystem {
 
       // Only use items when racing within action range of local player
       if (Math.abs(signedTrackDelta(bot.s, local.s)) > 140) {
-        this.botItemCooldowns.set(bot.id, 1.0);
+        this.botItemCooldowns.set(bot.id, 1.5);
         continue;
       }
 
       const item = list[0].type;
-      const spec = ITEM_BY_ID[item];
+      const label = itemName(item);
+      const icon = ITEM_ICON_MAP[item];
       let used = false;
 
       // Pick best opponent for this bot (prefers local player when in range, else nearest rival)
@@ -1003,7 +1102,11 @@ export class ItemSystem {
               consumeHeldItemAt(bot, 0);
               this.spawnRocket(bot.id, bot.name, true, target.id, bot.s + 2.0, bot.x);
               if (Math.abs(signedTrackDelta(bot.s, local.s)) < 95) cb.onSfx('boost');
-              cb.onBroadcast(`${spec.icon} ${bot.name} 对 ${target.name} 发射了 ${spec.zhName}`, 'red');
+              cb.onBroadcast(
+                t('itemUseTargetFeed', { from: bot.name, to: target.name, item: label }),
+                'red',
+                icon
+              );
               used = true;
             }
           }
@@ -1011,9 +1114,9 @@ export class ItemSystem {
         }
         case 'airstrike': {
           consumeHeldItemAt(bot, 0);
-          this.spawnBomberJet(bot.id, bot.name, bot.s - 22, bot.x);
+          this.spawnBomberJet(bot.id, bot.name, true, bot.s - 22, bot.x);
           cb.onSfx('jet');
-          cb.onBroadcast(`${spec.icon} ${bot.name} 呼叫了 ${spec.zhName}!`, 'red');
+          cb.onBroadcast(t('itemUseCallFeed', { from: bot.name, item: label }), 'red', icon);
           used = true;
           break;
         }
@@ -1028,11 +1131,15 @@ export class ItemSystem {
             this.botSniper.timer = 0;
             if (target.id === local.id) {
               this.incomingLockFrom = bot.name;
-              this.incomingLockTimer = SNIPER_AIM_SEC + 0.15;
+              this.incomingLockTimer = BOT_SNIPER_AIM_SEC + 0.15;
               local.incomingLockName = bot.name;
               cb.onSfx('sniperLock');
             }
-            cb.onBroadcast(`${spec.icon} ${bot.name} 对 ${target.name} 使用了 ${spec.zhName}`, 'cyan');
+            cb.onBroadcast(
+              t('itemUseTargetFeed', { from: bot.name, to: target.name, item: label }),
+              'cyan',
+              icon
+            );
             used = true;
           }
           break;
@@ -1046,26 +1153,30 @@ export class ItemSystem {
               -ROAD_HALF_WIDTH + 1.2,
               ROAD_HALF_WIDTH - 1.2
             );
-            this.spawnInterceptor(bot.id, bot.name, target.id, spawnS, spawnX);
+            this.spawnInterceptor(bot.id, bot.name, true, target.id, spawnS, spawnX);
             cb.onSfx('siren');
-            cb.onBroadcast(`${spec.icon} ${bot.name} 对 ${target.name} 使用了 ${spec.zhName}`, 'cyan');
+            cb.onBroadcast(
+              t('itemUseTargetFeed', { from: bot.name, to: target.name, item: label }),
+              'cyan',
+              icon
+            );
             used = true;
           }
           break;
         }
         case 'turbo': {
           consumeHeldItemAt(bot, 0);
-          bot.turboShieldTimer = Math.max(bot.turboShieldTimer, 3.5);
+          bot.turboShieldTimer = Math.max(bot.turboShieldTimer, 3.0);
           bot.spinOutTimer = 0;
           if (Math.abs(signedTrackDelta(bot.s, local.s)) < 90) cb.onSfx('boost');
-          cb.onBroadcast(`${spec.icon} ${bot.name} 开启了 ${spec.zhName}!`, 'gold');
+          cb.onBroadcast(t('itemUseSelfFeed', { from: bot.name, item: label }), 'gold', icon);
           used = true;
           break;
         }
         case 'magnet': {
           consumeHeldItemAt(bot, 0);
-          bot.magnetTimer = Math.max(bot.magnetTimer, 5.0);
-          cb.onBroadcast(`${spec.icon} ${bot.name} 激活了 ${spec.zhName}`, 'cyan');
+          bot.magnetTimer = Math.max(bot.magnetTimer, 4.5);
+          cb.onBroadcast(t('itemUseSelfFeed', { from: bot.name, item: label }), 'cyan', icon);
           used = true;
           break;
         }
@@ -1073,8 +1184,8 @@ export class ItemSystem {
           const trailingLocal = signedTrackDelta(local.s, bot.s);
           if ((trailingLocal < -2 && trailingLocal > -55) || list.length >= 2) {
             consumeHeldItemAt(bot, 0);
-            this.spawnHazard('trap', bot.id, bot.name, Math.max(0, bot.s - 2.6), bot.x);
-            cb.onBroadcast(`${spec.icon} ${bot.name} 部署了 ${spec.zhName}`, 'gold');
+            this.spawnHazard('trap', bot.id, bot.name, true, Math.max(0, bot.s - 2.6), bot.x);
+            cb.onBroadcast(t('itemUseDeployFeed', { from: bot.name, item: label }), 'gold', icon);
             used = true;
           }
           break;
@@ -1083,15 +1194,15 @@ export class ItemSystem {
           const trailingLocal = signedTrackDelta(local.s, bot.s);
           if ((trailingLocal < -2 && trailingLocal > -55) || list.length >= 2) {
             consumeHeldItemAt(bot, 0);
-            this.spawnHazard('banana', bot.id, bot.name, Math.max(0, bot.s - 2.6), bot.x);
-            cb.onBroadcast(`${spec.icon} ${bot.name} 扔出了 ${spec.zhName}`, 'gold');
+            this.spawnHazard('banana', bot.id, bot.name, true, Math.max(0, bot.s - 2.6), bot.x);
+            cb.onBroadcast(t('itemUseDropFeed', { from: bot.name, item: label }), 'gold', icon);
             used = true;
           }
           break;
         }
       }
 
-      this.botItemCooldowns.set(bot.id, used ? 2.2 + Math.random() * 2.6 : 0.8);
+      this.botItemCooldowns.set(bot.id, used ? 8.0 + Math.random() * 6.0 : 1.5);
     }
   }
 
@@ -1190,7 +1301,11 @@ export class ItemSystem {
           }
         } else if (!target || Math.abs(signedTrackDelta(target.s, local.s)) > SNIPER_MAX_RANGE) {
           this.sniperResult = 'MISS';
-          cb.onBroadcast(`💨 ${this.sniperTargetName || '目标'} 脱离了 ${local.name} 的射程!`, 'cyan');
+          cb.onBroadcast(
+            t('sniperDodgeFeed', { to: this.sniperTargetName || rivalFallbackLabel(), from: local.name }),
+            'cyan',
+            'bolt'
+          );
           cb.onPublishNetEvent({
             t: 'item_miss',
             item: 'sniper',
@@ -1202,7 +1317,7 @@ export class ItemSystem {
         } else if (this.isTargetEvadingSniper(local, target)) {
           this.sniperResult = 'DODGED';
           cb.onPopup('DODGED', target.s, target.x, 1.75);
-          cb.onBroadcast(`💨 ${target.name} 极限躲开了 ${local.name} 的狙击!`, 'green');
+          cb.onBroadcast(t('sniperDodgeFeed', { to: target.name, from: local.name }), 'green', 'bolt');
           cb.onPublishNetEvent({
             t: 'item_miss',
             item: 'sniper',
@@ -1217,7 +1332,7 @@ export class ItemSystem {
           cb.onPopup('SNIPED', target.s, target.x, 1.85);
           cb.onParticles('crash', target.s, target.x, 1.0, target.speed * 0.35);
           cb.onHitRival(target, 'sniper', 75, knockX, true, false);
-          cb.onBroadcast(`🎯 ${local.name} 用狙击枪击倒了 ${target.name}!`, 'red');
+          cb.onBroadcast(t('sniperKoFeed', { from: local.name, to: target.name }), 'red', 'item_sniper');
           cb.onPublishNetEvent({
             t: 'item_hit',
             item: 'sniper',
@@ -1314,24 +1429,28 @@ export class ItemSystem {
       // Check impact against rivals (only owner triggers authoritative damage to avoid double-hits)
       if (r.ownerId === local.id) {
         for (let j = 0; j < rivals.length; j++) {
-          const t = rivals[j];
-          if (t.crashed || t.invulnTimer > 0) continue;
-          if (Math.abs(signedTrackDelta(t.s, r.s)) < 3.8 && Math.abs(t.x - r.x) < 1.85) {
+          const rival = rivals[j];
+          if (rival.crashed || rival.invulnTimer > 0) continue;
+          if (Math.abs(signedTrackDelta(rival.s, r.s)) < 3.8 && Math.abs(rival.x - r.x) < 1.85) {
             r.active = false;
-            const knockX = t.x >= r.x ? 16 : -16;
+            const knockX = rival.x >= r.x ? 16 : -16;
             cb.onSfx('explosion');
             cb.onShake(0.55, 0.34);
-            cb.onParticles('crash', r.s, r.x, 1.0, t.speed * 0.3);
+            cb.onParticles('crash', r.s, r.x, 1.0, rival.speed * 0.3);
             cb.onPopup('BOOM', r.s, r.x, 1.8);
-            cb.onHitRival(t, 'rpg', 65, knockX, true, false);
-            cb.onBroadcast(`💥 ${local.name} 的 RPG 炸飞了 ${t.name}!`, 'red');
+            cb.onHitRival(rival, 'rpg', 65, knockX, true, false);
+            cb.onBroadcast(
+              t('itemHitFeed', { from: local.name, item: itemName('rpg'), to: rival.name }),
+              'red',
+              'blast'
+            );
             cb.onPublishNetEvent({
               t: 'item_hit',
               item: 'rpg',
-              to: t.id,
-              toName: t.name,
-              s: t.s,
-              x: t.x,
+              to: rival.id,
+              toName: rival.name,
+              s: rival.s,
+              x: rival.x,
               dmg: 65,
               knockX,
               ko: true,
@@ -1349,9 +1468,14 @@ export class ItemSystem {
         cb.onParticles('crash', r.s, r.x, 1.0, local.speed * 0.3);
         cb.onPopup('BOOM', r.s, r.x, 1.75);
         if (r.isBotOwner) {
-          const knockX = local.x >= r.x ? 15 : -15;
-          cb.onLocalDamage(60, knockX, true, `${r.ownerName} RPG`, 'BOOM');
-          cb.onBroadcast(`💥 ${r.ownerName} 的 RPG 炸飞了 ${local.name}!`, 'red');
+          // Softened bot RPG (~37% less damage, no instant full-HP wipeout)
+          const knockX = local.x >= r.x ? 10.5 : -10.5;
+          cb.onLocalDamage(38, knockX, false, `${r.ownerName} ${itemName('rpg')}`, 'BOOM', 'blast');
+          cb.onBroadcast(
+            t('itemHitFeed', { from: r.ownerName, item: itemName('rpg'), to: local.name }),
+            'red',
+            'blast'
+          );
         }
       }
     }
@@ -1375,7 +1499,7 @@ export class ItemSystem {
           jet.dropTimer = 0.17;
           const idx = 5 - jet.dropsLeft;
           const laneX = LANE_CENTERS[(idx + Math.abs(Math.floor(jet.x))) % 4];
-          this.spawnBomb(jet.ownerId, jet.ownerName, jet.s + 26, laneX);
+          this.spawnBomb(jet.ownerId, jet.ownerName, jet.isBotOwner, jet.s + 26, laneX);
           jet.dropsLeft--;
         }
       }
@@ -1406,19 +1530,23 @@ export class ItemSystem {
         // Blast radius damage (cyclic across 2400m seam)
         if (b.ownerId === local.id) {
           for (let j = 0; j < rivals.length; j++) {
-            const t = rivals[j];
-            if (t.crashed || t.invulnTimer > 0) continue;
-            if (Math.abs(signedTrackDelta(t.s, b.s)) < 5.5 && Math.abs(t.x - b.x) < 3.2) {
-              const knockX = t.x >= b.x ? 15 : -15;
-              cb.onHitRival(t, 'airstrike', 60, knockX, true, false);
-              cb.onBroadcast(`✈️ ${local.name} 的空袭轰炸了 ${t.name}!`, 'red');
+            const rival = rivals[j];
+            if (rival.crashed || rival.invulnTimer > 0) continue;
+            if (Math.abs(signedTrackDelta(rival.s, b.s)) < 5.5 && Math.abs(rival.x - b.x) < 3.2) {
+              const knockX = rival.x >= b.x ? 15 : -15;
+              cb.onHitRival(rival, 'airstrike', 60, knockX, true, false);
+              cb.onBroadcast(
+                t('itemHitFeed', { from: local.name, item: itemName('airstrike'), to: rival.name }),
+                'red',
+                'item_airstrike'
+              );
               cb.onPublishNetEvent({
                 t: 'item_hit',
                 item: 'airstrike',
-                to: t.id,
-                toName: t.name,
-                s: t.s,
-                x: t.x,
+                to: rival.id,
+                toName: rival.name,
+                s: rival.s,
+                x: rival.x,
                 dmg: 60,
                 knockX,
                 ko: true,
@@ -1430,8 +1558,16 @@ export class ItemSystem {
           absLocalDs < 5.2 &&
           Math.abs(local.x - b.x) < 3.0
         ) {
-          const knockX = local.x >= b.x ? 15 : -15;
-          cb.onLocalDamage(60, knockX, true, `${b.ownerName} 空中支援`, 'BOOM');
+          const knockMag = b.isBotOwner ? 10.5 : 15;
+          const knockX = local.x >= b.x ? knockMag : -knockMag;
+          cb.onLocalDamage(
+            b.isBotOwner ? 38 : 60,
+            knockX,
+            !b.isBotOwner,
+            `${b.ownerName} ${itemName('airstrike')}`,
+            'BOOM',
+            'item_airstrike'
+          );
         }
 
         // Bomb blasts scatter overloaded cargo trucks in blast radius!
@@ -1483,7 +1619,8 @@ export class ItemSystem {
         if (boxing) {
           const shoveX = target.x >= cop.x ? 7.5 : -7.5;
           if (target.id === local.id) {
-            cb.onLocalPoliceDrag(dt, shoveX);
+            const scale = cop.isBotOwner ? 0.65 : 1.0;
+            cb.onLocalPoliceDrag(dt * scale, shoveX * scale);
           } else if (cop.ownerId === local.id) {
             cb.onPoliceDragRival(target, dt, shoveX);
           }
@@ -1553,9 +1690,16 @@ export class ItemSystem {
           continue;
         }
         if (h.kind === 'banana') {
+          const label = itemName('banana');
+          const spinDur = h.isBotOwner ? 0.95 : 1.3;
+          const spinDmg = h.isBotOwner ? 14 : 22;
           cb.onSfx('bananaSlip');
-          cb.onLocalSpinOut(1.3, 22, `${h.ownerName} 香蕉皮`);
-          cb.onBroadcast(`🍌 ${local.name} 踩中了 ${h.ownerName} 的香蕉皮!`, 'gold');
+          cb.onLocalSpinOut(spinDur, spinDmg, `${h.ownerName} ${label}`);
+          cb.onBroadcast(
+            t('itemHitFeed', { from: h.ownerName, item: label, to: local.name }),
+            'gold',
+            'item_banana'
+          );
           if (h.ownerId !== local.id) {
             cb.onPublishNetEvent({
               t: 'item_hit',
@@ -1564,14 +1708,28 @@ export class ItemSystem {
               toName: local.name,
               s: h.s,
               x: h.x,
-              dmg: 22,
+              dmg: spinDmg,
             });
           }
         } else {
+          const label = itemName('trap');
+          const trapDmg = h.isBotOwner ? 28 : 45;
+          const trapKnock = h.isBotOwner ? 8 : 10;
           cb.onSfx('explosion');
           cb.onParticles('spark', h.s, h.x, 0.5, local.speed * 0.35);
-          cb.onLocalDamage(45, local.vx >= 0 ? 10 : -10, true, `${h.ownerName} 路钉陷阱`, 'KO');
-          cb.onBroadcast(`⚙️ ${local.name} 撞上了 ${h.ownerName} 的路钉陷阱!`, 'red');
+          cb.onLocalDamage(
+            trapDmg,
+            local.vx >= 0 ? trapKnock : -trapKnock,
+            !h.isBotOwner,
+            `${h.ownerName} ${label}`,
+            'KO',
+            'item_trap'
+          );
+          cb.onBroadcast(
+            t('itemHitFeed', { from: h.ownerName, item: label, to: local.name }),
+            'red',
+            'item_trap'
+          );
         }
         continue;
       }
@@ -1586,13 +1744,21 @@ export class ItemSystem {
             cb.onSfx('bananaSlip');
             cb.onPopup('SLIP', r.s, r.x, 1.65);
             cb.onHitRival(r, 'banana', 22, 0, false, true);
-            cb.onBroadcast(`🍌 ${r.name} 踩中了 ${h.ownerName} 的香蕉皮!`, 'gold');
+            cb.onBroadcast(
+              t('itemHitFeed', { from: h.ownerName, item: itemName('banana'), to: r.name }),
+              'gold',
+              'item_banana'
+            );
           } else {
             cb.onSfx('explosion');
             cb.onParticles('spark', h.s, h.x, 0.5, r.speed * 0.35);
             cb.onPopup('KO', r.s, r.x, 1.7);
             cb.onHitRival(r, 'trap', 45, r.x >= h.x ? 12 : -12, true, false);
-            cb.onBroadcast(`⚙️ ${r.name} 撞上了 ${h.ownerName} 的路钉陷阱!`, 'red');
+            cb.onBroadcast(
+              t('itemHitFeed', { from: h.ownerName, item: itemName('trap'), to: r.name }),
+              'red',
+              'item_trap'
+            );
           }
           break;
         }
@@ -1653,7 +1819,7 @@ export class ItemSystem {
       if (bestTruck) {
         this.sniperCandidates.push({
           id: `truck-${bestTruck.id}`,
-          name: '🚛 满载大货车',
+          name: cargoTruckLabel(),
           distM: Math.round(bestDist),
           avatarIdx: 4,
         });
@@ -1739,13 +1905,20 @@ export class ItemSystem {
     }
   }
 
-  private spawnBomberJet(ownerId: string, ownerName: string, s: number, x: number): void {
+  private spawnBomberJet(
+    ownerId: string,
+    ownerName: string,
+    isBotOwner: boolean,
+    s: number,
+    x: number
+  ): void {
     for (let i = 0; i < this.jets.length; i++) {
       const jet = this.jets[i];
       if (!jet.active) {
         jet.active = true;
         jet.ownerId = ownerId;
         jet.ownerName = ownerName;
+        jet.isBotOwner = isBotOwner;
         jet.s = s;
         jet.x = clamp(x, -4, 4);
         jet.y = 14.5;
@@ -1758,13 +1931,20 @@ export class ItemSystem {
     }
   }
 
-  private spawnBomb(ownerId: string, ownerName: string, s: number, x: number): void {
+  private spawnBomb(
+    ownerId: string,
+    ownerName: string,
+    isBotOwner: boolean,
+    s: number,
+    x: number
+  ): void {
     for (let i = 0; i < this.bombs.length; i++) {
       const b = this.bombs[i];
       if (!b.active) {
         b.active = true;
         b.ownerId = ownerId;
         b.ownerName = ownerName;
+        b.isBotOwner = isBotOwner;
         b.s = s;
         b.x = x;
         b.y = 13.5;
@@ -1779,6 +1959,7 @@ export class ItemSystem {
   private spawnInterceptor(
     ownerId: string,
     ownerName: string,
+    isBotOwner: boolean,
     targetId: string | null,
     s: number,
     x: number
@@ -1789,11 +1970,12 @@ export class ItemSystem {
         cop.active = true;
         cop.ownerId = ownerId;
         cop.ownerName = ownerName;
+        cop.isBotOwner = isBotOwner;
         cop.targetId = targetId;
         cop.s = s;
         cop.x = x;
         cop.speed = 62;
-        cop.life = 4.5;
+        cop.life = isBotOwner ? 3.5 : 4.5;
         cop.sirenTimer = 0.1;
         return;
       }
@@ -1804,6 +1986,7 @@ export class ItemSystem {
     kind: 'trap' | 'banana',
     ownerId: string,
     ownerName: string,
+    isBotOwner: boolean,
     s: number,
     x: number
   ): void {
@@ -1818,6 +2001,7 @@ export class ItemSystem {
     slot.kind = kind;
     slot.ownerId = ownerId;
     slot.ownerName = ownerName;
+    slot.isBotOwner = isBotOwner;
     slot.s = s;
     slot.x = clamp(x, -ROAD_HALF_WIDTH + 0.9, ROAD_HALF_WIDTH - 0.9);
     slot.life = 18.0;

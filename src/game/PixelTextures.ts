@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { t } from '../i18n';
 import { drawRiderAvatarToContext } from './PixelAvatars';
 
 function makePixelCanvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
@@ -479,14 +480,30 @@ function createLapArchTexture(): THREE.CanvasTexture {
   ctx.fillRect(0, 6, 192, 2);
   ctx.fillRect(0, 24, 192, 2);
 
-  // Bold pixel arcade banner label
+  // Bold pixel arcade banner label + procedural pixel star (zero emoji/symbol chars)
   ctx.font = 'bold 14px "Press Start 2P", "Silkscreen", monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#000000';
-  ctx.fillText('START ★ LAP', 98, 18);
+  ctx.fillText('START', 48, 18);
+  ctx.fillText('LAP', 148, 18);
   ctx.fillStyle = '#ffd166';
-  ctx.fillText('START ★ LAP', 96, 16);
+  ctx.fillText('START', 46, 16);
+  ctx.fillText('LAP', 146, 16);
+
+  // Crisp procedural 10x10 pixel star emblem at center (x=96, y=16)
+  const sx = 96;
+  const sy = 16;
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(sx - 1 + 1, sy - 5 + 1, 2, 10);
+  ctx.fillRect(sx - 5 + 1, sy - 1 + 1, 10, 2);
+  ctx.fillRect(sx - 3 + 1, sy - 3 + 1, 6, 6);
+  ctx.fillStyle = '#ffd166';
+  ctx.fillRect(sx - 1, sy - 5, 2, 10);
+  ctx.fillRect(sx - 5, sy - 1, 10, 2);
+  ctx.fillRect(sx - 3, sy - 3, 6, 6);
+  ctx.fillStyle = '#fff9db';
+  ctx.fillRect(sx - 1, sy - 1, 2, 2);
 
   return toCrispTexture(c, 1, 1);
 }
@@ -529,6 +546,31 @@ function createMysteryCrateTexture(): THREE.CanvasTexture {
 }
 
 /**
+ * Draws a crisp procedural 10x12 pixel-art flame emblem directly onto a 2D canvas (zero emoji).
+ */
+function drawPixelFlameEmblem(ctx: CanvasRenderingContext2D, x: number, y: number): void {
+  // Outer crimson/red flame silhouette
+  ctx.fillStyle = '#ff2a54';
+  ctx.fillRect(x + 4, y + 0, 2, 2);
+  ctx.fillRect(x + 3, y + 2, 4, 2);
+  ctx.fillRect(x + 1, y + 4, 8, 3);
+  ctx.fillRect(x + 0, y + 7, 10, 3);
+  ctx.fillRect(x + 2, y + 10, 6, 2);
+
+  // Mid orange glow
+  ctx.fillStyle = '#ff7b00';
+  ctx.fillRect(x + 4, y + 2, 2, 2);
+  ctx.fillRect(x + 2, y + 4, 6, 5);
+  ctx.fillRect(x + 3, y + 9, 4, 2);
+
+  // Bright yellow-white core
+  ctx.fillStyle = '#ffe600';
+  ctx.fillRect(x + 3, y + 6, 4, 4);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x + 4, y + 8, 2, 2);
+}
+
+/**
  * Generates or updates a crisp pixel floating nameplate + pixel avatar + mini HP strip texture for a rider.
  * Optimized for 192x48 canvas (~44% less VRAM & upload bandwidth than 256x64).
  */
@@ -548,13 +590,17 @@ export function drawNameplateCanvas(
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
-  const label = enraged ? `🔥 ${name.slice(0, 8)} [狂暴]` : name.slice(0, 14);
+  const label = enraged ? `${name.slice(0, 8)} ${t('rageTag')}` : name.slice(0, 14);
   ctx.font = 'bold 14px "Silkscreen", "Press Start 2P", monospace';
   const avatarSize = 24;
   const avatarBox = avatarSize + 4; // 2px pixel border on all sides -> 28px
   const gap = 3;
+  const flamePad = enraged ? 14 : 0;
   const maxNameBoxW = w - avatarBox - gap - 6;
-  const nameBoxW = Math.min(maxNameBoxW, Math.max(58, Math.ceil(ctx.measureText(label).width) + 14));
+  const nameBoxW = Math.min(
+    maxNameBoxW,
+    Math.max(58, Math.ceil(ctx.measureText(label).width) + 14 + flamePad)
+  );
   const totalW = avatarBox + gap + nameBoxW;
   const startX = Math.floor((w - totalW) / 2);
   const boxY = 4;
@@ -578,15 +624,22 @@ export function drawNameplateCanvas(
   ctx.fillRect(nameX, boxY, 2, boxH);
   ctx.fillRect(nameX + nameBoxW - 2, boxY, 2, boxH);
 
+  // Procedural pixel flame emblem on left inside enraged nameplate
+  if (enraged) {
+    drawPixelFlameEmblem(ctx, nameX + 5, boxY + 8);
+  }
+
   // Name text
-  const textCenterX = nameX + nameBoxW / 2;
+  const textLeft = nameX + flamePad;
+  const textAreaW = nameBoxW - flamePad;
+  const textCenterX = textLeft + textAreaW / 2;
   const textCenterY = boxY + boxH / 2 + 1;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#090b12';
-  ctx.fillText(label, textCenterX + 1, textCenterY + 1, nameBoxW - 10);
+  ctx.fillText(label, textCenterX + 1, textCenterY + 1, textAreaW - 8);
   ctx.fillStyle = enraged ? '#ffd166' : isBot && accentHex === '#8d99ae' ? '#ced4da' : '#ffffff';
-  ctx.fillText(label, textCenterX, textCenterY, nameBoxW - 10);
+  ctx.fillText(label, textCenterX, textCenterY, textAreaW - 8);
 
   // Mini pixel HP strip underneath
   const barW = Math.min(totalW - 4, 118);

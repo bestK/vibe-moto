@@ -23,8 +23,10 @@ import {
   WeaponType,
 } from './game/types';
 import { CameraMode, WorldRenderer } from './game/WorldRenderer';
+import { t } from './i18n';
 import { ConnectionStatus, MqttSync, PackSpawnTarget } from './net/MqttSync';
 import { Hud, TouchInputPatch } from './ui/Hud';
+import { ANIMAL_ICON_MAP, type PixelIconId } from './ui/PixelIcons';
 
 const STORAGE_NAME_KEY = 'vibemoto_name';
 const STORAGE_COLOR_KEY = 'vibemoto_color';
@@ -192,7 +194,7 @@ function spawnPackWarpFx(target: PackSpawnTarget): void {
     6,
     target.speed * 0.45
   );
-  hud.showToast(`⚡ 5M → ${target.targetName}`, 'cyan');
+  hud.showToast(t('packSpawn', { name: target.targetName }), 'cyan', 'bolt');
 }
 
 const mqtt = new MqttSync(
@@ -237,7 +239,11 @@ const mqtt = new MqttSync(
         player.state.x,
         1.75
       );
-      hud.showToast(isKo ? `K.O. BY ${ev.fromName}!` : `${ev.fromName} HIT!`, 'red');
+      hud.showToast(
+        isKo ? t('koBy', { name: ev.fromName }) : t('hitBy', { name: ev.fromName }),
+        'red',
+        isKo ? 'skull' : 'blast'
+      );
     },
     onItemEvent(ev: ItemNetEvent) {
       items.handleNetEvent(ev, player.state, itemCallbacks);
@@ -246,7 +252,12 @@ const mqtt = new MqttSync(
       setCustomAvatar(peerId, dataUrl);
     },
     onPeerEvent(msg: string) {
-      hud.showToast(msg, 'cyan');
+      hud.showToast(msg, 'cyan', 'globe');
+    },
+    onRoomPasswordRequired(roomSlug: string) {
+      clearHeldInputs();
+      hud.setRoomInfo(roomSlug, true);
+      hud.openHomeModal(roomSlug, t('passwordRequired'));
     },
   },
   initialCustomAvatar
@@ -269,6 +280,51 @@ if (initialCustomAvatar) {
 }
 
 player = new PlayerPhysics(mqtt.clientId, initialName, colorIdx, initialAvatar);
+
+function isUiBlockingGameplay(): boolean {
+  return hud.isEditingName() || hud.isHomeModalOpen();
+}
+
+function updateRoomUrlParam(roomSlug: string): void {
+  try {
+    const url = new URL(window.location.href);
+    if (roomSlug === 'global') {
+      url.searchParams.delete('room');
+    } else {
+      url.searchParams.set('room', roomSlug);
+    }
+    window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+  } catch {
+    // Ignore restricted history contexts
+  }
+}
+
+function copyTextToClipboard(text: string): void {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    navigator.clipboard.writeText(text).catch(() => {
+      fallbackCopyText(text);
+    });
+    return;
+  }
+  fallbackCopyText(text);
+}
+
+function fallbackCopyText(text: string): void {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    ta.style.pointerEvents = 'none';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  } catch {
+    // Ignore restricted clipboard contexts
+  }
+}
 
 function clearHeldInputs(): void {
   pressedKeys.clear();
@@ -363,10 +419,10 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
         setCustomAvatar(mqtt.clientId, dataUrl);
         mqtt.setCustomAvatar(dataUrl);
         hud.refreshLocalAvatar();
-        hud.showToast('📷 自定义头像已同步', 'cyan');
+        hud.showToast(t('avatarSynced'), 'cyan', 'upload');
       })
       .catch(() => {
-        hud.showToast('头像上传失败', 'red');
+        hud.showToast(t('avatarFailed'), 'red', 'warning');
       });
   },
   onClearCustomAvatar() {
@@ -374,7 +430,7 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     setCustomAvatar(mqtt.clientId, null);
     mqtt.setCustomAvatar(null);
     hud.refreshLocalAvatar();
-    hud.showToast('已恢复像素头像', 'gold');
+    hud.showToast(t('avatarReset'), 'gold', 'reset');
   },
   onUseItem(slotIndex = 0) {
     audio.unlock();
@@ -411,10 +467,61 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     const target = mqtt.computeSpawnBehindLastPlayer();
     if (target) {
       spawnPackWarpFx(target);
+    } else {
+      hud.showToast(t('regroupNone'), 'gold', 'regroup');
     }
   },
   onGyroSteer(steer: number | null) {
     gyroSteer = steer;
+  },
+  onRoomModalToggle(open: boolean) {
+    if (open) {
+      clearHeldInputs();
+    }
+  },
+  async onJoinRoom(room: string, password: string) {
+    audio.unlock();
+    hud.setHomeBusy(true);
+    hud.setHomeError(null);
+    try {
+      const res = await mqtt.joinRoom(room, password);
+      hud.setHomeBusy(false);
+      if (!res.ok) {
+        const errKey =
+          res.error === 'password_required'
+            ? 'passwordRequired'
+            : res.error === 'wrong_password'
+              ? 'wrongPassword'
+              : 'invalidRoom';
+        hud.setHomeError(t(errKey));
+        return;
+      }
+      updateRoomUrlParam(res.room);
+      hud.setRoomInfo(res.room, res.locked);
+      hud.closeHomeModal();
+      items.resetActiveEffects();
+      player.state.incomingLockName = null;
+      animals.reset();
+      audio.playSpawnChime();
+      const displayLabel = res.room === 'global' ? t('publicHall') : res.room;
+      hud.showToast(
+        t(res.created ? 'roomCreated' : 'roomJoined', { room: displayLabel }),
+        'cyan',
+        res.locked ? 'lock' : 'door'
+      );
+    } catch {
+      hud.setHomeBusy(false);
+      hud.setHomeError(t('invalidRoom'));
+    }
+  },
+  onCopyRoomLink() {
+    const roomSlug = mqtt.displayRoom;
+    const shareUrl =
+      roomSlug === 'global'
+        ? `${window.location.origin}${window.location.pathname}`
+        : `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomSlug)}`;
+    copyTextToClipboard(shareUrl);
+    hud.showToast(t('linkCopied'), 'gold', 'copy');
   },
   onTouchInput(patch: TouchInputPatch) {
     audio.unlock();
@@ -428,21 +535,21 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
       touchState.analogSteer = patch.analogSteer ?? null;
     }
     if (patch.attackLeft !== undefined) {
-      if (patch.attackLeft && !touchState.attackLeft && !hud.isEditingName()) {
+      if (patch.attackLeft && !touchState.attackLeft && !isUiBlockingGameplay()) {
         player.triggerAttack(1, combatTargets);
         hud.flashTapAttack('left');
       }
       touchState.attackLeft = patch.attackLeft;
     }
     if (patch.attackRight !== undefined) {
-      if (patch.attackRight && !touchState.attackRight && !hud.isEditingName()) {
+      if (patch.attackRight && !touchState.attackRight && !isUiBlockingGameplay()) {
         player.triggerAttack(2, combatTargets);
         hud.flashTapAttack('right');
       }
       touchState.attackRight = patch.attackRight;
     }
     if (patch.attackAuto !== undefined) {
-      if (patch.attackAuto && !hud.isEditingName()) {
+      if (patch.attackAuto && !isUiBlockingGameplay()) {
         player.triggerAttack(0, combatTargets);
         hud.flashTapAttack(player.state.attackSide === 1 ? 'left' : 'right');
       }
@@ -452,12 +559,14 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   },
 });
 
+hud.setRoomInfo(mqtt.displayRoom, mqtt.isRoomLocked);
+
 itemCallbacks = {
-  onBroadcast(text, accent = 'gold') {
-    hud.pushBroadcast(text, accent);
+  onBroadcast(text, accent = 'gold', icon?: PixelIconId) {
+    hud.pushBroadcast(text, accent, icon);
   },
-  onToast(text, accent = 'gold') {
-    hud.showToast(text, accent);
+  onToast(text, accent = 'gold', icon?: PixelIconId) {
+    hud.showToast(text, accent, icon);
   },
   onPublishNetEvent(ev) {
     mqtt.publishItemEvent(ev);
@@ -493,13 +602,24 @@ itemCallbacks = {
       }
       world.triggerShake(kind === 'blast' ? 0.45 : 0.25, 0.22);
     }
-    if (res.broadcastText) {
+    if (res.broadcastKey) {
       const accent = kind === 'banana' ? 'gold' : 'red';
-      hud.pushBroadcast(res.broadcastText, accent);
-      hud.showToast(res.broadcastText, accent);
+      const icon: PixelIconId =
+        kind === 'banana'
+          ? 'item_banana'
+          : kind === 'trap' || kind === 'sniper'
+            ? 'item_trap'
+            : kind === 'police'
+              ? 'item_police'
+              : kind === 'magnet'
+                ? 'item_magnet'
+                : 'blast';
+      const msg = t(res.broadcastKey);
+      hud.pushBroadcast(msg, accent, icon);
+      hud.showToast(msg, accent, icon);
     }
   },
-  onLocalDamage(dmg, knockX, ko, sourceLabel, popup) {
+  onLocalDamage(dmg, knockX, ko, sourceLabel, popup, icon?: PixelIconId) {
     const causedKo = player.applyExternalHit(dmg, knockX, ko);
     const isKo = causedKo || (ko && player.state.crashed);
     hitstopTimer = Math.max(hitstopTimer, HITSTOP_DURATION);
@@ -509,13 +629,17 @@ itemCallbacks = {
     world.triggerShake(isKo ? 0.68 : 0.36, isKo ? 0.38 : 0.22);
     spawnParticlePreset('crash', player.state.s, player.state.x, 0.9, player.state.speed * 0.35);
     world.spawnHitPopup(popup, player.state.s, player.state.x, 1.75);
-    hud.showToast(isKo ? `K.O.! ${sourceLabel}` : `${sourceLabel} 命中!`, 'red');
+    hud.showToast(
+      isKo ? t('koBy', { name: sourceLabel }) : t('hitBy', { name: sourceLabel }),
+      'red',
+      isKo ? 'skull' : (icon ?? 'blast')
+    );
   },
   onLocalSpinOut(duration, dmg, sourceLabel) {
     const causedKo = player.applySpinOut(duration, dmg);
     world.triggerShake(0.32, 0.24);
     world.spawnHitPopup(causedKo ? 'KO' : 'SLIP', player.state.s, player.state.x, 1.7);
-    hud.showToast(`🍌 ${sourceLabel} 打滑!`, 'gold');
+    hud.showToast(t('hitBy', { name: sourceLabel }), 'gold', 'item_banana');
     if (causedKo) {
       audio.playCrash();
     }
@@ -622,7 +746,7 @@ const playerCallbacks: PlayerCallbacks = {
         14,
         target.speed * 0.4
       );
-      hud.showToast(`K.O.! ${target.name}`, 'gold');
+      hud.showToast(t('koTarget', { name: target.name }), 'gold', 'skull');
     }
   },
   onWheelieSlam(charge: number, hitsCount: number) {
@@ -653,23 +777,24 @@ const playerCallbacks: PlayerCallbacks = {
     audio.playHit(1, confirmedKo);
     world.spawnHitPopup(confirmedKo ? 'KO' : 'SLAM', target.s, target.x, target.y + 1.75);
     hud.pushBroadcast(
-      `🏍️ ${player.state.name} 翘头猛压击飞了 ${target.name}!`,
-      confirmedKo ? 'red' : 'gold'
+      t('wheelieSlamFeed', { name: player.state.name, target: target.name }),
+      confirmedKo ? 'red' : 'gold',
+      'bike'
     );
     if (confirmedKo) {
-      hud.showToast(`SLAM K.O.! ${target.name}`, 'gold');
+      hud.showToast(t('koTarget', { name: target.name }), 'gold', 'skull');
     }
   },
   onWheelieFlip() {
     world.spawnHitPopup('FLIP', player.state.s, player.state.x, 1.85);
-    hud.showToast('FLIPPED! 翘头翻车!', 'red');
-    hud.pushBroadcast(`💥 ${player.state.name} 翘头过度翻车了!`, 'red');
+    hud.showToast(t('wipeout'), 'red', 'blast');
+    hud.pushBroadcast(t('wheelieFlipFeed', { name: player.state.name }), 'red', 'blast');
   },
   onBoostPad() {
     audio.playBoost();
     world.triggerShake(0.22, 0.22);
     world.spawnHitPopup('BOOST', player.state.s + 1.2, player.state.x, 1.55);
-    hud.showToast('⚡ BOOST!', 'cyan');
+    hud.showToast(t('boostPad'), 'cyan', 'bolt');
   },
   onNearMiss() {
     audio.playHorn();
@@ -685,12 +810,12 @@ const playerCallbacks: PlayerCallbacks = {
       6,
       player.state.speed * 0.4
     );
-    hud.showToast('NEAR MISS +N2O', 'cyan');
+    hud.showToast(t('nearMiss'), 'cyan', 'bolt');
   },
   onCrash() {
     audio.playCrash();
     world.triggerShake(0.66, 0.4);
-    hud.showToast('WIPEOUT!', 'red');
+    hud.showToast(t('wipeout'), 'red', 'warning');
   },
   onParticles: spawnParticlePreset,
 };
@@ -700,17 +825,18 @@ ai.setOnDeliveryEnrage((riderName, role) => {
   world.triggerShake(0.36, 0.26);
   const line =
     role === 'meituan'
-      ? `💢 ${riderName} 狂暴了！「影响送餐超时扣钱！别想跑！」`
-      : `💢 ${riderName} 狂暴了！「外卖洒汤了！给我站住！」`;
-  hud.pushBroadcast(line, 'red');
-  hud.showToast(`💢 ${riderName} 狂暴追杀!`, 'red');
+      ? t('meituanRageFeed', { name: riderName })
+      : t('elemeRageFeed', { name: riderName });
+  hud.pushBroadcast(line, 'red', 'flame');
+  hud.showToast(t('rageHunt', { name: riderName }), 'red', 'flame');
 });
 
 const animalCallbacks: AnimalCallbacks = {
   onWarn(text: string, species: AnimalSpecies) {
     audio.playAnimalSound(species);
-    hud.pushBroadcast(text, 'gold');
-    hud.showToast(text, 'gold');
+    const icon = ANIMAL_ICON_MAP[species];
+    hud.pushBroadcast(text, 'gold', icon);
+    hud.showToast(text, 'gold', icon);
   },
   onPlayerHit(species: AnimalSpecies, x: number) {
     audio.playAnimalSound(species);
@@ -722,12 +848,12 @@ const animalCallbacks: AnimalCallbacks = {
     world.triggerShake(causedKo ? 0.62 : 0.42, 0.28);
     spawnParticlePreset('crash', player.state.s, player.state.x, 0.7, player.state.speed * 0.35);
     world.spawnHitPopup(causedKo ? 'KO' : 'BONK', player.state.s, player.state.x, 1.7);
-    hud.showToast(causedKo ? '撞飞翻车!' : '撞到过路动物!', 'red');
+    hud.showToast(t('animalHit'), 'red', ANIMAL_ICON_MAP[species]);
   },
   onAnimalDodged(species: AnimalSpecies) {
     player.state.nitro = Math.min(100, player.state.nitro + 12);
     audio.playAnimalSound(species);
-    hud.showToast('跃过动物 +12 N2O!', 'cyan');
+    hud.showToast(t('animalDodge'), 'cyan', ANIMAL_ICON_MAP[species]);
   },
 };
 
@@ -752,7 +878,11 @@ function handleBotHitPlayer(dmg: number, knockX: number, botName: string): void 
     player.state.speed * 0.35
   );
   world.spawnHitPopup(causedKo ? 'KO' : 'SMACK', player.state.s, player.state.x, 1.7);
-  hud.showToast(causedKo ? `K.O. BY ${botName}!` : `HIT BY ${botName}`, 'red');
+  hud.showToast(
+    causedKo ? t('koBy', { name: botName }) : t('hitBy', { name: botName }),
+    'red',
+    causedKo ? 'skull' : 'warning'
+  );
 }
 
 // Unlock Web Audio safely on first user gesture
@@ -773,7 +903,7 @@ const PREVENT_DEFAULT_CODES = new Set([
 ]);
 
 window.addEventListener('keydown', (e: KeyboardEvent) => {
-  if (hud.isEditingName()) return;
+  if (isUiBlockingGameplay()) return;
 
   if (PREVENT_DEFAULT_CODES.has(e.code)) {
     e.preventDefault();
@@ -814,18 +944,18 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
       break;
     case 'KeyC': {
       const mode = cycleCamera();
-      const labels = ['CAM: CHASE', 'CAM: LOW', 'CAM: HOOD'];
+      const labels = [t('camChase'), t('camLow'), t('camHood')];
       hud.showToast(labels[mode], 'gold');
       break;
     }
     case 'KeyM': {
       const muted = toggleMute();
-      hud.showToast(muted ? 'AUDIO OFF' : 'AUDIO ON', 'gold');
+      hud.showToast(muted ? 'OFF' : 'ON', 'gold', muted ? 'soundOff' : 'soundOn');
       break;
     }
     case 'KeyP': {
       const scale = togglePixelScale();
-      hud.showToast(scale === 2 ? 'PIXEL MODE' : 'HD MODE', 'gold');
+      hud.showToast(scale === 2 ? t('pixelMode') : t('hdMode'), 'gold');
       break;
     }
   }
@@ -845,7 +975,7 @@ canvas.addEventListener('contextmenu', (e: MouseEvent) => {
 });
 
 canvas.addEventListener('pointerdown', (e: PointerEvent) => {
-  if (e.target !== canvas || hud.isEditingName()) return;
+  if (e.target !== canvas || isUiBlockingGameplay()) return;
   audio.unlock();
   if (e.pointerType === 'touch') {
     touchModeActive = true;
@@ -899,7 +1029,7 @@ if (typeof ResizeObserver !== 'undefined') {
 }
 
 function syncInputState(): void {
-  if (hud.isEditingName()) {
+  if (isUiBlockingGameplay()) {
     inputState.throttle = false;
     inputState.brake = false;
     inputState.left = false;
@@ -1119,8 +1249,8 @@ function frame(nowPerfMs: number): void {
           player.state.nitro = Math.min(100, player.state.nitro + 25);
           audio.playFuelChime();
           spawnParticlePreset('nitro', player.state.s, player.state.x, 0.7, player.state.speed * 0.4);
-          hud.showToast('⛽ 中国加油 +25% N2O', 'cyan');
-          hud.pushBroadcast(`⛽ ${player.state.name} 路过中国加油站，氮气 +25%!`, 'cyan');
+          hud.showToast(t('fuelToast'), 'cyan', 'fuel');
+          hud.pushBroadcast(t('fuelFeed', { name: player.state.name }), 'cyan', 'fuel');
           break;
         }
       }
@@ -1131,8 +1261,9 @@ function frame(nowPerfMs: number): void {
     if (curLap > lastLap) {
       lastLap = curLap;
       audio.playSpawnChime();
-      hud.showToast(`🏁 LAP ${curLap}!`, 'gold');
-      hud.pushBroadcast(`🏁 ${player.state.name} 进入第 ${curLap} 圈!`, 'gold');
+      const lapLabel = t('lapToast', { lap: curLap });
+      hud.showToast(lapLabel, 'gold', 'flag');
+      hud.pushBroadcast(`${player.state.name} ${lapLabel}`, 'gold', 'flag');
     }
   }
 

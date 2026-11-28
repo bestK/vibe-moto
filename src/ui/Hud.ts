@@ -20,6 +20,20 @@ import {
   WEAPONS,
   WeaponType,
 } from '../game/types';
+import {
+  deliveryName,
+  itemName,
+  onLangChange,
+  t,
+  toggleLang,
+  weaponName,
+} from '../i18n';
+import {
+  ITEM_ICON_MAP,
+  PixelIconId,
+  WEAPON_ICON_MAP,
+  getPixelIconSvg,
+} from './PixelIcons';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline';
 export type ToastAccent = 'gold' | 'cyan' | 'red';
@@ -59,6 +73,9 @@ export interface HudCallbacks {
   onSelectWeapon(w: 0 | 1 | 2): void;
   onRegroupPack(): void;
   onGyroSteer(steer: number | null): void;
+  onRoomModalToggle?(open: boolean): void;
+  onJoinRoom?(room: string, password: string): Promise<void>;
+  onCopyRoomLink?(): void;
   onTouchInput?(patch: TouchInputPatch): void;
 }
 
@@ -73,63 +90,12 @@ const FAST_UPDATE_INTERVAL = 1 / 15; // ~15Hz for speed/nitro/HP/weapons/item/wh
 const SLOW_UPDATE_INTERVAL = 0.11; // ~9Hz for standings & radar
 const KEYCAP_FADE_SEC = 7.0;
 const TOAST_DURATION_MS = 1800;
-
-// Crisp pixel-art SVG icons (zero curves, crispEdges)
-const ICON_PENCIL =
-  '<svg class="vm-icon" width="11" height="11" viewBox="0 0 11 11" fill="currentColor" aria-hidden="true">' +
-  '<rect x="7" y="1" width="2" height="2"/><rect x="8" y="2" width="2" height="2"/>' +
-  '<rect x="5" y="3" width="2" height="2"/><rect x="6" y="4" width="2" height="2"/>' +
-  '<rect x="3" y="5" width="2" height="2"/><rect x="4" y="6" width="2" height="2"/>' +
-  '<rect x="1" y="7" width="2" height="2"/><rect x="2" y="8" width="2" height="2"/>' +
-  '<rect x="1" y="9" width="1" height="1"/>' +
-  '</svg>';
-
-const ICON_SOUND_ON =
-  '<svg class="vm-icon" width="14" height="12" viewBox="0 0 14 12" fill="currentColor" aria-hidden="true">' +
-  '<rect x="1" y="4" width="2" height="4"/><rect x="3" y="3" width="2" height="6"/>' +
-  '<rect x="5" y="1" width="2" height="10"/><rect x="9" y="4" width="1" height="4"/>' +
-  '<rect x="11" y="2" width="1" height="8"/><rect x="13" y="4" width="1" height="4"/>' +
-  '</svg>';
-
-const ICON_SOUND_OFF =
-  '<svg class="vm-icon" width="14" height="12" viewBox="0 0 14 12" fill="currentColor" aria-hidden="true">' +
-  '<rect x="1" y="4" width="2" height="4"/><rect x="3" y="3" width="2" height="6"/>' +
-  '<rect x="5" y="1" width="2" height="10"/>' +
-  '<rect x="9" y="3" width="2" height="2"/><rect x="12" y="3" width="2" height="2"/>' +
-  '<rect x="10" y="5" width="3" height="2"/>' +
-  '<rect x="9" y="7" width="2" height="2"/><rect x="12" y="7" width="2" height="2"/>' +
-  '</svg>';
-
-const ICON_REGROUP =
-  '<svg class="vm-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">' +
-  '<rect x="6" y="0" width="2" height="3"/><rect x="6" y="11" width="2" height="3"/>' +
-  '<rect x="0" y="6" width="3" height="2"/><rect x="11" y="6" width="3" height="2"/>' +
-  '<rect x="3" y="3" width="8" height="2"/><rect x="3" y="9" width="8" height="2"/>' +
-  '<rect x="3" y="5" width="2" height="4"/><rect x="9" y="5" width="2" height="4"/>' +
-  '<rect x="6" y="6" width="2" height="2"/>' +
-  '</svg>';
-
-const ICON_SKULL_SM =
-  '<svg class="vm-icon" width="8" height="8" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true">' +
-  '<rect x="2" y="0" width="4" height="1"/><rect x="1" y="1" width="6" height="4"/>' +
-  '<rect x="2" y="2" width="1" height="1" fill="#1c0810"/><rect x="5" y="2" width="1" height="1" fill="#1c0810"/>' +
-  '<rect x="2" y="5" width="4" height="2"/><rect x="3" y="6" width="1" height="1" fill="#1c0810"/>' +
-  '</svg>';
-
-const ICON_GYRO =
-  '<svg class="vm-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">' +
-  '<rect x="4" y="0" width="6" height="2"/><rect x="4" y="12" width="6" height="2"/>' +
-  '<rect x="0" y="4" width="2" height="6"/><rect x="12" y="4" width="2" height="6"/>' +
-  '<rect x="2" y="2" width="2" height="2"/><rect x="10" y="2" width="2" height="2"/>' +
-  '<rect x="2" y="10" width="2" height="2"/><rect x="10" y="10" width="2" height="2"/>' +
-  '<rect x="8" y="4" width="2" height="2"/><rect x="6" y="6" width="2" height="2"/>' +
-  '<rect x="4" y="8" width="2" height="2"/>' +
-  '</svg>';
-
 const GYRO_DEADZONE_DEG = 4.0;
 const GYRO_MAX_TILT_DEG = 25.0;
 const GYRO_SENSOR_TIMEOUT_MS = 900;
 const TAP_FLASH_MS = 160;
+const RECENT_ROOMS_KEY = 'vibemoto_recent_rooms';
+const MAX_RECENT_ROOMS = 4;
 
 interface StandingRowRefs {
   root: HTMLDivElement;
@@ -164,10 +130,17 @@ interface RadarDotRefs {
   clamped: boolean;
 }
 
+interface FeedLineRefs {
+  root: HTMLDivElement;
+  iconEl: HTMLSpanElement;
+  textEl: HTMLSpanElement;
+}
+
 interface FeedEntry {
   id: number;
   text: string;
   accent: BroadcastAccent;
+  icon?: PixelIconId;
   fading: boolean;
   fadeTimer: number;
   removeTimer: number;
@@ -250,6 +223,7 @@ export class Hud {
   private readonly avatarImgEl: HTMLImageElement;
   private readonly avatarPopoverEl: HTMLDivElement;
   private readonly avatarOptEls: HTMLButtonElement[] = [];
+  private avatarUploadLabelEl: HTMLSpanElement | null = null;
   private avatarResetBtnEl: HTMLButtonElement | null = null;
   private readonly nameplateEl: HTMLDivElement;
   private readonly nameTextEl: HTMLSpanElement;
@@ -259,29 +233,57 @@ export class Hud {
   private readonly muteBtnEl: HTMLButtonElement;
   private readonly pxBtnEl: HTMLButtonElement;
   private readonly camPips: HTMLSpanElement[] = [];
-  private readonly regroupBtnEl: HTMLButtonElement;
+  private readonly homeBtnEl: HTMLButtonElement;
+  private readonly langBtnEl: HTMLButtonElement;
   private readonly gyroBtnEl: HTMLButtonElement;
+  private readonly regroupBtnEl: HTMLButtonElement;
+
+  // Home / Room Lobby Modal
+  private readonly homeOverlayEl: HTMLDivElement;
+  private readonly homeTitleTextEl: HTMLSpanElement;
+  private readonly homeRoomIconEl: HTMLSpanElement;
+  private readonly homeRoomTextEl: HTMLSpanElement;
+  private readonly homeRoomPillEl: HTMLDivElement;
+  private readonly homeCopyBtnEl: HTMLButtonElement;
+  private readonly homeRoomInputEl: HTMLInputElement;
+  private readonly homePassInputEl: HTMLInputElement;
+  private readonly homeDiceBtnEl: HTMLButtonElement;
+  private readonly homeErrorEl: HTMLDivElement;
+  private readonly homeErrorTextEl: HTMLSpanElement;
+  private readonly homeJoinBtnEl: HTMLButtonElement;
+  private readonly homeJoinTextEl: HTMLSpanElement;
+  private readonly homePublicBtnEl: HTMLButtonElement;
+  private readonly homePublicTextEl: HTMLSpanElement;
+  private readonly homeResumeBtnEl: HTMLButtonElement;
+  private readonly homeRecentWrapEl: HTMLDivElement;
+  private readonly homeRecentLabelEl: HTMLSpanElement;
+  private readonly homeRecentChipsEl: HTMLDivElement;
   private readonly tapFlashLeftEl: HTMLDivElement;
   private readonly tapFlashRightEl: HTMLDivElement;
   private rightJoyItemEl: HTMLSpanElement | null = null;
   private rightJoyItemIconEl: HTMLSpanElement | null = null;
   private rightJoyItemCountEl: HTMLSpanElement | null = null;
-  private readonly feedLines: HTMLDivElement[] = [];
+  private readonly feedLines: FeedLineRefs[] = [];
   private readonly feedEntries: FeedEntry[] = [];
   private nextFeedId = 1;
 
-  // Top-center toast, incoming lock warning & sniper UI
+  // Top-center toast, alert warnings & sniper UI
   private readonly toastEl: HTMLDivElement;
+  private readonly toastIconEl: HTMLSpanElement;
+  private readonly toastTextEl: HTMLSpanElement;
   private toastRafId: number | null = null;
   private toastHideTimer: number | null = null;
   private toastClearTimer: number | null = null;
   private readonly dangerLockEl: HTMLDivElement;
+  private readonly dangerLockTextEl: HTMLSpanElement;
   private readonly enragedWarnEl: HTMLDivElement;
+  private readonly enragedWarnTextEl: HTMLSpanElement;
   private readonly sniperPickerEl: HTMLDivElement;
+  private readonly sniperEscBtnEl: HTMLButtonElement;
   private readonly sniperCards: SniperCardRefs[] = [];
   private readonly scopeLayerEl: HTMLDivElement;
   private readonly scopeBracketsEl: HTMLDivElement;
-  private readonly scopeTargetEl: HTMLSpanElement;
+  private readonly scopeTargetTextEl: HTMLSpanElement;
   private readonly scopeFillEl: HTMLDivElement;
   private readonly scopeResultEl: HTMLDivElement;
 
@@ -292,9 +294,10 @@ export class Hud {
   private readonly radarDots: RadarDotRefs[] = [];
   private readonly radarDeltaEl: HTMLSpanElement;
 
-  // Bottom-right wheelie charge, telemetry, item slot & weapons
+  // Bottom-right wheelie charge, telemetry, item tray & weapons
   private readonly wheelieWrapEl: HTMLDivElement;
-  private readonly wheelieTagEl: HTMLSpanElement;
+  private readonly wheelieIconEl: HTMLSpanElement;
+  private readonly wheelieTextEl: HTMLSpanElement;
   private readonly wheelieFillEl: HTMLDivElement;
   private readonly koPillEl: HTMLDivElement;
   private readonly koValEl: HTMLSpanElement;
@@ -306,6 +309,7 @@ export class Hud {
   private readonly hpSegs: HTMLSpanElement[] = [];
   private readonly itemSlots: ItemSlotRefs[] = [];
   private readonly weaponChips: HTMLButtonElement[] = [];
+  private readonly weaponLabelEls: HTMLSpanElement[] = [];
 
   // Bottom-left keycaps
   private readonly keycapsEl: HTMLDivElement;
@@ -326,6 +330,11 @@ export class Hud {
   private connStatus: ConnectionStatus = 'connecting';
   private onlineCount = 1;
   private hasOnlinePeers = false;
+  private homeModalOpen = false;
+  private homeBusy = false;
+  private currentRoom = 'global';
+  private currentRoomLocked = false;
+  private recentRooms: string[] = [];
 
   // Gyroscope steering state
   private gyroEnabled = false;
@@ -387,6 +396,12 @@ export class Hud {
   };
 
   private readonly onDocKeyDown = (e: KeyboardEvent): void => {
+    if (this.homeModalOpen && e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeHomeModal();
+      return;
+    }
     if (!this.avatarPopoverOpen) return;
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -440,7 +455,7 @@ export class Hud {
       }
       this.gyroBaseline = raw;
       this.gyroSmoothed = 0;
-      this.showToast('GYRO ON', 'cyan');
+      this.showToast(t('gyroOn'), 'cyan', 'gyro');
       this.callbacks.onGyroSteer(0);
       return;
     }
@@ -548,7 +563,7 @@ export class Hud {
 
     const pencilWrap = document.createElement('span');
     pencilWrap.className = 'vm-pencil';
-    pencilWrap.innerHTML = ICON_PENCIL;
+    pencilWrap.innerHTML = getPixelIconSvg('edit', 'vm-icon-sm');
 
     this.nameplateEl.append(this.nameTextEl, this.nameInputEl, pencilWrap);
     this.bindNameplateEvents();
@@ -573,12 +588,24 @@ export class Hud {
     const actions = document.createElement('div');
     actions.className = 'vm-actions';
 
+    this.homeBtnEl = document.createElement('button');
+    this.homeBtnEl.type = 'button';
+    this.homeBtnEl.className = 'vm-btn vm-btn-home';
+    this.homeBtnEl.title = t('homeTitle');
+    this.homeBtnEl.setAttribute('aria-label', 'Room lobby');
+    this.homeBtnEl.innerHTML = getPixelIconSvg('home');
+    this.homeBtnEl.addEventListener('click', () => {
+      if (this.homeModalOpen) this.closeHomeModal();
+      else this.openHomeModal();
+      this.homeBtnEl.blur();
+    });
+
     this.muteBtnEl = document.createElement('button');
     this.muteBtnEl.type = 'button';
     this.muteBtnEl.className = 'vm-btn vm-btn-mute';
     this.muteBtnEl.title = 'Audio';
     this.muteBtnEl.setAttribute('aria-label', 'Toggle audio');
-    this.muteBtnEl.innerHTML = ICON_SOUND_ON;
+    this.muteBtnEl.innerHTML = getPixelIconSvg('soundOn');
     this.muteBtnEl.addEventListener('click', () => {
       const nowMuted = this.callbacks.onToggleMute();
       this.setMuted(nowMuted);
@@ -617,18 +644,15 @@ export class Hud {
       camBtnEl.blur();
     });
 
-    this.regroupBtnEl = document.createElement('button');
-    this.regroupBtnEl.type = 'button';
-    this.regroupBtnEl.className = 'vm-btn vm-btn-regroup';
-    this.regroupBtnEl.title = 'Regroup 5m';
-    this.regroupBtnEl.setAttribute('aria-label', 'Regroup behind pack');
-    this.regroupBtnEl.innerHTML = ICON_REGROUP;
-    this.regroupBtnEl.disabled = true;
-    this.regroupBtnEl.addEventListener('click', () => {
-      if (!this.regroupBtnEl.disabled) {
-        this.callbacks.onRegroupPack();
-      }
-      this.regroupBtnEl.blur();
+    this.langBtnEl = document.createElement('button');
+    this.langBtnEl.type = 'button';
+    this.langBtnEl.className = 'vm-btn vm-btn-lang';
+    this.langBtnEl.title = 'Language';
+    this.langBtnEl.setAttribute('aria-label', 'Switch language');
+    this.langBtnEl.textContent = t('langBtn');
+    this.langBtnEl.addEventListener('click', () => {
+      toggleLang();
+      this.langBtnEl.blur();
     });
 
     this.gyroBtnEl = document.createElement('button');
@@ -637,44 +661,92 @@ export class Hud {
     this.gyroBtnEl.title = 'Gyro';
     this.gyroBtnEl.setAttribute('aria-label', 'Toggle gyroscope steering');
     this.gyroBtnEl.setAttribute('aria-pressed', 'false');
-    this.gyroBtnEl.innerHTML = ICON_GYRO;
+    this.gyroBtnEl.innerHTML = getPixelIconSvg('gyro');
     this.gyroBtnEl.addEventListener('click', () => {
       this.toggleGyro();
       this.gyroBtnEl.blur();
     });
 
-    actions.append(this.muteBtnEl, this.pxBtnEl, camBtnEl, this.gyroBtnEl, this.regroupBtnEl);
+    this.regroupBtnEl = document.createElement('button');
+    this.regroupBtnEl.type = 'button';
+    this.regroupBtnEl.className = 'vm-btn vm-btn-regroup';
+    this.regroupBtnEl.title = 'Regroup 5m';
+    this.regroupBtnEl.setAttribute('aria-label', 'Regroup behind pack');
+    this.regroupBtnEl.innerHTML = getPixelIconSvg('regroup');
+    this.regroupBtnEl.disabled = true;
+    this.regroupBtnEl.addEventListener('click', () => {
+      if (!this.regroupBtnEl.disabled) {
+        this.callbacks.onRegroupPack();
+      }
+      this.regroupBtnEl.blur();
+    });
+
+    actions.append(
+      this.homeBtnEl,
+      this.muteBtnEl,
+      this.pxBtnEl,
+      camBtnEl,
+      this.langBtnEl,
+      this.gyroBtnEl,
+      this.regroupBtnEl
+    );
     topLeft.append(this.riderPillEl, this.netBadgeEl, actions);
 
-    // 3-line pooled broadcast ticker feed
+    // 3-line pooled broadcast ticker feed (dedicated icon span + safe textContent span)
     const feedEl = document.createElement('div');
     feedEl.className = 'vm-feed';
     feedEl.setAttribute('aria-live', 'polite');
     for (let i = 0; i < FEED_SLOTS; i++) {
       const line = document.createElement('div');
       line.className = 'vm-feed-line is-hidden';
-      this.feedLines.push(line);
+
+      const iconEl = document.createElement('span');
+      iconEl.className = 'vm-feed-icon is-hidden';
+
+      const textEl = document.createElement('span');
+      textEl.className = 'vm-feed-text';
+
+      line.append(iconEl, textEl);
+      this.feedLines.push({ root: line, iconEl, textEl });
       feedEl.appendChild(line);
     }
 
     topLeftCol.append(topLeft, feedEl);
 
     // -----------------------------------------------------------------------
-    // 2. TOP-CENTER TOAST, INCOMING LOCK WARNING & SNIPER UI
+    // 2. TOP-CENTER TOAST, INCOMING LOCK / ENRAGED WARNINGS & SNIPER UI
     // -----------------------------------------------------------------------
     this.toastEl = document.createElement('div');
     this.toastEl.className = 'vm-toast';
     this.toastEl.setAttribute('role', 'status');
     this.toastEl.setAttribute('aria-live', 'polite');
 
+    this.toastIconEl = document.createElement('span');
+    this.toastIconEl.className = 'vm-toast-icon is-hidden';
+
+    this.toastTextEl = document.createElement('span');
+    this.toastTextEl.className = 'vm-toast-text';
+
+    this.toastEl.append(this.toastIconEl, this.toastTextEl);
+
     const alertStack = document.createElement('div');
     alertStack.className = 'vm-alert-stack';
 
     this.dangerLockEl = document.createElement('div');
     this.dangerLockEl.className = 'vm-danger-lock is-hidden';
+    const dangerIcon = document.createElement('span');
+    dangerIcon.className = 'vm-alert-icon';
+    dangerIcon.innerHTML = getPixelIconSvg('item_sniper', 'vm-icon-sm');
+    this.dangerLockTextEl = document.createElement('span');
+    this.dangerLockEl.append(dangerIcon, this.dangerLockTextEl);
 
     this.enragedWarnEl = document.createElement('div');
     this.enragedWarnEl.className = 'vm-enraged-warn is-hidden';
+    const enragedIcon = document.createElement('span');
+    enragedIcon.className = 'vm-alert-icon';
+    enragedIcon.innerHTML = getPixelIconSvg('flame', 'vm-icon-sm');
+    this.enragedWarnTextEl = document.createElement('span');
+    this.enragedWarnEl.append(enragedIcon, this.enragedWarnTextEl);
 
     alertStack.append(this.dangerLockEl, this.enragedWarnEl);
 
@@ -728,15 +800,15 @@ export class Hud {
       this.sniperPickerEl.appendChild(btn);
     }
 
-    const sniperEscBtn = document.createElement('button');
-    sniperEscBtn.type = 'button';
-    sniperEscBtn.className = 'vm-sniper-esc';
-    sniperEscBtn.textContent = 'ESC';
-    sniperEscBtn.addEventListener('click', () => {
+    this.sniperEscBtnEl = document.createElement('button');
+    this.sniperEscBtnEl.type = 'button';
+    this.sniperEscBtnEl.className = 'vm-sniper-esc';
+    this.sniperEscBtnEl.textContent = t('escCancel');
+    this.sniperEscBtnEl.addEventListener('click', () => {
       this.callbacks.onCancelSniper();
-      sniperEscBtn.blur();
+      this.sniperEscBtnEl.blur();
     });
-    this.sniperPickerEl.appendChild(sniperEscBtn);
+    this.sniperPickerEl.appendChild(this.sniperEscBtnEl);
 
     // Lightweight Pixel Sniper Crosshair Scope Overlay
     this.scopeLayerEl = document.createElement('div');
@@ -773,8 +845,13 @@ export class Hud {
     const scopeMeta = document.createElement('div');
     scopeMeta.className = 'vm-slab vm-scope-meta';
 
-    this.scopeTargetEl = document.createElement('span');
-    this.scopeTargetEl.className = 'vm-scope-target';
+    const scopeTargetWrap = document.createElement('span');
+    scopeTargetWrap.className = 'vm-scope-target';
+    const scopeIcon = document.createElement('span');
+    scopeIcon.className = 'vm-scope-icon';
+    scopeIcon.innerHTML = getPixelIconSvg('item_sniper', 'vm-icon-sm');
+    this.scopeTargetTextEl = document.createElement('span');
+    scopeTargetWrap.append(scopeIcon, this.scopeTargetTextEl);
 
     const scopeBar = document.createElement('div');
     scopeBar.className = 'vm-scope-bar';
@@ -782,7 +859,7 @@ export class Hud {
     this.scopeFillEl.className = 'vm-scope-fill';
     scopeBar.appendChild(this.scopeFillEl);
 
-    scopeMeta.append(this.scopeTargetEl, scopeBar);
+    scopeMeta.append(scopeTargetWrap, scopeBar);
     this.scopeLayerEl.append(reticle, scopeMeta);
 
     // -----------------------------------------------------------------------
@@ -816,7 +893,7 @@ export class Hud {
 
       const fire = document.createElement('span');
       fire.className = 'vm-row-fire is-hidden';
-      fire.textContent = '🔥';
+      fire.innerHTML = getPixelIconSvg('flame', 'vm-icon-xs');
 
       nameCell.append(name, fire);
 
@@ -825,7 +902,7 @@ export class Hud {
 
       const ko = document.createElement('span');
       ko.className = 'vm-row-ko is-hidden';
-      ko.innerHTML = ICON_SKULL_SM;
+      ko.innerHTML = getPixelIconSvg('skull', 'vm-icon-xs');
       const koVal = document.createElement('span');
       ko.appendChild(koVal);
 
@@ -896,7 +973,7 @@ export class Hud {
     topRight.append(standingsEl, radarWrap);
 
     // -----------------------------------------------------------------------
-    // 4. BOTTOM-RIGHT WHEELIE CHARGE, SPEED, BARS, ITEM SLOT & WEAPONS
+    // 4. BOTTOM-RIGHT WHEELIE CHARGE, SPEED, BARS, ITEM TRAY & WEAPONS
     // -----------------------------------------------------------------------
     const bottomRight = document.createElement('div');
     bottomRight.className = 'vm-bottom-right';
@@ -908,9 +985,13 @@ export class Hud {
     this.wheelieWrapEl = document.createElement('div');
     this.wheelieWrapEl.className = 'vm-slab vm-wheelie-wrap';
 
-    this.wheelieTagEl = document.createElement('span');
-    this.wheelieTagEl.className = 'vm-wheelie-tag';
-    this.wheelieTagEl.textContent = 'WHEELIE';
+    const wheelieTag = document.createElement('span');
+    wheelieTag.className = 'vm-wheelie-tag';
+    this.wheelieIconEl = document.createElement('span');
+    this.wheelieIconEl.className = 'vm-wheelie-icon is-hidden';
+    this.wheelieTextEl = document.createElement('span');
+    this.wheelieTextEl.textContent = t('wheelie');
+    wheelieTag.append(this.wheelieIconEl, this.wheelieTextEl);
 
     const wheelieTrack = document.createElement('div');
     wheelieTrack.className = 'vm-wheelie-track';
@@ -922,7 +1003,7 @@ export class Hud {
     markFlip.className = 'vm-wheelie-mark vm-wheelie-mark-flip';
     wheelieTrack.append(this.wheelieFillEl, markSlam, markFlip);
 
-    this.wheelieWrapEl.append(this.wheelieTagEl, wheelieTrack);
+    this.wheelieWrapEl.append(wheelieTag, wheelieTrack);
 
     const telemetryBar = document.createElement('div');
     telemetryBar.className = 'vm-telemetry-bar';
@@ -932,9 +1013,9 @@ export class Hud {
 
     this.koPillEl = document.createElement('div');
     this.koPillEl.className = 'vm-ko-pill is-hidden';
-    this.koPillEl.innerHTML = ICON_SKULL_SM;
+    this.koPillEl.innerHTML = getPixelIconSvg('skull', 'vm-icon-xs');
     this.koValEl = document.createElement('span');
-    this.koValEl.textContent = 'KO 0';
+    this.koValEl.textContent = `${t('koLabel')} 0`;
     this.koPillEl.appendChild(this.koValEl);
 
     const speedReadout = document.createElement('div');
@@ -1010,7 +1091,7 @@ export class Hud {
 
       const iconEl = document.createElement('span');
       iconEl.className = 'vm-item-icon';
-      iconEl.textContent = '·';
+      iconEl.textContent = '-';
       btn.appendChild(iconEl);
 
       let nameEl: HTMLSpanElement | null = null;
@@ -1066,11 +1147,16 @@ export class Hud {
       k.className = 'vm-weapon-key';
       k.textContent = String(spec.id + 1);
 
+      const icon = document.createElement('span');
+      icon.className = 'vm-weapon-icon';
+      icon.innerHTML = getPixelIconSvg(WEAPON_ICON_MAP[spec.id], 'vm-icon-sm');
+
       const label = document.createElement('span');
       label.className = 'vm-weapon-label';
-      label.textContent = spec.code;
+      label.textContent = weaponName(spec.id);
+      this.weaponLabelEls.push(label);
 
-      chip.append(k, label);
+      chip.append(k, icon, label);
       chip.addEventListener('click', () => {
         this.callbacks.onSelectWeapon(spec.id);
         this.applyWeaponHighlight(spec.id, false);
@@ -1088,7 +1174,7 @@ export class Hud {
     bottomRight.append(telemetryCluster, bottomDock);
 
     // -----------------------------------------------------------------------
-    // 5. BOTTOM-LEFT KEYCAP HINTS, TOUCH CONTROLS & TAP ATTACK EDGE FLASHES
+    // 5. BOTTOM-LEFT KEYCAP HINTS, DUAL VIRTUAL JOYSTICKS & TAP EDGE FLASHES
     // -----------------------------------------------------------------------
     this.keycapsEl = this.buildKeycaps();
     const touchLayer = this.buildTouchControls();
@@ -1098,6 +1184,183 @@ export class Hud {
 
     this.tapFlashRightEl = document.createElement('div');
     this.tapFlashRightEl.className = 'vm-tap-flash vm-tap-flash-right';
+
+    // -----------------------------------------------------------------------
+    // 6. HOME / ROOM LOBBY MODAL (Optional Password-Protected Rooms)
+    // -----------------------------------------------------------------------
+    this.recentRooms = this.loadRecentRooms();
+
+    this.homeOverlayEl = document.createElement('div');
+    this.homeOverlayEl.className = 'vm-home-overlay';
+    this.homeOverlayEl.setAttribute('role', 'dialog');
+    this.homeOverlayEl.setAttribute('aria-modal', 'true');
+    this.homeOverlayEl.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.target === this.homeOverlayEl && !this.homeBusy) {
+        this.closeHomeModal();
+      }
+    });
+
+    const homeCard = document.createElement('div');
+    homeCard.className = 'vm-slab vm-home-card';
+    homeCard.addEventListener('pointerdown', (e: PointerEvent) => e.stopPropagation());
+
+    const homeHead = document.createElement('div');
+    homeHead.className = 'vm-home-head';
+
+    const homeTitleWrap = document.createElement('div');
+    homeTitleWrap.className = 'vm-home-title';
+    const homeTitleIcon = document.createElement('span');
+    homeTitleIcon.className = 'vm-btn-icon';
+    homeTitleIcon.innerHTML = getPixelIconSvg('home');
+    this.homeTitleTextEl = document.createElement('span');
+    this.homeTitleTextEl.textContent = t('homeTitle');
+    homeTitleWrap.append(homeTitleIcon, this.homeTitleTextEl);
+
+    const homeStatusWrap = document.createElement('div');
+    homeStatusWrap.className = 'vm-home-status';
+
+    this.homeRoomPillEl = document.createElement('div');
+    this.homeRoomPillEl.className = 'vm-home-room-pill';
+    this.homeRoomIconEl = document.createElement('span');
+    this.homeRoomIconEl.className = 'vm-btn-icon';
+    this.homeRoomIconEl.innerHTML = getPixelIconSvg('unlock', 'vm-icon-sm');
+    this.homeRoomTextEl = document.createElement('span');
+    this.homeRoomTextEl.className = 'vm-home-room-name';
+    this.homeRoomTextEl.textContent = t('publicHall');
+    this.homeRoomPillEl.append(this.homeRoomIconEl, this.homeRoomTextEl);
+
+    this.homeCopyBtnEl = document.createElement('button');
+    this.homeCopyBtnEl.type = 'button';
+    this.homeCopyBtnEl.className = 'vm-home-icon-btn';
+    this.homeCopyBtnEl.title = t('copyLink');
+    this.homeCopyBtnEl.setAttribute('aria-label', 'Copy room invite link');
+    this.homeCopyBtnEl.innerHTML = getPixelIconSvg('copy', 'vm-icon-sm');
+    this.homeCopyBtnEl.addEventListener('click', () => {
+      this.callbacks.onCopyRoomLink?.();
+      this.homeCopyBtnEl.blur();
+    });
+
+    homeStatusWrap.append(this.homeRoomPillEl, this.homeCopyBtnEl);
+    homeHead.append(homeTitleWrap, homeStatusWrap);
+
+    const homeForm = document.createElement('form');
+    homeForm.className = 'vm-home-form';
+    homeForm.addEventListener('submit', (e: SubmitEvent) => {
+      e.preventDefault();
+      this.submitHomeForm();
+    });
+
+    const homeInputs = document.createElement('div');
+    homeInputs.className = 'vm-home-inputs';
+
+    const roomFieldWrap = document.createElement('div');
+    roomFieldWrap.className = 'vm-home-room-row';
+
+    this.homeRoomInputEl = document.createElement('input');
+    this.homeRoomInputEl.type = 'text';
+    this.homeRoomInputEl.maxLength = 20;
+    this.homeRoomInputEl.spellcheck = false;
+    this.homeRoomInputEl.autocomplete = 'off';
+    this.homeRoomInputEl.className = 'vm-home-input';
+    this.homeRoomInputEl.placeholder = t('roomCodePlaceholder');
+    this.homeRoomInputEl.setAttribute('aria-label', 'Room code');
+
+    this.homeDiceBtnEl = document.createElement('button');
+    this.homeDiceBtnEl.type = 'button';
+    this.homeDiceBtnEl.className = 'vm-home-icon-btn vm-home-dice-btn';
+    this.homeDiceBtnEl.title = 'Random';
+    this.homeDiceBtnEl.setAttribute('aria-label', 'Generate random room code');
+    this.homeDiceBtnEl.innerHTML = getPixelIconSvg('dice');
+    this.homeDiceBtnEl.addEventListener('click', () => {
+      const code = `moto-${Math.floor(100 + Math.random() * 900)}`;
+      this.homeRoomInputEl.value = code;
+      this.setHomeError(null);
+      this.homeRoomInputEl.focus();
+      this.homeRoomInputEl.select();
+    });
+
+    roomFieldWrap.append(this.homeRoomInputEl, this.homeDiceBtnEl);
+
+    this.homePassInputEl = document.createElement('input');
+    this.homePassInputEl.type = 'password';
+    this.homePassInputEl.maxLength = 24;
+    this.homePassInputEl.autocomplete = 'off';
+    this.homePassInputEl.className = 'vm-home-input';
+    this.homePassInputEl.placeholder = t('roomPassPlaceholder');
+    this.homePassInputEl.setAttribute('aria-label', 'Room password');
+
+    const stopInputKeys = (e: KeyboardEvent): void => {
+      e.stopPropagation();
+      if (e.key === 'Escape' && !this.homeBusy) {
+        e.preventDefault();
+        this.closeHomeModal();
+      }
+    };
+    this.homeRoomInputEl.addEventListener('keydown', stopInputKeys);
+    this.homeRoomInputEl.addEventListener('keyup', (e: KeyboardEvent) => e.stopPropagation());
+    this.homePassInputEl.addEventListener('keydown', stopInputKeys);
+    this.homePassInputEl.addEventListener('keyup', (e: KeyboardEvent) => e.stopPropagation());
+
+    homeInputs.append(roomFieldWrap, this.homePassInputEl);
+
+    this.homeErrorEl = document.createElement('div');
+    this.homeErrorEl.className = 'vm-home-error is-hidden';
+    const errIcon = document.createElement('span');
+    errIcon.className = 'vm-btn-icon';
+    errIcon.innerHTML = getPixelIconSvg('warning', 'vm-icon-sm');
+    this.homeErrorTextEl = document.createElement('span');
+    this.homeErrorEl.append(errIcon, this.homeErrorTextEl);
+
+    const homeActions = document.createElement('div');
+    homeActions.className = 'vm-home-actions';
+
+    this.homeJoinBtnEl = document.createElement('button');
+    this.homeJoinBtnEl.type = 'submit';
+    this.homeJoinBtnEl.className = 'vm-home-btn vm-home-btn-primary';
+    const joinIcon = document.createElement('span');
+    joinIcon.className = 'vm-btn-icon';
+    joinIcon.innerHTML = getPixelIconSvg('door', 'vm-icon-sm');
+    this.homeJoinTextEl = document.createElement('span');
+    this.homeJoinTextEl.textContent = t('createOrJoin');
+    this.homeJoinBtnEl.append(joinIcon, this.homeJoinTextEl);
+
+    this.homePublicBtnEl = document.createElement('button');
+    this.homePublicBtnEl.type = 'button';
+    this.homePublicBtnEl.className = 'vm-home-btn vm-home-btn-public is-hidden';
+    const pubIcon = document.createElement('span');
+    pubIcon.className = 'vm-btn-icon';
+    pubIcon.innerHTML = getPixelIconSvg('globe', 'vm-icon-sm');
+    this.homePublicTextEl = document.createElement('span');
+    this.homePublicTextEl.textContent = t('enterPublic');
+    this.homePublicBtnEl.append(pubIcon, this.homePublicTextEl);
+    this.homePublicBtnEl.addEventListener('click', () => {
+      if (this.homeBusy) return;
+      void this.callbacks.onJoinRoom?.('global', '');
+    });
+
+    this.homeResumeBtnEl = document.createElement('button');
+    this.homeResumeBtnEl.type = 'button';
+    this.homeResumeBtnEl.className = 'vm-home-btn vm-home-btn-resume';
+    this.homeResumeBtnEl.textContent = t('resumeRide');
+    this.homeResumeBtnEl.addEventListener('click', () => {
+      if (!this.homeBusy) this.closeHomeModal();
+    });
+
+    homeActions.append(this.homeJoinBtnEl, this.homePublicBtnEl, this.homeResumeBtnEl);
+
+    this.homeRecentWrapEl = document.createElement('div');
+    this.homeRecentWrapEl.className = 'vm-home-recent is-hidden';
+    this.homeRecentLabelEl = document.createElement('span');
+    this.homeRecentLabelEl.className = 'vm-home-recent-label';
+    this.homeRecentLabelEl.textContent = t('recentRooms');
+    this.homeRecentChipsEl = document.createElement('div');
+    this.homeRecentChipsEl.className = 'vm-home-recent-chips';
+    this.homeRecentWrapEl.append(this.homeRecentLabelEl, this.homeRecentChipsEl);
+    this.renderRecentRooms();
+
+    homeForm.append(homeInputs, this.homeErrorEl, homeActions, this.homeRecentWrapEl);
+    homeCard.append(homeHead, homeForm);
+    this.homeOverlayEl.appendChild(homeCard);
 
     this.root.append(
       this.tapFlashLeftEl,
@@ -1110,7 +1373,8 @@ export class Hud {
       topRight,
       bottomRight,
       this.keycapsEl,
-      touchLayer
+      touchLayer,
+      this.homeOverlayEl
     );
 
     container.textContent = '';
@@ -1118,6 +1382,7 @@ export class Hud {
 
     window.addEventListener('resize', this.onWindowResize, { passive: true });
     window.addEventListener('orientationchange', this.onOrientationChange, { passive: true });
+    onLangChange(() => this.applyLocale());
   }
 
   // -------------------------------------------------------------------------
@@ -1145,7 +1410,7 @@ export class Hud {
     this.syncCustomResetBtn();
   }
 
-  pushBroadcast(text: string, accent: BroadcastAccent = 'gold'): void {
+  pushBroadcast(text: string, accent: BroadcastAccent = 'gold', icon?: PixelIconId): void {
     if (!text) return;
 
     while (this.feedEntries.length >= FEED_SLOTS) {
@@ -1159,6 +1424,7 @@ export class Hud {
       id,
       text,
       accent,
+      icon,
       fading: false,
       fadeTimer: window.setTimeout(() => {
         entry.fading = true;
@@ -1252,7 +1518,7 @@ export class Hud {
 
       if (state.targetName !== this.lastScopeTarget) {
         this.lastScopeTarget = state.targetName;
-        this.scopeTargetEl.textContent = `🎯 ${state.targetName}`;
+        this.scopeTargetTextEl.textContent = state.targetName;
       }
 
       const res = phase === 'fired' && state.result ? state.result : '';
@@ -1262,7 +1528,11 @@ export class Hud {
           this.scopeResultEl.classList.remove('is-hidden');
           this.scopeResultEl.dataset.res = res;
           this.scopeResultEl.textContent =
-            res === 'HIT' ? 'HIT!' : res === 'DODGED' ? 'DODGED!' : 'MISS';
+            res === 'HIT'
+              ? t('sniperHit')
+              : res === 'DODGED'
+                ? t('sniperDodged')
+                : t('sniperMiss');
         } else {
           this.scopeResultEl.classList.add('is-hidden');
         }
@@ -1334,7 +1604,7 @@ export class Hud {
     }
   }
 
-  showToast(text: string, accent: ToastAccent = 'gold'): void {
+  showToast(text: string, accent: ToastAccent = 'gold', icon?: PixelIconId): void {
     if (this.toastRafId !== null) {
       window.cancelAnimationFrame(this.toastRafId);
       this.toastRafId = null;
@@ -1348,7 +1618,15 @@ export class Hud {
       this.toastClearTimer = null;
     }
 
-    this.toastEl.textContent = text;
+    if (icon) {
+      this.toastIconEl.innerHTML = getPixelIconSvg(icon);
+      this.toastIconEl.classList.remove('is-hidden');
+    } else {
+      this.toastIconEl.textContent = '';
+      this.toastIconEl.classList.add('is-hidden');
+    }
+
+    this.toastTextEl.textContent = text;
     this.toastEl.dataset.accent = accent;
     this.toastEl.classList.remove('is-visible', 'is-hiding');
 
@@ -1372,7 +1650,7 @@ export class Hud {
   setMuted(muted: boolean): void {
     this.muted = muted;
     this.muteBtnEl.classList.toggle('is-muted', muted);
-    this.muteBtnEl.innerHTML = muted ? ICON_SOUND_OFF : ICON_SOUND_ON;
+    this.muteBtnEl.innerHTML = getPixelIconSvg(muted ? 'soundOff' : 'soundOn');
     this.muteBtnEl.setAttribute('aria-pressed', String(muted));
   }
 
@@ -1388,6 +1666,96 @@ export class Hud {
     return this.editingName;
   }
 
+  openHomeModal(prefillRoom?: string, errorMsg?: string): void {
+    if (this.editingName) {
+      this.finishEditingName(true);
+    }
+    if (this.avatarPopoverOpen) {
+      this.setAvatarPopoverOpen(false);
+    }
+
+    if (typeof prefillRoom === 'string') {
+      this.homeRoomInputEl.value = prefillRoom;
+      this.homePassInputEl.value = '';
+    } else if (!this.homeRoomInputEl.value && this.currentRoom !== 'global') {
+      this.homeRoomInputEl.value = this.currentRoom;
+    }
+
+    if (typeof errorMsg === 'string') {
+      this.setHomeError(errorMsg);
+    } else {
+      this.setHomeError(null);
+    }
+
+    this.renderRecentRooms();
+    this.syncRoomPill();
+
+    if (!this.homeModalOpen) {
+      this.homeModalOpen = true;
+      this.homeOverlayEl.classList.add('is-open');
+      this.homeBtnEl.classList.add('is-active');
+      document.addEventListener('keydown', this.onDocKeyDown, true);
+      this.callbacks.onRoomModalToggle?.(true);
+    }
+
+    window.requestAnimationFrame(() => {
+      if (prefillRoom && errorMsg) {
+        this.homePassInputEl.focus();
+      } else {
+        this.homeRoomInputEl.focus();
+      }
+    });
+  }
+
+  closeHomeModal(): void {
+    if (!this.homeModalOpen) return;
+    this.homeModalOpen = false;
+    this.homeOverlayEl.classList.remove('is-open');
+    this.homeBtnEl.classList.remove('is-active');
+    this.setHomeError(null);
+    this.homeRoomInputEl.blur();
+    this.homePassInputEl.blur();
+    if (!this.avatarPopoverOpen) {
+      document.removeEventListener('keydown', this.onDocKeyDown, true);
+    }
+    this.callbacks.onRoomModalToggle?.(false);
+  }
+
+  isHomeModalOpen(): boolean {
+    return this.homeModalOpen;
+  }
+
+  setRoomInfo(room: string, locked: boolean): void {
+    const slug = (room || 'global').trim() || 'global';
+    this.currentRoom = slug;
+    this.currentRoomLocked = Boolean(locked) && slug !== 'global';
+    if (slug !== 'global') {
+      this.rememberRecentRoom(slug);
+    }
+    this.syncRoomPill();
+  }
+
+  setHomeError(msg: string | null): void {
+    if (!msg) {
+      this.homeErrorEl.classList.add('is-hidden');
+      this.homeErrorTextEl.textContent = '';
+      return;
+    }
+    this.homeErrorTextEl.textContent = msg;
+    this.homeErrorEl.classList.remove('is-hidden');
+  }
+
+  setHomeBusy(busy: boolean): void {
+    this.homeBusy = busy;
+    this.homeRoomInputEl.disabled = busy;
+    this.homePassInputEl.disabled = busy;
+    this.homeDiceBtnEl.disabled = busy;
+    this.homeJoinBtnEl.disabled = busy;
+    this.homePublicBtnEl.disabled = busy;
+    this.homeResumeBtnEl.disabled = busy;
+    this.homeJoinTextEl.textContent = busy ? t('checkingRoom') : t('createOrJoin');
+  }
+
   setEnragedWarning(hunterName: string | null): void {
     const next = hunterName ? hunterName.trim() : null;
     if (next === this.lastEnragedHunter) return;
@@ -1397,7 +1765,7 @@ export class Hud {
       this.enragedWarnEl.classList.add('is-hidden');
       return;
     }
-    this.enragedWarnEl.textContent = `💢 ${next} 狂暴追杀中!`;
+    this.enragedWarnTextEl.textContent = t('rageHunt', { name: next });
     this.enragedWarnEl.classList.remove('is-hidden');
   }
 
@@ -1421,8 +1789,155 @@ export class Hud {
   }
 
   // -------------------------------------------------------------------------
-  // PRIVATE BUILDERS & EVENTS
+  // PRIVATE LOCALE SYNC & GYRO CONTROLS
   // -------------------------------------------------------------------------
+
+  private applyLocale(): void {
+    this.langBtnEl.textContent = t('langBtn');
+    this.homeBtnEl.title = t('homeTitle');
+    this.homeTitleTextEl.textContent = t('homeTitle');
+    this.homeCopyBtnEl.title = t('copyLink');
+    this.homeRoomInputEl.placeholder = t('roomCodePlaceholder');
+    this.homePassInputEl.placeholder = t('roomPassPlaceholder');
+    this.homeJoinTextEl.textContent = this.homeBusy ? t('checkingRoom') : t('createOrJoin');
+    this.homePublicTextEl.textContent = t('enterPublic');
+    this.homeResumeBtnEl.textContent = t('resumeRide');
+    this.homeRecentLabelEl.textContent = t('recentRooms');
+    this.syncRoomPill();
+    this.sniperEscBtnEl.textContent = t('escCancel');
+
+    for (let i = 0; i < WEAPONS.length; i++) {
+      this.weaponLabelEls[i].textContent = weaponName(WEAPONS[i].id);
+    }
+
+    for (let i = 0; i < this.itemSlots.length; i++) {
+      const ref = this.itemSlots[i];
+      if (ref.lastType) {
+        const label = itemName(ref.lastType);
+        ref.btn.title = label;
+        if (ref.nameEl) ref.nameEl.textContent = label;
+      }
+    }
+
+    if (this.avatarUploadLabelEl) {
+      this.avatarUploadLabelEl.textContent = t('uploadAvatar');
+    }
+    if (this.avatarResetBtnEl) {
+      this.avatarResetBtnEl.title = t('clearAvatarTitle');
+    }
+
+    if (this.lastKos > 0) {
+      this.koValEl.textContent = `${t('koLabel')} ${this.lastKos}`;
+    }
+
+    if (this.lastWheelieTier === 3) {
+      this.wheelieTextEl.textContent = t('flip');
+    } else if (this.lastWheelieTier === 2) {
+      this.wheelieTextEl.textContent = t('slam');
+    } else {
+      this.wheelieTextEl.textContent = t('wheelie');
+    }
+
+    if (this.lastIncomingLockName) {
+      this.dangerLockTextEl.textContent = t('sniperDodge', { name: this.lastIncomingLockName });
+    }
+    if (this.lastEnragedHunter) {
+      this.enragedWarnTextEl.textContent = t('rageHunt', { name: this.lastEnragedHunter });
+    }
+    if (this.lastScopeResult) {
+      this.scopeResultEl.textContent =
+        this.lastScopeResult === 'HIT'
+          ? t('sniperHit')
+          : this.lastScopeResult === 'DODGED'
+            ? t('sniperDodged')
+            : t('sniperMiss');
+    }
+
+    // Force standings rows to re-sync localized delivery rider names on next tick
+    for (let i = 0; i < this.standingRows.length; i++) {
+      this.standingRows[i].lastName = '';
+    }
+  }
+
+  private submitHomeForm(): void {
+    if (this.homeBusy) return;
+    const room = this.homeRoomInputEl.value.trim();
+    const password = this.homePassInputEl.value;
+    if (!room) {
+      this.setHomeError(t('invalidRoom'));
+      this.homeRoomInputEl.focus();
+      return;
+    }
+    this.setHomeError(null);
+    void this.callbacks.onJoinRoom?.(room, password);
+  }
+
+  private syncRoomPill(): void {
+    const isGlobal = this.currentRoom === 'global';
+    this.homeRoomTextEl.textContent = isGlobal ? t('publicHall') : this.currentRoom;
+    this.homeRoomIconEl.innerHTML = getPixelIconSvg(
+      this.currentRoomLocked ? 'lock' : 'unlock',
+      'vm-icon-sm'
+    );
+    this.homeRoomPillEl.classList.toggle('is-locked', this.currentRoomLocked);
+    this.homePublicBtnEl.classList.toggle('is-hidden', isGlobal);
+  }
+
+  private loadRecentRooms(): string[] {
+    try {
+      const raw = localStorage.getItem(RECENT_ROOMS_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return [];
+      const out: string[] = [];
+      for (let i = 0; i < arr.length && out.length < MAX_RECENT_ROOMS; i++) {
+        const v = typeof arr[i] === 'string' ? arr[i].trim().slice(0, 20) : '';
+        if (v && v !== 'global' && !out.includes(v)) out.push(v);
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  private rememberRecentRoom(slug: string): void {
+    const clean = slug.trim().slice(0, 20);
+    if (!clean || clean === 'global') return;
+    this.recentRooms = [clean, ...this.recentRooms.filter((r) => r !== clean)].slice(
+      0,
+      MAX_RECENT_ROOMS
+    );
+    try {
+      localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(this.recentRooms));
+    } catch {
+      // Ignore storage quota errors
+    }
+    this.renderRecentRooms();
+  }
+
+  private renderRecentRooms(): void {
+    if (this.recentRooms.length === 0) {
+      this.homeRecentWrapEl.classList.add('is-hidden');
+      this.homeRecentChipsEl.textContent = '';
+      return;
+    }
+    this.homeRecentWrapEl.classList.remove('is-hidden');
+    this.homeRecentChipsEl.textContent = '';
+    for (let i = 0; i < this.recentRooms.length; i++) {
+      const slug = this.recentRooms[i];
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'vm-home-recent-chip';
+      chip.textContent = slug;
+      chip.addEventListener('click', () => {
+        if (this.homeBusy) return;
+        this.homeRoomInputEl.value = slug;
+        this.setHomeError(null);
+        this.homePassInputEl.focus();
+      });
+      this.homeRecentChipsEl.appendChild(chip);
+    }
+  }
 
   private toggleGyro(): void {
     if (this.gyroEnabled) {
@@ -1431,7 +1946,7 @@ export class Hud {
     }
 
     if (typeof window === 'undefined' || typeof DeviceOrientationEvent === 'undefined') {
-      this.showToast('NO GYRO SENSOR', 'red');
+      this.showToast(t('noGyro'), 'red', 'warning');
       return;
     }
 
@@ -1446,11 +1961,11 @@ export class Hud {
           if (res === 'granted') {
             this.enableGyroListener();
           } else {
-            this.showToast('NO GYRO SENSOR', 'red');
+            this.showToast(t('noGyro'), 'red', 'warning');
           }
         })
         .catch(() => {
-          this.showToast('NO GYRO SENSOR', 'red');
+          this.showToast(t('noGyro'), 'red', 'warning');
         });
       return;
     }
@@ -1478,7 +1993,7 @@ export class Hud {
       this.gyroSensorTimer = null;
       if (this.gyroEnabled && !this.gyroHasData) {
         this.disableGyro(false);
-        this.showToast('NO GYRO SENSOR', 'red');
+        this.showToast(t('noGyro'), 'red', 'warning');
       }
     }, GYRO_SENSOR_TIMEOUT_MS);
   }
@@ -1503,9 +2018,13 @@ export class Hud {
     this.callbacks.onGyroSteer(null);
 
     if (showOffToast) {
-      this.showToast('GYRO OFF', 'gold');
+      this.showToast(t('gyroOff'), 'gold', 'gyro');
     }
   }
+
+  // -------------------------------------------------------------------------
+  // PRIVATE BUILDERS & EVENTS
+  // -------------------------------------------------------------------------
 
   private ensureAvatarPopoverBuilt(): void {
     if (this.avatarPopoverBuilt) return;
@@ -1544,7 +2063,7 @@ export class Hud {
       grid.appendChild(opt);
     }
 
-    // Compact upload & reset action row
+    // Compact upload & reset action row (pixel SVGs, zero emoji)
     const uploadRow = document.createElement('div');
     uploadRow.className = 'vm-avatar-upload-row';
 
@@ -1564,7 +2083,16 @@ export class Hud {
     const uploadBtn = document.createElement('button');
     uploadBtn.type = 'button';
     uploadBtn.className = 'vm-avatar-upload-btn';
-    uploadBtn.textContent = '📷 上传头像';
+
+    const uploadIcon = document.createElement('span');
+    uploadIcon.className = 'vm-btn-icon';
+    uploadIcon.innerHTML = getPixelIconSvg('upload', 'vm-icon-sm');
+
+    const uploadLabel = document.createElement('span');
+    uploadLabel.textContent = t('uploadAvatar');
+    this.avatarUploadLabelEl = uploadLabel;
+
+    uploadBtn.append(uploadIcon, uploadLabel);
     uploadBtn.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
       fileInput.click();
@@ -1574,8 +2102,8 @@ export class Hud {
     const resetBtn = document.createElement('button');
     resetBtn.type = 'button';
     resetBtn.className = 'vm-avatar-reset-btn is-hidden';
-    resetBtn.textContent = '↺';
-    resetBtn.title = 'Reset avatar';
+    resetBtn.innerHTML = getPixelIconSvg('reset', 'vm-icon-sm');
+    resetBtn.title = t('clearAvatarTitle');
     resetBtn.setAttribute('aria-label', 'Reset custom avatar');
     resetBtn.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
@@ -1635,22 +2163,31 @@ export class Hud {
       document.addEventListener('keydown', this.onDocKeyDown, true);
     } else {
       document.removeEventListener('pointerdown', this.onDocPointerDown);
-      document.removeEventListener('keydown', this.onDocKeyDown, true);
+      if (!this.homeModalOpen) {
+        document.removeEventListener('keydown', this.onDocKeyDown, true);
+      }
     }
   }
 
   private renderFeed(): void {
     const count = this.feedEntries.length;
     for (let i = 0; i < FEED_SLOTS; i++) {
-      const el = this.feedLines[i];
+      const slot = this.feedLines[i];
       if (i >= count) {
-        el.className = 'vm-feed-line is-hidden';
+        slot.root.className = 'vm-feed-line is-hidden';
         continue;
       }
       const entry = this.feedEntries[i];
-      el.dataset.accent = entry.accent;
-      el.textContent = entry.text;
-      el.className = entry.fading ? 'vm-feed-line is-fading' : 'vm-feed-line';
+      slot.root.dataset.accent = entry.accent;
+      slot.root.className = entry.fading ? 'vm-feed-line is-fading' : 'vm-feed-line';
+      if (entry.icon) {
+        slot.iconEl.innerHTML = getPixelIconSvg(entry.icon, 'vm-icon-sm');
+        slot.iconEl.classList.remove('is-hidden');
+      } else {
+        slot.iconEl.textContent = '';
+        slot.iconEl.classList.add('is-hidden');
+      }
+      slot.textEl.textContent = entry.text;
     }
   }
 
@@ -1780,19 +2317,19 @@ export class Hud {
 
     const lUp = document.createElement('span');
     lUp.className = 'vm-joy-dir vm-joy-dir-up vm-joy-dir-nitro';
-    lUp.textContent = '⚡';
+    lUp.innerHTML = getPixelIconSvg('bolt', 'vm-joy-icon');
 
     const lDown = document.createElement('span');
     lDown.className = 'vm-joy-dir vm-joy-dir-down vm-joy-dir-brake';
-    lDown.textContent = '⬇';
+    lDown.innerHTML = getPixelIconSvg('brake', 'vm-joy-icon');
 
     const lLeft = document.createElement('span');
     lLeft.className = 'vm-joy-dir vm-joy-dir-left vm-joy-dir-steer';
-    lLeft.textContent = '◀';
+    lLeft.innerHTML = getPixelIconSvg('arrowLeft', 'vm-joy-icon');
 
     const lRight = document.createElement('span');
     lRight.className = 'vm-joy-dir vm-joy-dir-right vm-joy-dir-steer';
-    lRight.textContent = '▶';
+    lRight.innerHTML = getPixelIconSvg('arrowRight', 'vm-joy-icon');
 
     const leftKnob = document.createElement('span');
     leftKnob.className = 'vm-joy-knob vm-joy-knob-left';
@@ -1805,7 +2342,7 @@ export class Hud {
     let leftMaxR = 34;
     let lastLeftNitro = false;
     let lastLeftBrake = false;
-    let lastLeftDir = 0; // -1 left, 0 neutral, 1 right
+    let lastLeftDir = 0;
 
     const updateLeftStick = (clientX: number, clientY: number): void => {
       const rawDx = clientX - leftCx;
@@ -1912,7 +2449,7 @@ export class Hud {
 
     const rUp = document.createElement('span');
     rUp.className = 'vm-joy-dir vm-joy-dir-up vm-joy-dir-wheelie';
-    rUp.textContent = '⬆';
+    rUp.innerHTML = getPixelIconSvg('wheelie', 'vm-joy-icon');
 
     const rDown = document.createElement('span');
     rDown.className = 'vm-joy-dir vm-joy-dir-down vm-joy-dir-item';
@@ -1927,11 +2464,11 @@ export class Hud {
 
     const rLeft = document.createElement('span');
     rLeft.className = 'vm-joy-dir vm-joy-dir-left vm-joy-dir-atk';
-    rLeft.textContent = '◀';
+    rLeft.innerHTML = getPixelIconSvg('arrowLeft', 'vm-joy-icon');
 
     const rRight = document.createElement('span');
     rRight.className = 'vm-joy-dir vm-joy-dir-right vm-joy-dir-atk';
-    rRight.textContent = '▶';
+    rRight.innerHTML = getPixelIconSvg('arrowRight', 'vm-joy-icon');
 
     const rightKnob = document.createElement('span');
     rightKnob.className = 'vm-joy-knob vm-joy-knob-right';
@@ -2156,17 +2693,18 @@ export class Hud {
           ref.btn.style.borderColor = '';
           ref.btn.title = 'Use Item (R)';
           if (ref.keyEl) ref.keyEl.style.backgroundColor = '';
-          ref.iconEl.textContent = '·';
+          ref.iconEl.textContent = '-';
           if (ref.nameEl) ref.nameEl.textContent = '--';
         } else {
           const spec = ITEM_BY_ID[itemType];
+          const label = itemName(itemType);
           ref.btn.disabled = false;
           ref.btn.classList.add('is-ready');
           ref.btn.style.borderColor = spec.color;
-          ref.btn.title = spec.zhName;
+          ref.btn.title = label;
           if (ref.keyEl) ref.keyEl.style.backgroundColor = spec.color;
-          ref.iconEl.textContent = spec.icon;
-          if (ref.nameEl) ref.nameEl.textContent = spec.zhName;
+          ref.iconEl.innerHTML = getPixelIconSvg(ITEM_ICON_MAP[itemType], 'vm-icon-sm');
+          if (ref.nameEl) ref.nameEl.textContent = label;
         }
       }
 
@@ -2201,7 +2739,7 @@ export class Hud {
       }
     }
 
-    // Right joystick bottom item indicator: sync slot 0 icon & ×2/×3/×4 count badge
+    // Right joystick bottom item indicator: sync slot 0 pixel SVG & x2/x3/x4 count badge
     if (this.rightJoyItemEl && this.rightJoyItemIconEl && this.rightJoyItemCountEl) {
       const firstType: ItemType | null =
         heldItems && count > 0 ? heldItems[0].type : fallbackItem;
@@ -2215,14 +2753,17 @@ export class Hud {
           const spec = ITEM_BY_ID[firstType];
           this.rightJoyItemEl.classList.add('is-ready');
           this.rightJoyItemEl.style.color = spec.color;
-          this.rightJoyItemIconEl.textContent = spec.icon;
+          this.rightJoyItemIconEl.innerHTML = getPixelIconSvg(
+            ITEM_ICON_MAP[firstType],
+            'vm-joy-icon'
+          );
         }
       }
       if (count !== this.lastTouchItemCount) {
         this.lastTouchItemCount = count;
         if (count > 1) {
           this.rightJoyItemCountEl.classList.remove('is-hidden');
-          this.rightJoyItemCountEl.textContent = `×${count}`;
+          this.rightJoyItemCountEl.textContent = `x${count}`;
         } else {
           this.rightJoyItemCountEl.classList.add('is-hidden');
         }
@@ -2243,13 +2784,19 @@ export class Hud {
       this.wheelieWrapEl.classList.add('is-active');
       if (tier === 3) {
         this.wheelieWrapEl.dataset.tier = 'danger';
-        this.wheelieTagEl.textContent = '! FLIP';
+        this.wheelieIconEl.innerHTML = getPixelIconSvg('warning', 'vm-icon-xs');
+        this.wheelieIconEl.classList.remove('is-hidden');
+        this.wheelieTextEl.textContent = t('flip');
       } else if (tier === 2) {
         this.wheelieWrapEl.dataset.tier = 'slam';
-        this.wheelieTagEl.textContent = '⚡ SLAM';
+        this.wheelieIconEl.innerHTML = getPixelIconSvg('bolt', 'vm-icon-xs');
+        this.wheelieIconEl.classList.remove('is-hidden');
+        this.wheelieTextEl.textContent = t('slam');
       } else {
         this.wheelieWrapEl.dataset.tier = 'ok';
-        this.wheelieTagEl.textContent = 'WHEELIE';
+        this.wheelieIconEl.textContent = '';
+        this.wheelieIconEl.classList.add('is-hidden');
+        this.wheelieTextEl.textContent = t('wheelie');
       }
     }
 
@@ -2271,7 +2818,7 @@ export class Hud {
       this.dangerLockEl.classList.add('is-hidden');
       return;
     }
-    this.dangerLockEl.textContent = `🎯 ${next} 瞄准中! SPACE躲避`;
+    this.dangerLockTextEl.textContent = t('sniperDodge', { name: next });
     this.dangerLockEl.classList.remove('is-hidden');
   }
 
@@ -2335,7 +2882,7 @@ export class Hud {
       this.lastKos = kos;
       if (kos > 0) {
         this.koPillEl.classList.remove('is-hidden');
-        this.koValEl.textContent = `KO ${kos}`;
+        this.koValEl.textContent = `${t('koLabel')} ${kos}`;
         if (increased) {
           this.koPillEl.classList.remove('is-pop');
           window.requestAnimationFrame(() => {
@@ -2399,6 +2946,8 @@ export class Hud {
       const isBot = rider.isBot && !isLocal;
       const enraged = Boolean(rider.enraged);
       const role = rider.deliveryRole;
+      const displayName =
+        role === 'meituan' || role === 'eleme' ? deliveryName(role) : rider.name;
       const lap = getLapNumber(rider.s);
       const distTenth = Math.round(Math.max(0, rider.s) / 100);
       const borderColor =
@@ -2449,14 +2998,14 @@ export class Hud {
         ref.lastBorderColor = borderColor;
         ref.avatar.style.borderColor = borderColor;
       }
-      if (ref.lastName !== rider.name) {
-        ref.lastName = rider.name;
-        ref.name.textContent = rider.name;
+      if (ref.lastName !== displayName) {
+        ref.lastName = displayName;
+        ref.name.textContent = displayName;
       }
       if (ref.lastLap !== lap || ref.lastDistTenth !== distTenth) {
         ref.lastLap = lap;
         ref.lastDistTenth = distTenth;
-        ref.dist.textContent = `L${lap} · ${(distTenth / 10).toFixed(1)}km`;
+        ref.dist.textContent = `L${lap} ${(distTenth / 10).toFixed(1)}km`;
       }
       if (ref.lastKos !== kos) {
         const wasZero = ref.lastKos <= 0;

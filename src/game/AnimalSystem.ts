@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import {
   ROAD_HALF_WIDTH,
   SHOULDER_HALF_WIDTH,
@@ -29,9 +30,16 @@ export interface AnimalCallbacks {
 
 export const MAX_ANIMALS = 16;
 
+type AnimalWarnKey =
+  | 'animalWarn_cow'
+  | 'animalWarn_sheep'
+  | 'animalWarn_dog'
+  | 'animalWarn_boar'
+  | 'animalWarn_goose';
+
 interface EncounterSpec {
   species: AnimalSpecies;
-  warning: string;
+  warnKey: AnimalWarnKey;
   minCount: number;
   maxCount: number;
   minSpeed: number;
@@ -43,7 +51,7 @@ interface EncounterSpec {
 const ENCOUNTERS: readonly EncounterSpec[] = [
   {
     species: 'cow',
-    warning: '🐄 前方牛群横穿马路!',
+    warnKey: 'animalWarn_cow',
     minCount: 3,
     maxCount: 4,
     minSpeed: 2.0,
@@ -53,7 +61,7 @@ const ENCOUNTERS: readonly EncounterSpec[] = [
   },
   {
     species: 'sheep',
-    warning: '🐑 注意羊群横穿!',
+    warnKey: 'animalWarn_sheep',
     minCount: 4,
     maxCount: 6,
     minSpeed: 2.6,
@@ -63,7 +71,7 @@ const ENCOUNTERS: readonly EncounterSpec[] = [
   },
   {
     species: 'dog',
-    warning: '🐕 大黄狗冲上马路!',
+    warnKey: 'animalWarn_dog',
     minCount: 1,
     maxCount: 1,
     minSpeed: 4.6,
@@ -73,7 +81,7 @@ const ENCOUNTERS: readonly EncounterSpec[] = [
   },
   {
     species: 'boar',
-    warning: '🐗 野猪横穿国道!',
+    warnKey: 'animalWarn_boar',
     minCount: 1,
     maxCount: 1,
     minSpeed: 4.2,
@@ -83,7 +91,7 @@ const ENCOUNTERS: readonly EncounterSpec[] = [
   },
   {
     species: 'goose',
-    warning: '🪿 大白鹅霸占车道!',
+    warnKey: 'animalWarn_goose',
     minCount: 1,
     maxCount: 1,
     minSpeed: 4.2,
@@ -193,7 +201,7 @@ export class AnimalSystem {
     }
 
     if (spawned > 0) {
-      cb.onWarn(spec.warning, spec.species);
+      cb.onWarn(t(spec.warnKey), spec.species);
     }
   }
 
