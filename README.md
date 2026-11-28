@@ -18,10 +18,10 @@ HD-pixel 3D multiplayer Road Rash on a 2400m cyclic Chinese national highway, bu
 | Chinese Gas Station (`中国加油`) & Delivery Riders | Overloaded Tarp Freight Truck & `国道饭店` Diner |
 | :---: | :---: |
 | ![Chinese gas station canopy, 24H store, delivery riders and crossing dog alert](docs/screenshots/china-gas-station.png) | ![Overloaded tarp cargo truck closeup and roadside Chinese diner ahead](docs/screenshots/china-truck-diner.png) |
-| **Instant-Play Highway & 9 Pixel Avatars** | **Multi-Item 30s Tray & Bot Sniper Lock** |
-| ![Instant-play HD-pixel highway with 9 code-generated pixel avatars](docs/screenshots/gameplay-avatars.png) | ![Multi-item 30s tray, bot sniper laser warning and lap standings](docs/screenshots/multi-items-bot-sniper.png) |
-| **2400m Cyclic Circuit & `START ★ LAP` Arch** | **EMQX 5m Pack Spawn & Custom Avatar Sync** |
-| ![Checkered START LAP arch and cross-lap standings](docs/screenshots/cyclic-lap-arch.png) | ![Dual-client EMQX 5m pack spawn with synced custom avatar](docs/screenshots/multiplayer-5m-spawn.png) |
+| **Mobile Dual Virtual Joysticks & Sky Telemetry** | **Multi-Item 30s Tray & Bot Sniper Lock** |
+| ![Mobile landscape dual virtual joysticks and slim sky HP/Nitro telemetry](docs/screenshots/mobile-dual-joysticks.png) | ![Multi-item 30s tray, bot sniper laser warning and lap standings](docs/screenshots/multi-items-bot-sniper.png) |
+| **Instant-Play Highway & 9 Pixel Avatars** | **EMQX 5m Pack Spawn & Custom Avatar Sync** |
+| ![Instant-play HD-pixel highway with 9 code-generated pixel avatars](docs/screenshots/gameplay-avatars.png) | ![Dual-client EMQX 5m pack spawn with synced custom avatar](docs/screenshots/multiplayer-5m-spawn.png) |
 
 ### Features
 
@@ -33,7 +33,7 @@ HD-pixel 3D multiplayer Road Rash on a 2400m cyclic Chinese national highway, bu
 - **8 Pickable Powerups, 4-Slot 30s Stack & AI Bot Items** — Smash `?` crates to hold up to **4 items** (1 item stays indefinitely; `≥2` items run independent **30s TTL countdowns**—use via `R`/`X` or click any slot). Bots also pick up and fire all 8 items:
   - 🚀 **RPG** · ✈️ **Airstrike** · 🎯 **Sniper** (`1–5` lock, 3D laser, `Space` dodge) · 🚓 **Police Pull** · ⚡ **Turbo Shield** · ⚙️ **Spike Trap** · 🧲 **Magnet** · 🍌 **Banana Peel**
 - **Wheelie Boost, Charge-Slam & Backflip Risk** — Hold `Space` for wheelie speed and gold `⚡ SLAM` charge; release to slam rivals sideways, or over-hold into a backflip crash.
-- **Mobile Gyroscope Tilt Steering & Tap-Screen-to-Attack** — Toggle `🧭` gyroscope steering with portrait/landscape auto-calibration on iOS & Android, and tap the **left / right / center** of the canvas to strike.
+- **Mobile Dual Virtual Joysticks & Zero-Obstruction Sky HUD** — Semi-transparent simultaneous multi-touch joysticks on both sides (**Left**: proportional steer + Up Nitro + Down Brake; **Right**: Left/Right attack + Up Wheelie Charge / Release Slam + Down Use Item + Center Tap Auto-Strike), a slim `HP` / `N2O` / `KM/H` sky telemetry strip, single-row bottom weapon dock, plus optional `🧭` gyroscope tilt steering (portrait/landscape auto-calibration) and open-canvas tap-to-attack.
 - **9 Pure-Code Pixel Avatars + Custom Base64 Sync** — Rename inline, pick from 9 procedural 32×32 pixel avatars, or upload any custom image—center-cropped & compressed on the frontend to WebP/JPEG (`<3.2 KB`) and synced over EMQX to standings & 3D nameplates.
 - **Studio Hybrid Audio (`vibe-motion/sound`)** — Pairs **18 CC0 studio SFX** (`152 KB` total, lazy-loaded via [`vibe-motion/sound`](https://github.com/vibe-motion/sound)) with a triple-oscillator boxer motorcycle engine synth, `DynamicsCompressorNode` master bus, stereo Doppler sweeps, and seamless procedural fallback.
 - **Zero-Config EMQX Multiplayer & High Performance** — Connects to `wss://broker.emqx.io:8084/mqtt` with **5m behind-last-player spawn**, one-click regroup (`⌖`), and fast tab-close cleanup. Sole runtime dependency is `three`, featuring a zero-dep native WebSocket MQTT 3.1.1 client, instanced traffic/scenery/animals/crates, progressive road LOD, steady **60 FPS**, and **~13 MB JS heap**.
@@ -54,8 +54,10 @@ HD-pixel 3D multiplayer Road Rash on a 2400m cyclic Chinese national highway, bu
 | `C` | Cycle Camera (`CHASE` / `LOW` / `HOOD`) |
 | `P` | Toggle `HD` / `PX` Pixel Mode |
 | `M` | Toggle Audio Mute |
+| `Left Joystick` *(Mobile)* | Proportional Steer · Up Nitro · Down Brake |
+| `Right Joystick` *(Mobile)* | Left/Right Attack · Up Wheelie/Slam · Down Use Item · Center Tap Auto-Strike |
 | `🧭` Gyroscope *(Mobile)* | Analog Tilt Steering (portrait & landscape auto-calibration) |
-| `Tap Canvas` *(Mobile)* | Tap Left / Right / Center of Screen to Strike |
+| `Tap Canvas` *(Mobile)* | Tap Left / Right / Center of Open Road to Strike |
 
 ### Multiplayer Rooms
 
@@ -94,7 +96,7 @@ pnpm build
 - **8 种公路道具 · 4 格 30s 堆叠 · AI 道具对抗** — 撞击 `?` 神秘箱最多同时持有 **4 个道具**（单道具永久保留；持有 `≥2` 个时各槽位独立开启 **30 秒倒计时**，按 `R`/`X` 或直接点击槽位释放）。AI 对手同样会抢箱并真实使用全部 8 种道具：
   - 🚀 **RPG 火箭筒** · ✈️ **空中支援** · 🎯 **狙击枪**（`1–5` 锁人 / 3D 激光 / `Space` 闪避）· 🚓 **警车拦截** · ⚡ **超级加速** · ⚙️ **路钉陷阱** · 🧲 **磁铁** · 🍌 **香蕉皮**
 - **翘头提速 · 蓄力猛压 · 翻车风险** — 按住 `Space` 翘头提速并蓄力金色 `⚡ SLAM` 能量条，松手震飞身旁对手；蓄力超时将后空翻翻车。
-- **移动端陀螺仪重力转向 + 轻触屏幕攻击** — 点击 `🧭` 开启重力感应线性转向（自动适配 iOS / Android 横竖屏校准），轻触画面**左 / 右 / 中央**直接向对应方向攻击。
+- **移动端双虚拟摇杆 + 天空区零遮挡状态栏** — 两侧半透明多点触控双摇杆（**左摇杆**：线性转向 / 上推氮气 / 下拉刹车；**右摇杆**：左右挥击 / 上推翘头蓄力松手猛压 / 下拉使用道具 / 轻点中心自动攻击），搭配顶部天空区超窄 `HP` / `N2O` / 车速条与底部单行武器栏，零遮挡赛道视野；同时保留 `🧭` 陀螺仪重力转向（横竖屏自动校准）与空地轻触攻击。
 - **9 款纯代码像素头像 + 自定义头像压缩同步** — 点击左上角名牌快捷改名并切换 9 款 32×32 纯代码像素头像，也可上传自定义图片——前端自动居中裁切压缩为 `<3.2 KB` WebP/JPEG base64，经 EMQX 实时同步到全员排行榜与 3D 车手名牌。
 - **工作室级混合音频引擎（`vibe-motion/sound`）** — 内置经 [`vibe-motion/sound`](https://github.com/vibe-motion/sound) 精选压制的 **18 条 CC0 工作室级音效**（总计仅 `152 KB`，首交互懒加载），搭配三振荡器水平对置摩托引擎合成器、`DynamicsCompressorNode` 母线动态压缩、立体声多普勒扫频与零延迟程序化回退。
 - **免配置 EMQX 实时联机与极致性能** — 直连 `wss://broker.emqx.io:8084/mqtt`，自动空降到最后一名在线玩家后方 **5 米**，支持一键归队（`⌖`）与关页秒级退房清理。唯一运行时依赖为 `three`，自研零依赖原生 WebSocket MQTT 3.1.1 客户端、全实例化车流/动物/场景/货箱、渐进式公路 LOD，稳跑 **60 FPS**、仅占约 **13 MB JS 堆内存**。
@@ -115,8 +117,10 @@ pnpm build
 | `C` | 切换视角（`CHASE` / `LOW` / `HOOD`） |
 | `P` | 切换 `HD` / `PX` 像素模式 |
 | `M` | 静音开关 |
+| 左虚拟摇杆（移动端） | 线性转向 · 上推氮气 · 下拉刹车 |
+| 右虚拟摇杆（移动端） | 左右攻击 · 上推翘头/猛压 · 下拉用道具 · 轻点中心自动攻击 |
 | `🧭` 陀螺仪（移动端） | 重力倾斜线性转向（横竖屏自动校准） |
-| 轻触画面（移动端） | 点击左 / 右 / 中央直接向对应方向攻击 |
+| 轻触画面（移动端） | 点击空地左 / 右 / 中央直接向对应方向攻击 |
 
 ### 自定义联机房间
 

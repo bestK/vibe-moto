@@ -121,7 +121,17 @@ const GAS_STATION_STOPS = [420, 1620] as const;
 let gasRefillCooldown = 0;
 
 const pressedKeys = new Set<string>();
-const touchState = {
+const touchState: {
+  left: boolean;
+  right: boolean;
+  brake: boolean;
+  nitro: boolean;
+  wheelie: boolean;
+  attackLeft: boolean;
+  attackRight: boolean;
+  attackAuto: boolean;
+  analogSteer: number | null;
+} = {
   left: false,
   right: false,
   brake: false,
@@ -129,6 +139,8 @@ const touchState = {
   wheelie: false,
   attackLeft: false,
   attackRight: false,
+  attackAuto: false,
+  analogSteer: null,
 };
 let touchModeActive =
   typeof window !== 'undefined' &&
@@ -148,7 +160,7 @@ const inputState: InputState = {
   attackAuto: false,
 };
 
-let gyroSteer = 0;
+let gyroSteer: number | null = null;
 let lastLap = 1;
 
 // Reusable frame arrays (zero per-frame allocations)
@@ -267,10 +279,13 @@ function clearHeldInputs(): void {
   touchState.wheelie = false;
   touchState.attackLeft = false;
   touchState.attackRight = false;
+  touchState.attackAuto = false;
+  touchState.analogSteer = null;
   inputState.throttle = false;
   inputState.brake = false;
   inputState.left = false;
   inputState.right = false;
+  inputState.analogSteer = 0;
   inputState.nitro = false;
   inputState.wheelie = false;
   inputState.attackLeft = false;
@@ -399,7 +414,7 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     }
   },
   onGyroSteer(steer: number | null) {
-    gyroSteer = steer === null ? 0 : steer;
+    gyroSteer = steer;
   },
   onTouchInput(patch: TouchInputPatch) {
     audio.unlock();
@@ -409,8 +424,31 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     if (patch.brake !== undefined) touchState.brake = patch.brake;
     if (patch.nitro !== undefined) touchState.nitro = patch.nitro;
     if (patch.wheelie !== undefined) touchState.wheelie = patch.wheelie;
-    if (patch.attackLeft !== undefined) touchState.attackLeft = patch.attackLeft;
-    if (patch.attackRight !== undefined) touchState.attackRight = patch.attackRight;
+    if ('analogSteer' in patch) {
+      touchState.analogSteer = patch.analogSteer ?? null;
+    }
+    if (patch.attackLeft !== undefined) {
+      if (patch.attackLeft && !touchState.attackLeft && !hud.isEditingName()) {
+        player.triggerAttack(1, combatTargets);
+        hud.flashTapAttack('left');
+      }
+      touchState.attackLeft = patch.attackLeft;
+    }
+    if (patch.attackRight !== undefined) {
+      if (patch.attackRight && !touchState.attackRight && !hud.isEditingName()) {
+        player.triggerAttack(2, combatTargets);
+        hud.flashTapAttack('right');
+      }
+      touchState.attackRight = patch.attackRight;
+    }
+    if (patch.attackAuto !== undefined) {
+      if (patch.attackAuto && !hud.isEditingName()) {
+        player.triggerAttack(0, combatTargets);
+        hud.flashTapAttack(player.state.attackSide === 1 ? 'left' : 'right');
+      }
+      // One-shot center tap strike; reset cleanly so it never repeats unintentionally
+      touchState.attackAuto = false;
+    }
   },
 });
 
@@ -807,7 +845,7 @@ canvas.addEventListener('contextmenu', (e: MouseEvent) => {
 });
 
 canvas.addEventListener('pointerdown', (e: PointerEvent) => {
-  if (hud.isEditingName()) return;
+  if (e.target !== canvas || hud.isEditingName()) return;
   audio.unlock();
   if (e.pointerType === 'touch') {
     touchModeActive = true;
@@ -866,6 +904,7 @@ function syncInputState(): void {
     inputState.brake = false;
     inputState.left = false;
     inputState.right = false;
+    inputState.analogSteer = 0;
     inputState.nitro = false;
     inputState.wheelie = false;
     inputState.attackLeft = false;
@@ -884,7 +923,7 @@ function syncInputState(): void {
   inputState.brake = brake;
   inputState.left = pressedKeys.has('KeyA') || pressedKeys.has('ArrowLeft') || touchState.left;
   inputState.right = pressedKeys.has('KeyD') || pressedKeys.has('ArrowRight') || touchState.right;
-  inputState.analogSteer = gyroSteer;
+  inputState.analogSteer = touchState.analogSteer !== null ? touchState.analogSteer : (gyroSteer ?? 0);
   inputState.nitro =
     pressedKeys.has('ShiftLeft') || pressedKeys.has('ShiftRight') || touchState.nitro;
   inputState.wheelie = pressedKeys.has('Space') || touchState.wheelie;
@@ -895,7 +934,10 @@ function syncInputState(): void {
     touchState.attackLeft;
   inputState.attackRight =
     pressedKeys.has('KeyK') || pressedKeys.has('KeyE') || touchState.attackRight;
-  inputState.attackAuto = pressedKeys.has('KeyL') || pressedKeys.has('KeyF');
+  inputState.attackAuto = pressedKeys.has('KeyL') || pressedKeys.has('KeyF') || touchState.attackAuto;
+  if (touchState.attackAuto) {
+    touchState.attackAuto = false;
+  }
 
   player.setInput(inputState);
 }

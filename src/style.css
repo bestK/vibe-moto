@@ -1335,6 +1335,16 @@ body {
   contain: layout style;
 }
 
+.vm-telemetry-cluster,
+.vm-telemetry-bar,
+.vm-bottom-dock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
 /* Wheelie Charge & Over-Flip Danger Bar (zero layout shift via visibility/opacity) */
 .vm-wheelie-wrap {
   width: 238px;
@@ -1968,131 +1978,188 @@ body {
 }
 
 /* ==========================================================================
-   TOUCH CONTROLS (ONLY ON TOUCH-CAPABLE COARSE POINTER DEVICES)
+   DUAL VIRTUAL JOYSTICKS (ONLY ON TOUCH-CAPABLE COARSE POINTER DEVICES)
    ========================================================================== */
 .vm-touch-layer {
   display: none;
   position: absolute;
   inset: 0;
   pointer-events: none;
+  z-index: 17;
 }
 
-.vm-touch-left {
-  position: absolute;
-  left: max(12px, env(safe-area-inset-left));
-  bottom: max(14px, env(safe-area-inset-bottom));
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.vm-touch-steer {
-  display: flex;
-  gap: 8px;
-}
-
-.vm-hud-root.vm-gyro-on .vm-touch-steer {
-  display: none;
-}
-
-.vm-touch-right {
-  position: absolute;
-  right: max(12px, env(safe-area-inset-right));
-  bottom: max(14px, env(safe-area-inset-bottom));
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.vm-touch-btn {
+.vm-joy {
   pointer-events: auto;
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 48px;
-  height: 52px;
-  padding: 0;
-  background: rgba(13, 16, 29, 0.86);
-  border: 2px solid var(--vm-steel-hi);
-  box-shadow: 3px 3px 0 var(--vm-ink);
-  color: var(--vm-text);
-  font-family: var(--vm-font-ui);
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1;
-  touch-action: none;
-  outline: none;
-}
-
-.vm-touch-btn-steer {
-  width: 58px;
-  height: 56px;
-  font-size: 18px;
-}
-
-.vm-touch-btn-item {
-  position: relative;
-  border-color: #2e3759;
-  color: var(--vm-dim);
-  font-size: 14px;
-}
-
-.vm-touch-btn-item.is-ready {
-  border-color: var(--vm-gold);
-  color: #ffffff;
-  font-size: 18px;
-}
-
-.vm-touch-item-count {
   position: absolute;
-  right: -4px;
-  top: -5px;
-  padding: 1px 4px;
-  background: var(--vm-gold);
-  border: 1px solid var(--vm-ink);
-  box-shadow: 1px 1px 0 var(--vm-ink);
-  color: var(--vm-ink);
-  font-family: var(--vm-font-ui);
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
+  width: 94px;
+  height: 94px;
+  border-radius: 50%;
+  background: rgba(11, 14, 24, 0.34);
+  border: 2px solid rgba(255, 209, 102, 0.45);
+  box-shadow: 2px 2px 0 rgba(4, 5, 10, 0.55), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  contain: layout style;
+}
+
+.vm-joy::before,
+.vm-joy::after {
+  content: '';
+  position: absolute;
+  background: rgba(255, 255, 255, 0.09);
   pointer-events: none;
 }
 
-.vm-touch-item-count.is-hidden {
-  display: none;
+.vm-joy::before {
+  left: 20px;
+  right: 20px;
+  top: 50%;
+  height: 1px;
 }
 
-.vm-touch-btn-nitro {
-  border-color: var(--vm-cyan);
-  color: var(--vm-cyan);
+.vm-joy::after {
+  top: 20px;
+  bottom: 20px;
+  left: 50%;
+  width: 1px;
 }
 
-.vm-touch-btn-hop {
-  border-color: var(--vm-gold);
+.vm-joy-left {
+  left: max(12px, env(safe-area-inset-left));
+  bottom: max(10px, env(safe-area-inset-bottom));
+  border-color: rgba(255, 209, 102, 0.45);
+}
+
+.vm-joy-left.is-active {
+  background: rgba(11, 14, 24, 0.48);
+  border-color: rgba(255, 209, 102, 0.85);
+}
+
+.vm-joy-right {
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(10px, env(safe-area-inset-bottom));
+  border-color: rgba(0, 245, 212, 0.45);
+}
+
+.vm-joy-right.is-active {
+  background: rgba(11, 14, 24, 0.48);
+  border-color: rgba(0, 245, 212, 0.88);
+}
+
+.vm-joy-dir {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  font-family: var(--vm-font-ui);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: rgba(244, 246, 255, 0.36);
+  text-shadow: 1px 1px 0 rgba(4, 5, 10, 0.8);
+  pointer-events: none;
+}
+
+.vm-joy-dir-up {
+  top: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.vm-joy-dir-down {
+  bottom: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.vm-joy-dir-left {
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.vm-joy-dir-right {
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.vm-joy-dir-steer.is-lit,
+.vm-joy-dir-wheelie.is-lit {
   color: var(--vm-gold);
 }
 
-.vm-touch-btn.is-active {
-  transform: translate(2px, 2px);
-  box-shadow: 1px 1px 0 var(--vm-ink);
-  background: var(--vm-gold);
+.vm-joy-dir-nitro.is-lit {
+  color: var(--vm-cyan);
+}
+
+.vm-joy-dir-brake.is-lit,
+.vm-joy-dir-atk.is-lit {
+  color: var(--vm-crimson);
+}
+
+.vm-joy-dir-item.is-ready {
+  color: var(--vm-gold);
+  font-size: 12px;
+}
+
+.vm-joy-dir-item.is-lit {
+  color: #ffffff;
+}
+
+.vm-joy-item-count {
+  font-size: 8px;
+  color: var(--vm-gold);
+  font-variant-numeric: tabular-nums;
+}
+
+.vm-joy-item-count.is-hidden {
+  display: none;
+}
+
+/* Dim left stick horizontal arrows subtly when gyro steering is active */
+.vm-hud-root.vm-gyro-on .vm-joy-dir-steer {
+  opacity: 0.25;
+}
+
+.vm-joy-knob {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 36px;
+  height: 36px;
+  margin: -18px 0 0 -18px;
+  border-radius: 50%;
+  background: rgba(255, 209, 102, 0.26);
+  border: 2px solid rgba(255, 209, 102, 0.78);
+  box-shadow: 0 2px 0 rgba(4, 5, 10, 0.65);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.vm-joy-left.is-active .vm-joy-knob-left {
+  background: rgba(255, 209, 102, 0.48);
   border-color: var(--vm-gold);
-  color: var(--vm-ink);
 }
 
-.vm-touch-btn-nitro.is-active {
-  background: var(--vm-cyan);
+.vm-joy-knob-right {
+  background: rgba(0, 245, 212, 0.24);
+  border-color: rgba(0, 245, 212, 0.78);
+}
+
+.vm-joy-right.is-active .vm-joy-knob-right {
+  background: rgba(0, 245, 212, 0.46);
   border-color: var(--vm-cyan);
-  color: var(--vm-ink);
 }
 
-/* Base touch device layout (default = portrait / tall touch screens):
-   Touch pads sit cleanly at bottom-left & bottom-right corners;
-   telemetry (.vm-bottom-right) lifts cleanly ABOVE .vm-touch-right. */
+/* ==========================================================================
+   MOBILE TOUCH REDESIGN (@media (pointer: coarse))
+   - Upper sky zone: translucent single-line HP + NITRO + KM/H strip
+   - Bottom band: Dual semi-transparent joysticks (L/R) + single slim bottom-center row
+   - Desktop (pointer: fine) remains 100% untouched above!
+   ========================================================================== */
 @media (pointer: coarse) {
   .vm-keycaps {
     display: none;
@@ -2102,21 +2169,185 @@ body {
     display: block;
   }
 
+  /* Detach telemetry and bottom-dock independently on touch devices */
   .vm-bottom-right {
-    right: max(12px, env(safe-area-inset-right));
-    bottom: calc(max(14px, env(safe-area-inset-bottom)) + 68px);
+    position: static;
+    display: contents;
+    contain: none;
+  }
+
+  /* Ultra-slim translucent single-line sky telemetry strip (pointer-events: none!) */
+  .vm-telemetry-cluster {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    pointer-events: none;
+    z-index: 14;
+    contain: layout style;
+  }
+
+  .vm-telemetry-bar {
+    order: 0;
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
     gap: 6px;
+    height: 24px;
+    padding: 0 6px;
+    background: rgba(11, 14, 24, 0.54);
+    border: 2px solid rgba(85, 100, 153, 0.72);
+    box-shadow: 2px 2px 0 rgba(4, 5, 10, 0.65);
+    pointer-events: none;
+  }
+
+  .vm-gauges {
+    order: 0;
+    width: auto;
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .vm-gauge-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .vm-gauge-row-hp {
+    order: -1;
+  }
+
+  .vm-gauge-tag {
+    font-size: 8px;
+    letter-spacing: 0.03em;
+  }
+
+  .vm-seg-track {
+    width: 53px;
+    gap: 1px;
+    padding: 2px;
+    border-width: 1px;
+  }
+
+  .vm-seg {
+    height: 7px;
+  }
+
+  .vm-speed-header {
+    order: 1;
+    align-items: baseline;
+    gap: 4px;
+    padding-left: 5px;
+    border-left: 1px solid rgba(85, 100, 153, 0.65);
+  }
+
+  /* KO count stays visible in top-right standings; keep sky bar width predictable */
+  .vm-ko-pill {
+    display: none;
+  }
+
+  .vm-speed-readout {
+    gap: 3px;
+  }
+
+  .vm-speed-val {
+    font-size: 13px;
+    min-width: 3ch;
+    text-shadow: 2px 2px 0 var(--vm-ink);
+  }
+
+  .vm-speed-unit {
+    font-size: 8px;
+    text-shadow: 1px 1px 0 var(--vm-ink);
+  }
+
+  /* Wheelie SLAM / FLIP bar tucked directly beneath sky telemetry ONLY when wheelieing */
+  .vm-wheelie-wrap {
+    order: 1;
+    display: none;
+    width: 176px;
+    height: 16px;
+    padding: 2px 6px;
+    grid-template-columns: 50px 1fr;
+    gap: 5px;
+    background: rgba(11, 14, 24, 0.72);
+  }
+
+  .vm-wheelie-wrap.is-active {
+    display: grid;
+    opacity: 1;
+    visibility: visible;
+  }
+
+  .vm-wheelie-tag {
+    font-size: 8px;
+  }
+
+  .vm-wheelie-track {
+    height: 6px;
+    border-width: 1px;
+  }
+
+  /* Ultra-slim translucent live feed lines */
+  .vm-feed-line {
+    background: rgba(11, 14, 24, 0.48);
+    border-color: rgba(46, 55, 89, 0.55);
+  }
+
+  .vm-feed-line:nth-child(n + 3) {
+    display: none;
+  }
+
+  /* Compact powerup item chips */
+  .vm-item-slot {
+    height: 24px;
+    min-width: 36px;
+    padding: 0 5px 2px 4px;
+    gap: 3px;
+    font-size: 9px;
+  }
+
+  .vm-item-key {
+    width: 14px;
+    height: 14px;
+    font-size: 9px;
+  }
+
+  .vm-item-icon {
+    font-size: 11px;
+  }
+
+  .vm-item-name {
+    max-width: 44px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .vm-item-ttl {
+    font-size: 8px;
+    padding: 1px 2px;
   }
 }
 
-/* Mobile Portrait explicit polish (360x740, 375x667, 390x844, 430x932):
-   Top-left wraps cleanly to <= calc(100vw - 186px), top-right standings 154px -> >= 12px horizontal gap. */
+/* ==========================================================================
+   MOBILE PORTRAIT (360x740, 375x667, 390x844, 430x932)
+   - Top-Left (26px controls) | Top-Right (148px standings, max 3-4 rows + radar)
+   - Upper Sky: Single-line HP+N2O+KM/H bar (+ wheelie) & 1-4 item tray right beneath
+   - Bottom: Dual 86x86 joysticks + strictly 1 slim [1][2][3] center row (28px tall)
+   ========================================================================== */
 @media (pointer: coarse) and (orientation: portrait) {
   .vm-top-left-col {
-    top: max(10px, env(safe-area-inset-top));
-    left: max(10px, env(safe-area-inset-left));
-    max-width: calc(100vw - 186px);
-    gap: 5px;
+    top: max(8px, env(safe-area-inset-top));
+    left: max(8px, env(safe-area-inset-left));
+    max-width: calc(100vw - 174px);
+    gap: 4px;
   }
 
   .vm-top-left {
@@ -2140,31 +2371,31 @@ body {
   }
 
   .vm-nameplate {
-    padding: 0 7px 0 6px;
-    gap: 5px;
+    padding: 0 6px 0 5px;
+    gap: 4px;
   }
 
   .vm-name-text {
-    max-width: 78px;
+    max-width: 72px;
     font-size: 10px;
   }
 
   .vm-name-input {
-    width: 78px;
+    width: 72px;
     font-size: 10px;
   }
 
   .vm-net-badge {
-    padding: 0 6px;
+    padding: 0 5px;
     gap: 4px;
   }
 
   .vm-net-count {
-    font-size: 11px;
+    font-size: 10px;
   }
 
   .vm-actions {
-    gap: 4px;
+    gap: 3px;
     flex-wrap: wrap;
   }
 
@@ -2180,31 +2411,37 @@ body {
     padding: 0 5px;
   }
 
+  /* Position feed cleanly beneath upper-sky telemetry & item tray */
   .vm-feed {
-    width: 100%;
+    position: absolute;
+    top: 162px;
+    left: 0;
+    width: calc(100vw - 116px);
+    max-width: 236px;
+    gap: 3px;
   }
 
   .vm-feed-line {
     max-width: 100%;
-    font-size: 10px;
-    padding: 3px 6px;
+    font-size: 9px;
+    padding: 2px 5px;
   }
 
   .vm-top-right {
-    top: max(10px, env(safe-area-inset-top));
-    right: max(10px, env(safe-area-inset-right));
-    gap: 8px;
+    top: max(8px, env(safe-area-inset-top));
+    right: max(8px, env(safe-area-inset-right));
+    gap: 6px;
   }
 
   .vm-standings {
-    width: 154px;
+    width: 148px;
     padding: 3px 4px;
     gap: 2px;
   }
 
   .vm-row {
     grid-template-columns: 18px 16px 1fr auto auto;
-    height: 20px;
+    height: 16px;
     padding: 0 3px;
     gap: 3px;
     font-size: 9px;
@@ -2216,258 +2453,9 @@ body {
   }
 
   .vm-row-dist {
-    font-size: 9px;
-  }
-
-  .vm-toast {
-    top: max(74px, calc(env(safe-area-inset-top) + 64px));
-  }
-
-  .vm-alert-stack {
-    top: max(108px, calc(env(safe-area-inset-top) + 98px));
-  }
-
-  .vm-bottom-right {
-    right: max(12px, env(safe-area-inset-right));
-    bottom: calc(max(14px, env(safe-area-inset-bottom)) + 68px);
-    max-width: calc(100vw - 24px);
-  }
-
-  .vm-item-tray {
-    max-width: calc(100vw - 24px);
-  }
-}
-
-/* Mobile Landscape (667x375, 844x390, 915x412, etc.):
-   3 non-overlapping bottom bands:
-   [Left: Steer 114px]  [Center-Right: Compact Telemetry + HP/Nitro]  [Right: Action Pads 150px] */
-@media (pointer: coarse) and (orientation: landscape),
-  (pointer: coarse) and (max-height: 540px) {
-  .vm-touch-left {
-    left: max(10px, env(safe-area-inset-left));
-    bottom: max(10px, env(safe-area-inset-bottom));
-  }
-
-  .vm-touch-steer {
-    gap: 6px;
-  }
-
-  .vm-touch-btn {
-    width: 46px;
-    height: 48px;
-    font-size: 15px;
-  }
-
-  .vm-touch-btn-steer {
-    width: 54px;
-    height: 50px;
-    font-size: 17px;
-  }
-
-  .vm-touch-right {
-    right: max(10px, env(safe-area-inset-right));
-    bottom: max(10px, env(safe-area-inset-bottom));
-    gap: 6px;
-  }
-
-  .vm-touch-btn-item.is-ready {
-    font-size: 17px;
-  }
-
-  /* Shift telemetry cleanly to the LEFT of the 150px touch-action cluster (+12px breathing gap) */
-  .vm-bottom-right {
-    right: calc(max(10px, env(safe-area-inset-right)) + 162px);
-    bottom: max(10px, env(safe-area-inset-bottom));
-    gap: 4px;
-    max-width: calc(
-      100vw - max(10px, env(safe-area-inset-left)) - max(10px, env(safe-area-inset-right)) - 294px
-    );
-  }
-
-  .vm-wheelie-wrap {
-    width: 176px;
-    padding: 3px 6px;
-    grid-template-columns: 52px 1fr;
-    gap: 5px;
-  }
-
-  .vm-wheelie-tag {
-    font-size: 9px;
-  }
-
-  .vm-wheelie-track {
-    height: 7px;
-  }
-
-  .vm-speed-header {
-    gap: 7px;
-  }
-
-  .vm-ko-pill {
-    height: 20px;
-    padding: 0 6px;
-    margin-bottom: 2px;
-    font-size: 9px;
-  }
-
-  .vm-speed-val {
-    font-size: 22px;
-    text-shadow: 3px 3px 0 var(--vm-ink), -1px -1px 0 var(--vm-ink), 1px -1px 0 var(--vm-ink), -1px 1px 0 var(--vm-ink);
-  }
-
-  .vm-speed-unit {
-    font-size: 10px;
-  }
-
-  .vm-gauges {
-    width: 176px;
-    padding: 4px 6px;
-    gap: 4px;
-  }
-
-  .vm-gauge-row {
-    grid-template-columns: 38px 1fr;
-    gap: 5px;
-  }
-
-  .vm-gauge-tag {
-    font-size: 9px;
-  }
-
-  .vm-seg-track {
-    gap: 2px;
-    padding: 2px;
-  }
-
-  .vm-seg {
-    height: 7px;
-  }
-
-  .vm-item-tray {
-    gap: 4px;
-    flex-wrap: nowrap;
-  }
-
-  .vm-item-slot {
-    height: 22px;
-    min-width: 36px;
-    padding: 0 5px 2px 4px;
-    gap: 3px;
-    font-size: 9px;
-  }
-
-  .vm-item-key {
-    width: 14px;
-    height: 14px;
-    font-size: 9px;
-  }
-
-  .vm-item-icon {
-    font-size: 11px;
-  }
-
-  .vm-item-name {
-    max-width: 54px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .vm-item-ttl {
     font-size: 8px;
-    padding: 1px 2px;
   }
 
-  .vm-weapons {
-    gap: 4px;
-  }
-
-  .vm-weapon-chip {
-    height: 22px;
-    padding: 0 5px 0 4px;
-    gap: 4px;
-    font-size: 9px;
-  }
-
-  .vm-weapon-key {
-    width: 14px;
-    height: 14px;
-    font-size: 9px;
-  }
-
-  /* Compact top clusters so top-right NEVER reaches bottom-right buttons or telemetry */
-  .vm-top-left-col {
-    top: max(8px, env(safe-area-inset-top));
-    left: max(10px, env(safe-area-inset-left));
-    gap: 5px;
-    max-width: calc(100vw - 214px);
-  }
-
-  .vm-top-left {
-    gap: 4px;
-  }
-
-  .vm-avatar-btn {
-    width: 28px;
-    height: 28px;
-  }
-
-  .vm-avatar-btn .hud-avatar-img {
-    width: 24px;
-    height: 24px;
-  }
-
-  .vm-nameplate,
-  .vm-net-badge,
-  .vm-btn {
-    height: 28px;
-  }
-
-  .vm-btn {
-    min-width: 28px;
-    padding: 0 6px;
-    font-size: 10px;
-  }
-
-  .vm-feed-line {
-    max-width: 220px;
-    font-size: 10px;
-    padding: 2px 6px;
-  }
-
-  .vm-feed-line:nth-child(n + 3) {
-    display: none;
-  }
-
-  .vm-top-right {
-    top: max(8px, env(safe-area-inset-top));
-    right: max(10px, env(safe-area-inset-right));
-    gap: 6px;
-  }
-
-  .vm-standings {
-    width: 180px;
-    padding: 3px 4px;
-    gap: 2px;
-  }
-
-  .vm-row {
-    grid-template-columns: 18px 16px 1fr auto auto;
-    height: 18px;
-    padding: 0 4px;
-    gap: 4px;
-    font-size: 9px;
-  }
-
-  .vm-row-avatar {
-    width: 14px;
-    height: 14px;
-  }
-
-  .vm-row-dist {
-    font-size: 9px;
-  }
-
-  /* Keep top 3 + always local player on ultra-short landscape screens (<460px tall) */
   .vm-row:nth-child(n + 4):not(.is-local) {
     display: none;
   }
@@ -2478,23 +2466,370 @@ body {
   }
 
   .vm-radar {
-    height: 84px;
+    height: 104px;
+  }
+
+  /* Upper sky telemetry strip cleanly below standings (b <= 84) & clear of right radar */
+  .vm-telemetry-cluster {
+    top: max(92px, calc(env(safe-area-inset-top) + 84px));
+    left: max(8px, env(safe-area-inset-left));
+    max-width: calc(100vw - 98px);
+    align-items: flex-start;
+  }
+
+  /* Detach item tray to upper sky right beneath telemetry/wheelie; keep bottom strictly [1][2][3] */
+  .vm-bottom-dock {
+    position: static;
+    display: contents;
+    contain: none;
+  }
+
+  .vm-item-tray {
+    position: absolute;
+    top: max(140px, calc(env(safe-area-inset-top) + 132px));
+    left: max(8px, env(safe-area-inset-left));
+    max-width: calc(100vw - 98px);
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    gap: 4px;
+    z-index: 16;
+    contain: layout style;
+  }
+
+  .vm-item-name {
+    max-width: 38px;
   }
 
   .vm-toast {
-    top: max(42px, calc(env(safe-area-inset-top) + 34px));
+    top: max(214px, calc(env(safe-area-inset-top) + 206px));
+  }
+
+  .vm-alert-stack {
+    top: max(244px, calc(env(safe-area-inset-top) + 236px));
+  }
+
+  .vm-sniper-picker {
+    top: max(214px, calc(env(safe-area-inset-top) + 206px));
+  }
+
+  /* Dual 86x86 portrait joysticks + 1 slim bottom-center [1][2][3] row */
+  .vm-joy {
+    width: 86px;
+    height: 86px;
+  }
+
+  .vm-joy-left {
+    left: max(10px, env(safe-area-inset-left));
+    bottom: max(10px, env(safe-area-inset-bottom));
+  }
+
+  .vm-joy-right {
+    right: max(10px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
+  }
+
+  .vm-joy-knob {
+    width: 32px;
+    height: 32px;
+    margin: -16px 0 0 -16px;
+  }
+
+  .vm-weapons {
+    position: absolute;
+    bottom: max(10px, env(safe-area-inset-bottom));
+    left: calc(max(10px, env(safe-area-inset-left)) + 98px);
+    right: calc(max(10px, env(safe-area-inset-right)) + 98px);
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    z-index: 16;
+    contain: layout style;
+  }
+
+  .vm-weapon-chip {
+    width: 32px;
+    height: 28px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .vm-weapon-label {
+    display: none;
+  }
+
+  .vm-weapon-key {
+    width: 18px;
+    height: 18px;
+    font-size: 10px;
+  }
+}
+
+/* ==========================================================================
+   MOBILE LANDSCAPE (667x375, 844x390, 915x412, etc.)
+   - Top-Left (26px + 2-line feed) | Sky Telemetry (HP+N2O+KM/H) | Top-Right (3-row standings + 80px radar)
+   - Bottom: Dual 94x94 joysticks + strictly 1 slim bottom-center row ([1][2][3] + 1..4 items)
+   ========================================================================== */
+@media (pointer: coarse) and (orientation: landscape),
+  (pointer: coarse) and (max-height: 540px) and (min-width: 560px) {
+  .vm-top-left-col {
+    top: max(6px, env(safe-area-inset-top));
+    left: max(10px, env(safe-area-inset-left));
+    gap: 4px;
+    max-width: 292px;
+  }
+
+  .vm-top-left {
+    gap: 4px;
+    flex-wrap: nowrap;
+  }
+
+  .vm-avatar-btn {
+    width: 26px;
+    height: 26px;
+  }
+
+  .vm-avatar-btn .hud-avatar-img {
+    width: 22px;
+    height: 22px;
+  }
+
+  .vm-nameplate,
+  .vm-net-badge,
+  .vm-btn {
+    height: 26px;
+  }
+
+  .vm-nameplate {
+    padding: 0 6px 0 5px;
+    gap: 4px;
+  }
+
+  .vm-name-text {
+    max-width: 56px;
+    font-size: 10px;
+  }
+
+  .vm-name-input {
+    width: 56px;
+    font-size: 10px;
+  }
+
+  .vm-net-badge {
+    padding: 0 5px;
+    gap: 4px;
+  }
+
+  .vm-net-count {
+    font-size: 10px;
+  }
+
+  .vm-actions {
+    gap: 3px;
+  }
+
+  .vm-btn {
+    min-width: 26px;
+    padding: 0 5px;
+    font-size: 9px;
+  }
+
+  .vm-btn-regroup,
+  .vm-btn-gyro {
+    min-width: 26px;
+    padding: 0 5px;
+  }
+
+  .vm-feed-line {
+    max-width: 196px;
+    font-size: 9px;
+    padding: 2px 6px;
+  }
+
+  .vm-top-right {
+    top: max(6px, env(safe-area-inset-top));
+    right: max(10px, env(safe-area-inset-right));
+    gap: 6px;
+  }
+
+  .vm-standings {
+    width: 160px;
+    padding: 3px 4px;
+    gap: 2px;
+  }
+
+  .vm-row {
+    grid-template-columns: 18px 16px 1fr auto auto;
+    height: 16px;
+    padding: 0 4px;
+    gap: 3px;
+    font-size: 9px;
+  }
+
+  .vm-row-avatar {
+    width: 14px;
+    height: 14px;
+  }
+
+  .vm-row-dist {
+    font-size: 8px;
+  }
+
+  .vm-row:nth-child(n + 4):not(.is-local) {
+    display: none;
+  }
+
+  .vm-radar-wrap {
+    margin-top: 6px;
+    margin-bottom: 6px;
+  }
+
+  .vm-radar {
+    height: 80px;
+  }
+
+  /* Wide landscape (>= 780px, e.g. 844x390, 915x412):
+     Sky telemetry centered cleanly between topLeft (<= 302) and standings (>= 674) */
+  .vm-telemetry-cluster {
+    top: max(6px, env(safe-area-inset-top));
+    left: calc(max(10px, env(safe-area-inset-left)) + 302px);
+    right: calc(max(10px, env(safe-area-inset-right)) + 170px);
+    align-items: center;
+  }
+
+  .vm-toast {
+    top: max(56px, calc(env(safe-area-inset-top) + 50px));
     font-size: 10px;
     padding: 5px 10px;
   }
 
   .vm-alert-stack {
-    top: max(74px, calc(env(safe-area-inset-top) + 66px));
+    top: max(84px, calc(env(safe-area-inset-top) + 78px));
+  }
+
+  .vm-sniper-picker {
+    top: max(56px, calc(env(safe-area-inset-top) + 50px));
   }
 
   .vm-danger-lock,
   .vm-enraged-warn {
     font-size: 10px;
     padding: 4px 10px;
+  }
+
+  /* Dual 94x94 landscape joysticks + ONE slim bottom-center row (weapons + 1..4 items) */
+  .vm-joy {
+    width: 94px;
+    height: 94px;
+  }
+
+  .vm-joy-left {
+    left: max(12px, env(safe-area-inset-left));
+    bottom: max(10px, env(safe-area-inset-bottom));
+  }
+
+  .vm-joy-right {
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
+  }
+
+  .vm-joy-knob {
+    width: 36px;
+    height: 36px;
+    margin: -18px 0 0 -18px;
+  }
+
+  .vm-bottom-dock {
+    position: absolute;
+    bottom: max(10px, env(safe-area-inset-bottom));
+    left: calc(max(12px, env(safe-area-inset-left)) + 108px);
+    right: calc(max(12px, env(safe-area-inset-right)) + 108px);
+    height: 28px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    z-index: 16;
+    contain: layout style;
+  }
+
+  .vm-weapons {
+    order: 0;
+    position: static;
+    height: auto;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .vm-weapon-chip {
+    width: auto;
+    height: 24px;
+    padding: 0 6px 0 4px;
+    gap: 3px;
+    font-size: 9px;
+  }
+
+  .vm-weapon-label {
+    display: inline;
+  }
+
+  .vm-weapon-key {
+    width: 14px;
+    height: 14px;
+    font-size: 9px;
+  }
+
+  .vm-item-tray {
+    order: 1;
+    position: static;
+    flex-wrap: nowrap;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+}
+
+/* Compact landscape (< 780px wide, e.g. iPhone SE 667x375):
+   Sky telemetry centered cleanly below top bar; compact icon-only item chips in single bottom row */
+@media (pointer: coarse) and (orientation: landscape) and (max-width: 779px),
+  (pointer: coarse) and (max-height: 540px) and (min-width: 560px) and (max-width: 779px) {
+  .vm-feed-line {
+    max-width: 184px;
+  }
+
+  .vm-telemetry-cluster {
+    top: max(38px, calc(env(safe-area-inset-top) + 32px));
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    align-items: center;
+  }
+
+  .vm-toast {
+    top: max(86px, calc(env(safe-area-inset-top) + 80px));
+  }
+
+  .vm-alert-stack {
+    top: max(114px, calc(env(safe-area-inset-top) + 108px));
+  }
+
+  .vm-sniper-picker {
+    top: max(86px, calc(env(safe-area-inset-top) + 80px));
+  }
+
+  .vm-bottom-dock {
+    gap: 6px;
+  }
+
+  .vm-item-tray {
+    gap: 3px;
+  }
+
+  .vm-item-name {
+    display: none;
   }
 }
 

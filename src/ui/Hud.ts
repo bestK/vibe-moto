@@ -40,6 +40,8 @@ export type TouchInputPatch = Partial<{
   wheelie: boolean;
   attackLeft: boolean;
   attackRight: boolean;
+  attackAuto: boolean;
+  analogSteer: number | null;
 }>;
 
 export interface HudCallbacks {
@@ -261,9 +263,9 @@ export class Hud {
   private readonly gyroBtnEl: HTMLButtonElement;
   private readonly tapFlashLeftEl: HTMLDivElement;
   private readonly tapFlashRightEl: HTMLDivElement;
-  private touchItemBtnEl: HTMLButtonElement | null = null;
-  private touchItemLabelEl: HTMLSpanElement | null = null;
-  private touchItemCountEl: HTMLSpanElement | null = null;
+  private rightJoyItemEl: HTMLSpanElement | null = null;
+  private rightJoyItemIconEl: HTMLSpanElement | null = null;
+  private rightJoyItemCountEl: HTMLSpanElement | null = null;
   private readonly feedLines: HTMLDivElement[] = [];
   private readonly feedEntries: FeedEntry[] = [];
   private nextFeedId = 1;
@@ -899,6 +901,9 @@ export class Hud {
     const bottomRight = document.createElement('div');
     bottomRight.className = 'vm-bottom-right';
 
+    const telemetryCluster = document.createElement('div');
+    telemetryCluster.className = 'vm-telemetry-cluster';
+
     // Wheelie Charge & Over-Flip Danger Bar
     this.wheelieWrapEl = document.createElement('div');
     this.wheelieWrapEl.className = 'vm-slab vm-wheelie-wrap';
@@ -918,6 +923,9 @@ export class Hud {
     wheelieTrack.append(this.wheelieFillEl, markSlam, markFlip);
 
     this.wheelieWrapEl.append(this.wheelieTagEl, wheelieTrack);
+
+    const telemetryBar = document.createElement('div');
+    telemetryBar.className = 'vm-telemetry-bar';
 
     const speedHeader = document.createElement('div');
     speedHeader.className = 'vm-speed-header';
@@ -948,7 +956,7 @@ export class Hud {
     gaugesEl.className = 'vm-slab vm-gauges';
 
     const nitroRow = document.createElement('div');
-    nitroRow.className = 'vm-gauge-row';
+    nitroRow.className = 'vm-gauge-row vm-gauge-row-nitro';
     const nitroTag = document.createElement('span');
     nitroTag.className = 'vm-gauge-tag vm-gauge-tag-nitro';
     nitroTag.textContent = 'NITRO';
@@ -963,7 +971,7 @@ export class Hud {
     nitroRow.append(nitroTag, this.nitroTrackEl);
 
     const hpRow = document.createElement('div');
-    hpRow.className = 'vm-gauge-row';
+    hpRow.className = 'vm-gauge-row vm-gauge-row-hp';
     this.hpTagEl = document.createElement('span');
     this.hpTagEl.className = 'vm-gauge-tag vm-gauge-tag-hp';
     this.hpTagEl.textContent = 'HP';
@@ -978,6 +986,8 @@ export class Hud {
     hpRow.append(this.hpTagEl, this.hpTrackEl);
 
     gaugesEl.append(nitroRow, hpRow);
+    telemetryBar.append(speedHeader, gaugesEl);
+    telemetryCluster.append(this.wheelieWrapEl, telemetryBar);
 
     // Pooled 4-slot Multi-Item Powerup Tray (30s TTL when >=2 held)
     const itemTray = document.createElement('div');
@@ -1057,6 +1067,7 @@ export class Hud {
       k.textContent = String(spec.id + 1);
 
       const label = document.createElement('span');
+      label.className = 'vm-weapon-label';
       label.textContent = spec.code;
 
       chip.append(k, label);
@@ -1070,7 +1081,11 @@ export class Hud {
       weaponsEl.appendChild(chip);
     }
 
-    bottomRight.append(this.wheelieWrapEl, speedHeader, gaugesEl, itemTray, weaponsEl);
+    const bottomDock = document.createElement('div');
+    bottomDock.className = 'vm-bottom-dock';
+    bottomDock.append(itemTray, weaponsEl);
+
+    bottomRight.append(telemetryCluster, bottomDock);
 
     // -----------------------------------------------------------------------
     // 5. BOTTOM-LEFT KEYCAP HINTS, TOUCH CONTROLS & TAP ATTACK EDGE FLASHES
@@ -1756,89 +1771,311 @@ export class Hud {
     const layer = document.createElement('div');
     layer.className = 'vm-touch-layer';
 
-    const makePad = (
-      label: string,
-      field: keyof TouchInputPatch,
-      extraClass: string
-    ): HTMLButtonElement => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = `vm-touch-btn ${extraClass}`;
-      btn.textContent = label;
+    // -----------------------------------------------------------------------
+    // LEFT VIRTUAL JOYSTICK: Proportional Analog Steer + Nitro (Up) + Brake (Down)
+    // -----------------------------------------------------------------------
+    const leftStick = document.createElement('div');
+    leftStick.className = 'vm-joy vm-joy-left';
+    leftStick.setAttribute('aria-label', 'Drive joystick');
 
-      const activePointers = new Set<number>();
+    const lUp = document.createElement('span');
+    lUp.className = 'vm-joy-dir vm-joy-dir-up vm-joy-dir-nitro';
+    lUp.textContent = '⚡';
 
-      const emit = (down: boolean): void => {
-        btn.classList.toggle('is-active', down);
-        this.callbacks.onTouchInput?.({ [field]: down });
-      };
+    const lDown = document.createElement('span');
+    lDown.className = 'vm-joy-dir vm-joy-dir-down vm-joy-dir-brake';
+    lDown.textContent = '⬇';
 
-      btn.addEventListener('pointerdown', (e: PointerEvent) => {
-        e.preventDefault();
-        try {
-          btn.setPointerCapture(e.pointerId);
-        } catch {
-          // Ignore synthetic pointer events
-        }
-        const wasEmpty = activePointers.size === 0;
-        activePointers.add(e.pointerId);
-        if (wasEmpty) emit(true);
-      });
+    const lLeft = document.createElement('span');
+    lLeft.className = 'vm-joy-dir vm-joy-dir-left vm-joy-dir-steer';
+    lLeft.textContent = '◀';
 
-      const release = (e: PointerEvent): void => {
-        if (!activePointers.delete(e.pointerId)) return;
-        if (activePointers.size === 0) emit(false);
-      };
+    const lRight = document.createElement('span');
+    lRight.className = 'vm-joy-dir vm-joy-dir-right vm-joy-dir-steer';
+    lRight.textContent = '▶';
 
-      btn.addEventListener('pointerup', release);
-      btn.addEventListener('pointercancel', release);
-      btn.addEventListener('lostpointercapture', release);
+    const leftKnob = document.createElement('span');
+    leftKnob.className = 'vm-joy-knob vm-joy-knob-left';
 
-      return btn;
+    leftStick.append(lUp, lDown, lLeft, lRight, leftKnob);
+
+    let leftPid: number | null = null;
+    let leftCx = 0;
+    let leftCy = 0;
+    let leftMaxR = 34;
+    let lastLeftNitro = false;
+    let lastLeftBrake = false;
+    let lastLeftDir = 0; // -1 left, 0 neutral, 1 right
+
+    const updateLeftStick = (clientX: number, clientY: number): void => {
+      const rawDx = clientX - leftCx;
+      const rawDy = clientY - leftCy;
+      const dist = Math.hypot(rawDx, rawDy);
+      const scale = dist > leftMaxR && dist > 0 ? leftMaxR / dist : 1;
+      const dx = rawDx * scale;
+      const dy = rawDy * scale;
+
+      leftKnob.style.transform = `translate3d(${Math.round(dx)}px, ${Math.round(dy)}px, 0)`;
+
+      const nx = leftMaxR > 0 ? dx / leftMaxR : 0;
+      const ny = leftMaxR > 0 ? dy / leftMaxR : 0;
+
+      const absX = Math.abs(nx);
+      let steer = 0;
+      if (absX > 0.12) {
+        steer = Math.sign(nx) * Math.min(1, (absX - 0.12) / 0.88);
+        steer = Math.round(steer * 1000) / 1000;
+      }
+
+      const nitro = ny < -0.45;
+      const brake = ny > 0.5;
+      const dir = steer < -0.05 ? -1 : steer > 0.05 ? 1 : 0;
+
+      if (nitro !== lastLeftNitro) {
+        lastLeftNitro = nitro;
+        lUp.classList.toggle('is-lit', nitro);
+      }
+      if (brake !== lastLeftBrake) {
+        lastLeftBrake = brake;
+        lDown.classList.toggle('is-lit', brake);
+      }
+      if (dir !== lastLeftDir) {
+        lastLeftDir = dir;
+        lLeft.classList.toggle('is-lit', dir < 0);
+        lRight.classList.toggle('is-lit', dir > 0);
+      }
+
+      this.callbacks.onTouchInput?.({ analogSteer: steer, nitro, brake });
     };
 
-    const leftZone = document.createElement('div');
-    leftZone.className = 'vm-touch-left';
-    const steerRow = document.createElement('div');
-    steerRow.className = 'vm-touch-steer';
-    steerRow.append(
-      makePad('◀', 'left', 'vm-touch-btn-steer'),
-      makePad('▶', 'right', 'vm-touch-btn-steer')
-    );
-    leftZone.appendChild(steerRow);
+    const resetLeftStick = (): void => {
+      leftPid = null;
+      leftStick.classList.remove('is-active');
+      leftKnob.style.transform = 'translate3d(0, 0, 0)';
+      if (lastLeftNitro) {
+        lastLeftNitro = false;
+        lUp.classList.remove('is-lit');
+      }
+      if (lastLeftBrake) {
+        lastLeftBrake = false;
+        lDown.classList.remove('is-lit');
+      }
+      if (lastLeftDir !== 0) {
+        lastLeftDir = 0;
+        lLeft.classList.remove('is-lit');
+        lRight.classList.remove('is-lit');
+      }
+      this.callbacks.onTouchInput?.({ analogSteer: null, nitro: false, brake: false });
+    };
 
-    const rightZone = document.createElement('div');
-    rightZone.className = 'vm-touch-right';
-
-    const itemTouchBtn = document.createElement('button');
-    itemTouchBtn.type = 'button';
-    itemTouchBtn.className = 'vm-touch-btn vm-touch-btn-item';
-    itemTouchBtn.setAttribute('aria-label', 'Use item');
-
-    const itemTouchLabel = document.createElement('span');
-    itemTouchLabel.textContent = 'R';
-    const itemTouchCount = document.createElement('span');
-    itemTouchCount.className = 'vm-touch-item-count is-hidden';
-    itemTouchBtn.append(itemTouchLabel, itemTouchCount);
-
-    itemTouchBtn.addEventListener('pointerdown', (e: PointerEvent) => {
+    leftStick.addEventListener('pointerdown', (e: PointerEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      if (!this.itemSlots[0].btn.disabled) {
-        this.callbacks.onUseItem(0);
+      if (leftPid !== null) return;
+      leftPid = e.pointerId;
+      try {
+        leftStick.setPointerCapture(e.pointerId);
+      } catch {
+        // Ignore synthetic events
       }
+      const rect = leftStick.getBoundingClientRect();
+      leftCx = rect.left + rect.width * 0.5;
+      leftCy = rect.top + rect.height * 0.5;
+      leftMaxR = Math.max(18, rect.width * 0.36);
+      leftStick.classList.add('is-active');
+      updateLeftStick(e.clientX, e.clientY);
     });
-    this.touchItemBtnEl = itemTouchBtn;
-    this.touchItemLabelEl = itemTouchLabel;
-    this.touchItemCountEl = itemTouchCount;
 
-    rightZone.append(
-      itemTouchBtn,
-      makePad('⬆', 'wheelie', 'vm-touch-btn-hop'),
-      makePad('⚡', 'nitro', 'vm-touch-btn-nitro')
-    );
+    leftStick.addEventListener('pointermove', (e: PointerEvent) => {
+      if (e.pointerId !== leftPid) return;
+      e.preventDefault();
+      e.stopPropagation();
+      updateLeftStick(e.clientX, e.clientY);
+    });
 
-    layer.append(leftZone, rightZone);
+    const onLeftRelease = (e: PointerEvent): void => {
+      if (e.pointerId !== leftPid) return;
+      e.preventDefault();
+      e.stopPropagation();
+      resetLeftStick();
+    };
+    leftStick.addEventListener('pointerup', onLeftRelease);
+    leftStick.addEventListener('pointercancel', onLeftRelease);
+    leftStick.addEventListener('lostpointercapture', onLeftRelease);
+
+    // -----------------------------------------------------------------------
+    // RIGHT VIRTUAL JOYSTICK: Attack L/R + Wheelie (Up) + Item (Down) + Tap Auto
+    // -----------------------------------------------------------------------
+    const rightStick = document.createElement('div');
+    rightStick.className = 'vm-joy vm-joy-right';
+    rightStick.setAttribute('aria-label', 'Combat and stunt joystick');
+
+    const rUp = document.createElement('span');
+    rUp.className = 'vm-joy-dir vm-joy-dir-up vm-joy-dir-wheelie';
+    rUp.textContent = '⬆';
+
+    const rDown = document.createElement('span');
+    rDown.className = 'vm-joy-dir vm-joy-dir-down vm-joy-dir-item';
+    const rDownIcon = document.createElement('span');
+    rDownIcon.textContent = 'R';
+    const rDownCount = document.createElement('span');
+    rDownCount.className = 'vm-joy-item-count is-hidden';
+    rDown.append(rDownIcon, rDownCount);
+    this.rightJoyItemEl = rDown;
+    this.rightJoyItemIconEl = rDownIcon;
+    this.rightJoyItemCountEl = rDownCount;
+
+    const rLeft = document.createElement('span');
+    rLeft.className = 'vm-joy-dir vm-joy-dir-left vm-joy-dir-atk';
+    rLeft.textContent = '◀';
+
+    const rRight = document.createElement('span');
+    rRight.className = 'vm-joy-dir vm-joy-dir-right vm-joy-dir-atk';
+    rRight.textContent = '▶';
+
+    const rightKnob = document.createElement('span');
+    rightKnob.className = 'vm-joy-knob vm-joy-knob-right';
+
+    rightStick.append(rUp, rDown, rLeft, rRight, rightKnob);
+
+    let rightPid: number | null = null;
+    let rightCx = 0;
+    let rightCy = 0;
+    let rightMaxR = 34;
+    let rightDownMs = 0;
+    let rightMaxDist = 0;
+    let rightItemFired = false;
+    let lastRightAtkL = false;
+    let lastRightAtkR = false;
+    let lastRightWheelie = false;
+
+    const updateRightStick = (clientX: number, clientY: number): void => {
+      const rawDx = clientX - rightCx;
+      const rawDy = clientY - rightCy;
+      const dist = Math.hypot(rawDx, rawDy);
+      if (dist > rightMaxDist) rightMaxDist = dist;
+
+      const scale = dist > rightMaxR && dist > 0 ? rightMaxR / dist : 1;
+      const dx = rawDx * scale;
+      const dy = rawDy * scale;
+
+      rightKnob.style.transform = `translate3d(${Math.round(dx)}px, ${Math.round(dy)}px, 0)`;
+
+      const nx = rightMaxR > 0 ? dx / rightMaxR : 0;
+      const ny = rightMaxR > 0 ? dy / rightMaxR : 0;
+      const absX = Math.abs(nx);
+      const absY = Math.abs(ny);
+
+      const atkL = nx < -0.36 && absX >= absY * 0.8;
+      const atkR = nx > 0.36 && absX >= absY * 0.8;
+      const wheelie = ny < -0.38 && absY > absX;
+      const flickDown = ny > 0.46 && absY > absX;
+
+      if (flickDown) {
+        if (!rightItemFired) {
+          rightItemFired = true;
+          rDown.classList.add('is-lit');
+          if (!this.itemSlots[0].btn.disabled) {
+            this.callbacks.onUseItem(0);
+          }
+        }
+      } else if (ny < 0.2 && rightItemFired) {
+        rightItemFired = false;
+        rDown.classList.remove('is-lit');
+      }
+
+      if (atkL !== lastRightAtkL || atkR !== lastRightAtkR || wheelie !== lastRightWheelie) {
+        lastRightAtkL = atkL;
+        lastRightAtkR = atkR;
+        lastRightWheelie = wheelie;
+        rLeft.classList.toggle('is-lit', atkL);
+        rRight.classList.toggle('is-lit', atkR);
+        rUp.classList.toggle('is-lit', wheelie);
+        this.callbacks.onTouchInput?.({
+          attackLeft: atkL,
+          attackRight: atkR,
+          wheelie,
+        });
+      }
+    };
+
+    const resetRightStick = (allowTap: boolean): void => {
+      const elapsed = performance.now() - rightDownMs;
+      const isQuickTap = allowTap && elapsed < 220 && rightMaxDist < 10 && !rightItemFired;
+
+      rightPid = null;
+      rightItemFired = false;
+      rightStick.classList.remove('is-active');
+      rightKnob.style.transform = 'translate3d(0, 0, 0)';
+      rLeft.classList.remove('is-lit');
+      rRight.classList.remove('is-lit');
+      rUp.classList.remove('is-lit');
+      rDown.classList.remove('is-lit');
+      lastRightAtkL = false;
+      lastRightAtkR = false;
+      lastRightWheelie = false;
+
+      if (isQuickTap) {
+        this.callbacks.onTouchInput?.({
+          attackLeft: false,
+          attackRight: false,
+          wheelie: false,
+          attackAuto: true,
+        });
+      } else {
+        this.callbacks.onTouchInput?.({
+          attackLeft: false,
+          attackRight: false,
+          wheelie: false,
+        });
+      }
+    };
+
+    rightStick.addEventListener('pointerdown', (e: PointerEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (rightPid !== null) return;
+      rightPid = e.pointerId;
+      rightDownMs = performance.now();
+      rightMaxDist = 0;
+      rightItemFired = false;
+      try {
+        rightStick.setPointerCapture(e.pointerId);
+      } catch {
+        // Ignore synthetic events
+      }
+      const rect = rightStick.getBoundingClientRect();
+      rightCx = rect.left + rect.width * 0.5;
+      rightCy = rect.top + rect.height * 0.5;
+      rightMaxR = Math.max(18, rect.width * 0.36);
+      rightStick.classList.add('is-active');
+      updateRightStick(e.clientX, e.clientY);
+    });
+
+    rightStick.addEventListener('pointermove', (e: PointerEvent) => {
+      if (e.pointerId !== rightPid) return;
+      e.preventDefault();
+      e.stopPropagation();
+      updateRightStick(e.clientX, e.clientY);
+    });
+
+    rightStick.addEventListener('pointerup', (e: PointerEvent) => {
+      if (e.pointerId !== rightPid) return;
+      e.preventDefault();
+      e.stopPropagation();
+      resetRightStick(true);
+    });
+
+    const onRightCancel = (e: PointerEvent): void => {
+      if (e.pointerId !== rightPid) return;
+      e.preventDefault();
+      e.stopPropagation();
+      resetRightStick(false);
+    };
+    rightStick.addEventListener('pointercancel', onRightCancel);
+    rightStick.addEventListener('lostpointercapture', onRightCancel);
+
+    layer.append(leftStick, rightStick);
     return layer;
   }
 
@@ -1964,30 +2201,30 @@ export class Hud {
       }
     }
 
-    // Mobile touch R button: sync slot 0 icon & ×2/×3/×4 count badge
-    if (this.touchItemBtnEl && this.touchItemLabelEl && this.touchItemCountEl) {
+    // Right joystick bottom item indicator: sync slot 0 icon & ×2/×3/×4 count badge
+    if (this.rightJoyItemEl && this.rightJoyItemIconEl && this.rightJoyItemCountEl) {
       const firstType: ItemType | null =
         heldItems && count > 0 ? heldItems[0].type : fallbackItem;
       if (firstType !== this.lastTouchItemType) {
         this.lastTouchItemType = firstType;
         if (!firstType) {
-          this.touchItemBtnEl.classList.remove('is-ready');
-          this.touchItemBtnEl.style.borderColor = '';
-          this.touchItemLabelEl.textContent = 'R';
+          this.rightJoyItemEl.classList.remove('is-ready');
+          this.rightJoyItemEl.style.color = '';
+          this.rightJoyItemIconEl.textContent = 'R';
         } else {
           const spec = ITEM_BY_ID[firstType];
-          this.touchItemBtnEl.classList.add('is-ready');
-          this.touchItemBtnEl.style.borderColor = spec.color;
-          this.touchItemLabelEl.textContent = spec.icon;
+          this.rightJoyItemEl.classList.add('is-ready');
+          this.rightJoyItemEl.style.color = spec.color;
+          this.rightJoyItemIconEl.textContent = spec.icon;
         }
       }
       if (count !== this.lastTouchItemCount) {
         this.lastTouchItemCount = count;
         if (count > 1) {
-          this.touchItemCountEl.classList.remove('is-hidden');
-          this.touchItemCountEl.textContent = `×${count}`;
+          this.rightJoyItemCountEl.classList.remove('is-hidden');
+          this.rightJoyItemCountEl.textContent = `×${count}`;
         } else {
-          this.touchItemCountEl.classList.add('is-hidden');
+          this.rightJoyItemCountEl.classList.add('is-hidden');
         }
       }
     }
