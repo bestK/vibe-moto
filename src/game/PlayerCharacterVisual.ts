@@ -1,10 +1,14 @@
 import * as THREE from 'three';
+import { getLang, type Lang } from '../i18n';
 import { getAvatarCharacterModel, getSharedBasicVertexMat, getSharedVertexColorMat } from './AvatarModels';
 import {
   buildCustomAvatarCharacterModel,
   CustomAvatarSkin,
   getCustomSkinKey,
+  getCustomSkinVersion,
 } from './CustomAvatarSystem';
+import { getAvatarVersion } from './PixelAvatars';
+import { drawNameplateCanvas } from './PixelTextures';
 import { BLOCK_SPEC_BY_ID, BlockType } from './VoxelWorld';
 
 function parseHex(hex: string): number {
@@ -16,6 +20,46 @@ function darkenHex(hex: number, factor = 0.62): number {
   const g = Math.max(0, Math.round(((hex >> 8) & 0xff) * factor));
   const b = Math.max(0, Math.round((hex & 0xff) * factor));
   return (r << 16) | (g << 8) | b;
+}
+
+// Shared static geometries & shadow material pooled across local & remote walking players
+let _sharedCharGeos: {
+  shadow: THREE.PlaneGeometry;
+  arm: THREE.BoxGeometry;
+  leg: THREE.BoxGeometry;
+  boot: THREE.BoxGeometry;
+  heldBlock: THREE.BoxGeometry;
+  fpArm: THREE.BoxGeometry;
+  fpBlock: THREE.BoxGeometry;
+} | null = null;
+
+const _sharedCharShadowMat = new THREE.MeshBasicMaterial({
+  color: 0x090b14,
+  transparent: true,
+  opacity: 0.44,
+  depthWrite: false,
+});
+
+function getSharedCharGeos() {
+  if (_sharedCharGeos) return _sharedCharGeos;
+  const shadow = new THREE.PlaneGeometry(0.82, 0.82);
+  shadow.rotateX(-Math.PI / 2);
+  const arm = new THREE.BoxGeometry(0.16, 0.56, 0.16);
+  arm.translate(0, -0.24, 0);
+  const leg = new THREE.BoxGeometry(0.2, 0.52, 0.2);
+  leg.translate(0, -0.26, 0);
+  const boot = new THREE.BoxGeometry(0.22, 0.18, 0.24);
+  boot.translate(0, -0.59, -0.02);
+  _sharedCharGeos = {
+    shadow,
+    arm,
+    leg,
+    boot,
+    heldBlock: new THREE.BoxGeometry(0.28, 0.28, 0.28),
+    fpArm: new THREE.BoxGeometry(0.16, 0.16, 0.48),
+    fpBlock: new THREE.BoxGeometry(0.24, 0.24, 0.24),
+  };
+  return _sharedCharGeos;
 }
 
 /**
@@ -37,6 +81,8 @@ export class PlayerCharacterVisual {
   private readonly armR: THREE.Mesh;
   private readonly legL: THREE.Mesh;
   private readonly legR: THREE.Mesh;
+  private readonly armMat: THREE.MeshLambertMaterial;
+  private readonly legMat: THREE.MeshLambertMaterial;
   private readonly bootMat: THREE.MeshLambertMaterial;
   private readonly heldBlockMesh: THREE.Mesh;
   private readonly heldBlockMat: THREE.MeshLambertMaterial;
@@ -47,21 +93,31 @@ export class PlayerCharacterVisual {
   private readonly fpArmMesh: THREE.Mesh;
   private readonly fpArmMat: THREE.MeshLambertMaterial;
 
+  // Optional floating nameplate sprite (lazily allocated for remote walking players)
+  private plateCanvas: HTMLCanvasElement | null = null;
+  private plateTex: THREE.CanvasTexture | null = null;
+  private plateSprite: THREE.Sprite | null = null;
+  private lastPlateName = '';
+  private lastPlatePeerId = '';
+  private lastPlateHp = -1;
+  private lastPlateAvatar = -1;
+  private lastPlateAvatarVer = -1;
+  private lastPlateSkinVer = -1;
+  private lastPlateAccent = '';
+  private lastPlateLang: Lang | '' = '';
+
   private lastAvatarIdx = -1;
   private lastCustomSkinKey = '';
   private lastBlock: BlockType = 3;
   private hasFloatingMarks = false;
+  private activeAccentColor = '#38e2d4';
 
   constructor() {
     const vMat = getSharedVertexColorMat();
     const bMat = getSharedBasicVertexMat();
+    const geos = getSharedCharGeos();
 
-    const shadowGeo = new THREE.PlaneGeometry(0.82, 0.82);
-    shadowGeo.rotateX(-Math.PI / 2);
-    const shadow = new THREE.Mesh(
-      shadowGeo,
-      new THREE.MeshBasicMaterial({ color: 0x090b14, transparent: true, opacity: 0.44, depthWrite: false })
-    );
+    const shadow = new THREE.Mesh(geos.shadow, _sharedCharShadowMat);
     shadow.position.y = 0.04;
     this.root.add(shadow);
 
@@ -79,53 +135,46 @@ export class PlayerCharacterVisual {
     this.floatMesh.visible = initChar.floatGeo !== null;
     this.bodyPivot.add(this.floatMesh);
 
-    const armGeo = new THREE.BoxGeometry(0.16, 0.56, 0.16);
-    armGeo.translate(0, -0.24, 0);
-    const legGeo = new THREE.BoxGeometry(0.2, 0.52, 0.2);
-    legGeo.translate(0, -0.26, 0);
-    const bootGeo = new THREE.BoxGeometry(0.22, 0.18, 0.24);
-    bootGeo.translate(0, -0.59, -0.02);
-
-    const initArmMat = new THREE.MeshLambertMaterial({ color: 0x232838, flatShading: true });
-    const initLegMat = new THREE.MeshLambertMaterial({ color: 0x1a2030, flatShading: true });
+    this.armMat = new THREE.MeshLambertMaterial({ color: 0x232838, flatShading: true });
+    this.legMat = new THREE.MeshLambertMaterial({ color: 0x1a2030, flatShading: true });
     this.bootMat = new THREE.MeshLambertMaterial({ color: 0x111520, flatShading: true });
 
     this.leftArmPivot.position.set(-0.32, 1.24, 0);
-    this.armL = new THREE.Mesh(armGeo, initArmMat);
+    this.armL = new THREE.Mesh(geos.arm, this.armMat);
     this.leftArmPivot.add(this.armL);
     this.bodyPivot.add(this.leftArmPivot);
 
     this.rightArmPivot.position.set(0.32, 1.24, 0);
-    this.armR = new THREE.Mesh(armGeo, initArmMat);
+    this.armR = new THREE.Mesh(geos.arm, this.armMat);
     this.rightArmPivot.add(this.armR);
     this.bodyPivot.add(this.rightArmPivot);
 
     this.heldBlockMat = new THREE.MeshLambertMaterial({ color: BLOCK_SPEC_BY_ID[3].particleHex });
-    this.heldBlockMesh = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.28, 0.28), this.heldBlockMat);
+    this.heldBlockMesh = new THREE.Mesh(geos.heldBlock, this.heldBlockMat);
     this.heldBlockMesh.position.set(0.02, -0.48, -0.18);
     this.rightArmPivot.add(this.heldBlockMesh);
 
     this.leftLegPivot.position.set(-0.14, 0.68, 0);
-    this.legL = new THREE.Mesh(legGeo, initLegMat);
+    this.legL = new THREE.Mesh(geos.leg, this.legMat);
     this.leftLegPivot.add(this.legL);
-    this.leftLegPivot.add(new THREE.Mesh(bootGeo, this.bootMat));
+    this.leftLegPivot.add(new THREE.Mesh(geos.boot, this.bootMat));
     this.bodyPivot.add(this.leftLegPivot);
 
     this.rightLegPivot.position.set(0.14, 0.68, 0);
-    this.legR = new THREE.Mesh(legGeo, initLegMat);
+    this.legR = new THREE.Mesh(geos.leg, this.legMat);
     this.rightLegPivot.add(this.legR);
-    this.rightLegPivot.add(new THREE.Mesh(bootGeo, this.bootMat));
+    this.rightLegPivot.add(new THREE.Mesh(geos.boot, this.bootMat));
     this.bodyPivot.add(this.rightLegPivot);
 
     // First-person held block viewmodel (bottom-right of camera)
     this.fpArmMat = new THREE.MeshLambertMaterial({ color: 0x232838, flatShading: true });
-    this.fpArmMesh = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.48), this.fpArmMat);
+    this.fpArmMesh = new THREE.Mesh(geos.fpArm, this.fpArmMat);
     this.fpArmMesh.position.set(0.42, -0.38, -0.52);
     this.fpArmMesh.rotation.set(0.18, -0.25, 0.1);
     this.fpHandGroup.add(this.fpArmMesh);
 
     this.fpBlockMat = new THREE.MeshLambertMaterial({ color: BLOCK_SPEC_BY_ID[3].particleHex });
-    this.fpBlockMesh = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.24, 0.24), this.fpBlockMat);
+    this.fpBlockMesh = new THREE.Mesh(geos.fpBlock, this.fpBlockMat);
     this.fpBlockMesh.position.set(0.36, -0.26, -0.68);
     this.fpBlockMesh.rotation.set(0.22, 0.55, 0.08);
     this.fpHandGroup.add(this.fpBlockMesh);
@@ -149,20 +198,90 @@ export class PlayerCharacterVisual {
       this.floatMesh.visible = false;
     }
     this.hasFloatingMarks = Boolean(model.outfit.hasFloatingMarks);
+    this.activeAccentColor = model.outfit.bikePrimary || '#38e2d4';
 
     const jacketHex = parseHex(model.outfit.jacket);
     const pantsHex = parseHex(model.outfit.pants);
     const bootsHex = customSkin ? parseHex(customSkin.boots) : darkenHex(pantsHex);
-    (this.armL.material as THREE.MeshLambertMaterial).color.setHex(jacketHex);
-    (this.legL.material as THREE.MeshLambertMaterial).color.setHex(pantsHex);
+    this.armMat.color.setHex(jacketHex);
+    this.legMat.color.setHex(pantsHex);
     this.bootMat.color.setHex(bootsHex);
     this.fpArmMat.color.setHex(jacketHex);
   }
 
+  setNameplate(
+    name: string,
+    isLocal: boolean,
+    avatarIdx: number,
+    peerId: string,
+    hp = 100,
+    accentHex?: string
+  ): void {
+    if (isLocal || !name) {
+      if (this.plateSprite) {
+        this.plateSprite.visible = false;
+      }
+      return;
+    }
+
+    if (!this.plateSprite || !this.plateCanvas || !this.plateTex) {
+      this.plateCanvas = document.createElement('canvas');
+      this.plateCanvas.width = 192;
+      this.plateCanvas.height = 48;
+      this.plateTex = new THREE.CanvasTexture(this.plateCanvas);
+      this.plateTex.magFilter = THREE.NearestFilter;
+      this.plateTex.minFilter = THREE.NearestFilter;
+      this.plateTex.generateMipmaps = false;
+      this.plateTex.colorSpace = THREE.SRGBColorSpace;
+
+      const plateMat = new THREE.SpriteMaterial({
+        map: this.plateTex,
+        transparent: true,
+        depthTest: true,
+        depthWrite: false,
+      });
+      this.plateSprite = new THREE.Sprite(plateMat);
+      this.plateSprite.position.set(0, 2.34, 0);
+      this.plateSprite.scale.set(2.6, 0.65, 1);
+      this.root.add(this.plateSprite);
+    }
+
+    this.plateSprite.visible = true;
+    const hpBucket = Math.round(hp / 4) * 4;
+    const avatarVer = getAvatarVersion(peerId);
+    const skinVer = getCustomSkinVersion();
+    const accent = accentHex || this.activeAccentColor;
+    const lang = getLang();
+
+    if (
+      name !== this.lastPlateName ||
+      peerId !== this.lastPlatePeerId ||
+      hpBucket !== this.lastPlateHp ||
+      avatarIdx !== this.lastPlateAvatar ||
+      avatarVer !== this.lastPlateAvatarVer ||
+      skinVer !== this.lastPlateSkinVer ||
+      accent !== this.lastPlateAccent ||
+      lang !== this.lastPlateLang
+    ) {
+      this.lastPlateName = name;
+      this.lastPlatePeerId = peerId;
+      this.lastPlateHp = hpBucket;
+      this.lastPlateAvatar = avatarIdx;
+      this.lastPlateAvatarVer = avatarVer;
+      this.lastPlateSkinVer = skinVer;
+      this.lastPlateAccent = accent;
+      this.lastPlateLang = lang;
+      drawNameplateCanvas(this.plateCanvas, name, hp, accent, false, avatarIdx, peerId, false);
+      this.plateTex.needsUpdate = true;
+    }
+  }
+
   setHeldBlock(block: BlockType): void {
-    if (block === this.lastBlock) return;
-    this.lastBlock = block;
-    const hex = BLOCK_SPEC_BY_ID[block].particleHex;
+    const spec = BLOCK_SPEC_BY_ID[block] ?? BLOCK_SPEC_BY_ID[3];
+    const resolved = spec.id;
+    if (resolved === this.lastBlock) return;
+    this.lastBlock = resolved;
+    const hex = spec.particleHex;
     this.heldBlockMat.color.setHex(hex);
     this.fpBlockMat.color.setHex(hex);
   }
@@ -183,7 +302,7 @@ export class PlayerCharacterVisual {
     this.rightLegPivot.rotation.x = -swing;
     this.leftArmPivot.rotation.x = -swing * 0.85;
 
-    const actionPunch = swingTimer > 0 ? Math.sin((swingTimer / 0.24) * Math.PI) : 0;
+    const actionPunch = swingTimer > 0 ? Math.sin((Math.min(0.24, swingTimer) / 0.24) * Math.PI) : 0;
     this.rightArmPivot.rotation.x = swing * 0.65 + 0.45 + actionPunch * 1.15;
     this.rightArmPivot.rotation.z = -actionPunch * 0.22;
 
@@ -212,5 +331,23 @@ export class PlayerCharacterVisual {
         -0.52 - actionPunch * 0.1
       );
     }
+  }
+
+  dispose(): void {
+    this.armMat.dispose();
+    this.legMat.dispose();
+    this.bootMat.dispose();
+    this.heldBlockMat.dispose();
+    this.fpArmMat.dispose();
+    this.fpBlockMat.dispose();
+    if (this.plateTex) {
+      this.plateTex.dispose();
+      this.plateTex = null;
+    }
+    if (this.plateSprite) {
+      (this.plateSprite.material as THREE.SpriteMaterial).dispose();
+      this.plateSprite = null;
+    }
+    this.plateCanvas = null;
   }
 }

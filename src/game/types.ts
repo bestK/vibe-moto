@@ -166,6 +166,13 @@ export interface RiderRenderState {
   worldX?: number;
   worldY?: number;
   worldS?: number;
+  footWx?: number;
+  footWy?: number;
+  footWs?: number;
+  footYaw?: number;
+  footWalkPhase?: number;
+  footBlock?: number;
+  footSwing?: number;
 }
 
 export interface VoxelNetEvent {
@@ -247,4 +254,10 @@ export interface NamedBuildingVisual {
   gx: number;
   gy: number;
   gz: number;
+}
+
+export interface NavTargetVisual {
+  name: string;
+  wx: number;
+  ws: number;
 }

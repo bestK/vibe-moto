@@ -33,10 +33,11 @@ import {
   FallenCargo,
   IntruderSiteVisual,
   NamedBuildingVisual,
+  NavTargetVisual,
   RiderRenderState,
   TrafficCar,
 } from './types';
-import { VoxelWorld, VoxelWorldVisual, wrapGridZ } from './VoxelWorld';
+import { BlockType, VoxelWorld, VoxelWorldVisual, wrapGridZ } from './VoxelWorld';
 import type { WeatherId, WeatherRenderSnapshot } from './WeatherSystem';
 
 // Progressive road LOD slices: 12m rear (-144m..-36m) for 360° open-world turning, 3m near (-24m..+108m), 6m far (+114m..+324m)
@@ -319,6 +320,19 @@ export class WorldRenderer {
   }[] = [];
   private lastBuildingSignCount = 0;
 
+  // 3D Cyan/Gold Navigation Waypoint Sky Pillar + Ground Ring + Billboard Sprite
+  private readonly navBeaconGroup = new THREE.Group();
+  private readonly navOuterPillar: THREE.Mesh;
+  private readonly navInnerPillar: THREE.Mesh;
+  private readonly navOuterRing: THREE.Mesh;
+  private readonly navInnerRing: THREE.Mesh;
+  private readonly navDiamond: THREE.Mesh;
+  private readonly navLabelSprite: THREE.Sprite;
+  private readonly navLabelCanvas: HTMLCanvasElement;
+  private readonly navLabelCtx: CanvasRenderingContext2D;
+  private readonly navLabelTex: THREE.CanvasTexture;
+  private lastNavLabelKey = '';
+
   // Instanced roadside scenery pools
   private readonly trunkInst: THREE.InstancedMesh;
   private readonly pineInst: THREE.InstancedMesh;
@@ -384,9 +398,15 @@ export class WorldRenderer {
   private lastTrapCount = 0;
   private lastBananaCount = 0;
 
-  // Rider visuals keyed by rider id (reusable Set for zero per-frame allocations)
+  // Rider visuals keyed by rider id (reusable Sets for zero per-frame allocations)
   private readonly bikeMap = new Map<string, BikeVisual>();
   private readonly activeRiderIds = new Set<string>();
+  private readonly remoteCharMap = new Map<string, PlayerCharacterVisual>();
+  private readonly remoteCharAnim = new Map<
+    string,
+    { lastWx: number; lastWs: number; smoothSpeed: number }
+  >();
+  private readonly activeRemoteFootIds = new Set<string>();
 
   // Camera, adaptive performance governor & presentation controls
   cameraMode: CameraMode = 0;
@@ -767,6 +787,110 @@ export class WorldRenderer {
       this.scene.add(sprite);
       this.buildingSigns.push({ sprite, canvas, ctx, tex, lastKey: '' });
     }
+
+    // 3D Navigation Waypoint Sky Pillar (120m tall cyan/gold beam + ground rings + billboard sprite)
+    const navOuterGeo = new THREE.CylinderGeometry(0.62, 1.08, 120, 8, 1, true);
+    navOuterGeo.translate(0, 60, 0);
+    this.navOuterPillar = new THREE.Mesh(
+      navOuterGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0x00f5d4,
+        transparent: true,
+        opacity: 0.34,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        fog: false,
+      })
+    );
+    this.navOuterPillar.frustumCulled = false;
+    this.navBeaconGroup.add(this.navOuterPillar);
+
+    const navInnerGeo = new THREE.CylinderGeometry(0.22, 0.36, 120, 6, 1, true);
+    navInnerGeo.translate(0, 60, 0);
+    this.navInnerPillar = new THREE.Mesh(
+      navInnerGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xffd166,
+        transparent: true,
+        opacity: 0.62,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        fog: false,
+      })
+    );
+    this.navInnerPillar.frustumCulled = false;
+    this.navBeaconGroup.add(this.navInnerPillar);
+
+    const navOuterRingGeo = new THREE.RingGeometry(2.15, 2.85, 24);
+    navOuterRingGeo.rotateX(-Math.PI / 2);
+    this.navOuterRing = new THREE.Mesh(
+      navOuterRingGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0x00f5d4,
+        transparent: true,
+        opacity: 0.82,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        fog: false,
+      })
+    );
+    this.navOuterRing.position.y = 0.24;
+    this.navOuterRing.frustumCulled = false;
+    this.navBeaconGroup.add(this.navOuterRing);
+
+    const navInnerRingGeo = new THREE.RingGeometry(1.05, 1.55, 24);
+    navInnerRingGeo.rotateX(-Math.PI / 2);
+    this.navInnerRing = new THREE.Mesh(
+      navInnerRingGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xffd166,
+        transparent: true,
+        opacity: 0.9,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        fog: false,
+      })
+    );
+    this.navInnerRing.position.y = 0.28;
+    this.navInnerRing.frustumCulled = false;
+    this.navBeaconGroup.add(this.navInnerRing);
+
+    this.navDiamond = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.72, 0),
+      new THREE.MeshBasicMaterial({ color: 0xffd166, fog: false })
+    );
+    this.navDiamond.position.y = 4.8;
+    this.navDiamond.frustumCulled = false;
+    this.navBeaconGroup.add(this.navDiamond);
+
+    this.navLabelCanvas = document.createElement('canvas');
+    this.navLabelCanvas.width = 320;
+    this.navLabelCanvas.height = 72;
+    this.navLabelCtx = this.navLabelCanvas.getContext('2d')!;
+    this.navLabelTex = new THREE.CanvasTexture(this.navLabelCanvas);
+    this.navLabelTex.magFilter = THREE.NearestFilter;
+    this.navLabelTex.minFilter = THREE.NearestFilter;
+    this.navLabelTex.generateMipmaps = false;
+    this.navLabelTex.colorSpace = THREE.SRGBColorSpace;
+    this.navLabelSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.navLabelTex,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        fog: false,
+      })
+    );
+    this.navLabelSprite.position.set(0, 7.6, 0);
+    this.navLabelSprite.scale.set(5.2, 1.17, 1);
+    this.navLabelSprite.frustumCulled = false;
+    this.navBeaconGroup.add(this.navLabelSprite);
+
+    this.navBeaconGroup.visible = false;
+    this.navBeaconGroup.frustumCulled = false;
+    this.scene.add(this.navBeaconGroup);
 
     // Instanced roadside props (single draw call per category!)
     const trunkGeo = new THREE.BoxGeometry(0.95, 5.2, 0.95);
@@ -1772,7 +1896,8 @@ export class WorldRenderer {
     resourceNodes?: readonly ResourceNode[],
     blueprint?: BlueprintManager | BlueprintRenderData | null,
     intruderSites?: readonly IntruderSiteVisual[],
-    namedBuildings?: readonly NamedBuildingVisual[]
+    namedBuildings?: readonly NamedBuildingVisual[],
+    navTarget?: NavTargetVisual | null
   ): void {
     // Adaptive performance governor (auto-tunes DPR, horizon & particle caps for smooth FPS on ordinary machines)
     this.updatePerfGovernor();
@@ -1847,6 +1972,7 @@ export class WorldRenderer {
     this.updateBlueprintVisuals(blueprint, onFoot, originS, originX, originY, timeSec);
     this.updateIntruderSiteVisuals(intruderSites, originS, originX, originY, timeSec);
     this.updateNamedBuildingVisuals(namedBuildings, originS, originX, originY, timeSec);
+    this.updateNavBeaconVisual(navTarget, originS, originX, originY, timeSec);
 
     // 3. Update traffic car meshes (sedans/police + Chinese overloaded cargo trucks)
     this.updateTrafficVisuals(traffic, originS, originX, originY, timeSec);
@@ -1862,8 +1988,8 @@ export class WorldRenderer {
       this.updateAnimalVisuals(animals, originS, originX, originY);
     }
 
-    // 5. Sync & update all motorcycle visuals (local + remote players + bots + delivery riders)
-    this.updateRiders(allRiders, originS, originX, originY, timeSec);
+    // 5. Sync & update all motorcycle visuals + remote on-foot walking characters
+    this.updateRiders(allRiders, originS, originX, originY, dt, timeSec);
 
     // 5b. Sync on-foot 3D character visual & parked bike beacon
     if (onFoot?.active) {
@@ -2798,6 +2924,87 @@ export class WorldRenderer {
     this.lastBuildingSignCount = count;
   }
 
+  private drawNavBeaconCanvas(name: string, distMeters: number): void {
+    const ctx = this.navLabelCtx;
+    const w = this.navLabelCanvas.width;
+    const h = this.navLabelCanvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    // High-contrast retro cyan/gold navigation banner
+    ctx.fillStyle = 'rgba(7, 14, 24, 0.92)';
+    ctx.fillRect(3, 3, w - 6, h - 6);
+    ctx.strokeStyle = '#00f5d4';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(3, 3, w - 6, h - 6);
+    ctx.fillStyle = '#ffd166';
+    ctx.fillRect(3, 3, w - 6, 5);
+    ctx.fillRect(3, h - 8, w - 6, 5);
+
+    const safeName = (name || 'TARGET').slice(0, 14);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 21px "Microsoft YaHei", "PingFang SC", monospace';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`🧭 ${safeName}`, w * 0.5, 29);
+
+    ctx.font = 'bold 15px "Courier New", monospace';
+    ctx.fillStyle = '#ffd166';
+    ctx.fillText(`${distMeters}m`, w * 0.5, 53);
+  }
+
+  private updateNavBeaconVisual(
+    navTarget: NavTargetVisual | null | undefined,
+    originS: number,
+    originX: number,
+    originY: number,
+    timeSec: number
+  ): void {
+    if (!navTarget || !Number.isFinite(navTarget.wx) || !Number.isFinite(navTarget.ws)) {
+      if (this.navBeaconGroup.visible) {
+        this.navBeaconGroup.visible = false;
+      }
+      return;
+    }
+
+    const groundY = openWorldGroundY(navTarget.wx, navTarget.ws);
+    worldAbsToLocal(navTarget.wx, groundY, navTarget.ws, originS, originX, originY, this._v1);
+    this.navBeaconGroup.position.copy(this._v1);
+    this.navBeaconGroup.visible = true;
+
+    const dist = Math.hypot(this._v1.x, this._v1.z);
+    const distRounded = Math.max(0, Math.round(dist));
+    const key = `${navTarget.name}|${distRounded}`;
+    if (this.lastNavLabelKey !== key) {
+      this.lastNavLabelKey = key;
+      this.drawNavBeaconCanvas(navTarget.name, distRounded);
+      this.navLabelTex.needsUpdate = true;
+    }
+
+    // Pulsing cyan/gold sky pillar + rotating ground target rings + floating diamond & billboard
+    const outerPulse = 0.88 + 0.24 * Math.sin(timeSec * 4.2);
+    const innerPulse = 0.82 + 0.26 * Math.sin(timeSec * 6.5 + 1.1);
+    this.navOuterPillar.scale.set(outerPulse, 1, outerPulse);
+    this.navOuterPillar.rotation.y = timeSec * 0.65;
+    this.navInnerPillar.scale.set(innerPulse, 1, innerPulse);
+    this.navInnerPillar.rotation.y = -timeSec * 1.45;
+
+    const ringPulse = 1.0 + 0.14 * Math.sin(timeSec * 5.0);
+    this.navOuterRing.scale.set(ringPulse, 1, ringPulse);
+    this.navOuterRing.rotation.y = timeSec * 1.1;
+    const innerRingPulse = 1.0 - 0.12 * Math.sin(timeSec * 5.0);
+    this.navInnerRing.scale.set(innerRingPulse, 1, innerRingPulse);
+    this.navInnerRing.rotation.y = -timeSec * 1.9;
+
+    this.navDiamond.position.y = 4.8 + Math.sin(timeSec * 3.8) * 0.45;
+    this.navDiamond.rotation.set(timeSec * 1.4, timeSec * 2.4, 0);
+
+    // Gently lift & scale billboard with distance so the destination name stays legible across hills
+    const scaleMul = Math.max(1.0, Math.min(4.6, dist / 26));
+    const labelLift = Math.min(26, dist * 0.12);
+    this.navLabelSprite.position.y = 7.4 + labelLift + Math.sin(timeSec * 2.8) * 0.35;
+    this.navLabelSprite.scale.set(5.2 * scaleMul, 1.17 * scaleMul, 1);
+  }
+
   private updateTrafficVisuals(
     traffic: TrafficCar[],
     originS: number,
@@ -3274,10 +3481,13 @@ export class WorldRenderer {
     originS: number,
     originX: number,
     originY: number,
+    dt: number,
     timeSec: number
   ): void {
     const activeIds = this.activeRiderIds;
     activeIds.clear();
+    const activeFootIds = this.activeRemoteFootIds;
+    activeFootIds.clear();
     const f = this._f;
     const pos = this._v1;
 
@@ -3293,25 +3503,87 @@ export class WorldRenderer {
         this.bikeMap.set(r.id, vis);
       }
 
-      const ds = signedTrackDelta(r.s, originS);
-      if (ds < -140 || ds > 320) {
+      const bikeS = r.freeRoam && r.worldS !== undefined ? r.worldS : r.s;
+      const bikeDs = signedTrackDelta(bikeS, originS);
+      const bikeDx = r.freeRoam && r.worldX !== undefined ? Math.abs(r.worldX - originX) : 0;
+      if (bikeDs < -140 || bikeDs > 320 || bikeDx > 320) {
         vis.root.visible = false;
-        continue;
-      }
-      vis.root.visible = true;
-      vis.setDistanceLod(Math.abs(ds));
-      if (r.freeRoam && r.worldX !== undefined && r.worldY !== undefined && r.worldS !== undefined) {
-        worldAbsToLocal(r.worldX, r.worldY, r.worldS, originS, originX, originY, pos);
-        vis.root.position.copy(pos);
-        this._euler.set(0, r.heading ?? 0, 0);
-        vis.root.quaternion.setFromEuler(this._euler);
       } else {
-        sampleRoadFrame(r.s, f);
-        roadFrameToLocalWorld(f, r.s, r.x, 0, originS, originX, originY, pos);
-        vis.root.position.copy(pos);
-        this.setRoadBasisQuaternion(f, vis.root.quaternion);
+        vis.root.visible = true;
+        vis.setDistanceLod(Math.hypot(bikeDs, bikeDx));
+        if (r.freeRoam && r.worldX !== undefined && r.worldY !== undefined && r.worldS !== undefined) {
+          worldAbsToLocal(r.worldX, r.worldY, r.worldS, originS, originX, originY, pos);
+          vis.root.position.copy(pos);
+          this._euler.set(0, r.heading ?? 0, 0);
+          vis.root.quaternion.setFromEuler(this._euler);
+        } else {
+          sampleRoadFrame(r.s, f);
+          roadFrameToLocalWorld(f, r.s, r.x, 0, originS, originX, originY, pos);
+          vis.root.position.copy(pos);
+          this.setRoadBasisQuaternion(f, vis.root.quaternion);
+        }
+        vis.updateVisuals(r, timeSec);
       }
-      vis.updateVisuals(r, timeSec);
+
+      // Remote on-foot walking character visual + floating nameplate
+      if (
+        !r.isLocal &&
+        !r.isBot &&
+        r.onFoot === true &&
+        r.footWx !== undefined &&
+        r.footWy !== undefined &&
+        r.footWs !== undefined &&
+        Number.isFinite(r.footWx) &&
+        Number.isFinite(r.footWy) &&
+        Number.isFinite(r.footWs)
+      ) {
+        activeFootIds.add(r.id);
+        let charVis = this.remoteCharMap.get(r.id);
+        if (!charVis) {
+          charVis = new PlayerCharacterVisual();
+          this.scene.add(charVis.root);
+          this.remoteCharMap.set(r.id, charVis);
+        }
+
+        let anim = this.remoteCharAnim.get(r.id);
+        if (!anim) {
+          anim = { lastWx: r.footWx, lastWs: r.footWs, smoothSpeed: 0 };
+          this.remoteCharAnim.set(r.id, anim);
+        } else if (dt > 0.0001) {
+          const stepDist = Math.hypot(
+            r.footWx - anim.lastWx,
+            signedTrackDelta(r.footWs, anim.lastWs)
+          );
+          const instSpeed = Math.min(12, stepDist / dt);
+          anim.smoothSpeed += (instSpeed - anim.smoothSpeed) * Math.min(1, dt * 12);
+          if (anim.smoothSpeed < 0.08 && instSpeed < 0.08) anim.smoothSpeed = 0;
+          anim.lastWx = r.footWx;
+          anim.lastWs = r.footWs;
+        }
+
+        const footDs = signedTrackDelta(r.footWs, originS);
+        const footDx = Math.abs(r.footWx - originX);
+        if (Math.abs(footDs) > 260 || footDx > 260) {
+          charVis.root.visible = false;
+        } else {
+          charVis.root.visible = true;
+          charVis.setAvatar(r.avatarIdx, getPeerCustomSkin(r.id));
+          const rawBlock = r.footBlock !== undefined ? Math.trunc(r.footBlock) : 3;
+          const blockId = (rawBlock >= 1 && rawBlock <= 10 ? rawBlock : 3) as BlockType;
+          charVis.setHeldBlock(blockId);
+          charVis.updateAnimation(
+            r.footWalkPhase ?? 0,
+            anim.smoothSpeed,
+            r.footSwing ?? 0,
+            timeSec,
+            false
+          );
+          worldAbsToLocal(r.footWx, r.footWy, r.footWs, originS, originX, originY, pos);
+          charVis.root.position.copy(pos);
+          charVis.root.rotation.set(0, r.footYaw ?? 0, 0);
+          charVis.setNameplate(r.name, false, r.avatarIdx, r.id, r.hp);
+        }
+      }
     }
 
     // Cleanup disconnected riders
@@ -3320,6 +3592,16 @@ export class WorldRenderer {
         this.scene.remove(vis.root);
         vis.dispose();
         this.bikeMap.delete(id);
+      }
+    }
+
+    // Cleanup remote walking characters that remounted or disconnected
+    for (const [id, charVis] of this.remoteCharMap) {
+      if (!activeFootIds.has(id)) {
+        this.scene.remove(charVis.root);
+        charVis.dispose();
+        this.remoteCharMap.delete(id);
+        this.remoteCharAnim.delete(id);
       }
     }
   }

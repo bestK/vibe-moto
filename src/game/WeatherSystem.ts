@@ -168,9 +168,9 @@ const WEATHER_SPECS: Readonly<Record<WeatherId, WeatherVisualSpec>> = {
   },
 };
 
-const AUTO_CYCLE_SEC = 58.0;
-const MANUAL_HOLD_SEC = 95.0;
-const AUTO_TRANSITION_SEC = 2.6;
+const AUTO_CYCLE_SEC = 240.0;
+const MANUAL_HOLD_SEC = 360.0;
+const AUTO_TRANSITION_SEC = 8.0;
 const MANUAL_TRANSITION_SEC = 0.85;
 
 export interface WeatherCallbacks {
@@ -290,7 +290,10 @@ export class WeatherSystem {
     }
 
     const spec = WEATHER_SPECS[this.current];
-    const blendRate = Math.min(1, step * (this.transitionDuration < 1.2 ? 4.4 : 2.1));
+    const blendRate = Math.min(
+      1,
+      step * (this.transitionDuration < 1.2 ? 4.4 : 3.2 / this.transitionDuration)
+    );
     const r = this.render;
 
     r.current = this.current;
@@ -315,9 +318,10 @@ export class WeatherSystem {
     const targetSnow = spec.precipKind === 'snow' ? spec.precipDensity : 0;
     const targetFog = spec.precipKind === 'fog' ? spec.precipDensity : 0;
 
-    r.rainIntensity += (targetRain - r.rainIntensity) * Math.min(1, step * 2.4);
-    r.snowIntensity += (targetSnow - r.snowIntensity) * Math.min(1, step * 2.4);
-    r.fogWispIntensity += (targetFog - r.fogWispIntensity) * Math.min(1, step * 2.0);
+    const precipRate = this.transitionDuration < 1.2 ? 2.4 : 0.65;
+    r.rainIntensity += (targetRain - r.rainIntensity) * Math.min(1, step * precipRate);
+    r.snowIntensity += (targetSnow - r.snowIntensity) * Math.min(1, step * precipRate);
+    r.fogWispIntensity += (targetFog - r.fogWispIntensity) * Math.min(1, step * (precipRate * 0.85));
     if (r.rainIntensity < 0.01) r.rainIntensity = 0;
     if (r.snowIntensity < 0.01) r.snowIntensity = 0;
     if (r.fogWispIntensity < 0.01) r.fogWispIntensity = 0;

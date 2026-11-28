@@ -53,6 +53,19 @@ export interface SniperCandidate {
   avatarIdx: number;
 }
 
+export interface NavHudTarget {
+  name: string;
+  distanceM: number;
+  /**
+   * Relative bearing to target in radians:
+   * 0 = straight ahead (arrow points UP),
+   * positive = clockwise / right,
+   * negative = counter-clockwise / left,
+   * ±PI = directly behind (arrow points DOWN).
+   */
+  relativeAngleRad: number;
+}
+
 export type TouchInputPatch = Partial<{
   left: boolean;
   right: boolean;
@@ -111,6 +124,7 @@ export interface HudCallbacks {
   onOpenAvatarStudio?(): void;
   onInteract?(): void;
   onStashItem?(): void;
+  onCancelNavigation?(): void;
 }
 
 const STANDINGS_SLOTS = 5;
@@ -421,13 +435,22 @@ export class Hud {
   private readonly feedEntries: FeedEntry[] = [];
   private nextFeedId = 1;
 
-  // Top-center toast, alert warnings & sniper UI
+  // Top-center toast, navigation compass, alert warnings & sniper UI
   private readonly toastEl: HTMLDivElement;
   private readonly toastIconEl: HTMLSpanElement;
   private readonly toastTextEl: HTMLSpanElement;
   private toastRafId: number | null = null;
   private toastHideTimer: number | null = null;
   private toastClearTimer: number | null = null;
+  private readonly navPillEl: HTMLDivElement;
+  private readonly navArrowEl: HTMLSpanElement;
+  private readonly navTextEl: HTMLSpanElement;
+  private readonly navDistEl: HTMLSpanElement;
+  private readonly navCloseBtnEl: HTMLButtonElement;
+  private navVisible = false;
+  private lastNavTargetName: string | null = null;
+  private lastNavDistText = '';
+  private lastNavAngleHalfDeg = Number.NaN;
   private readonly dangerLockEl: HTMLDivElement;
   private readonly dangerLockTextEl: HTMLSpanElement;
   private readonly enragedWarnEl: HTMLDivElement;
@@ -1102,6 +1125,43 @@ export class Hud {
     this.toastTextEl.className = 'vm-toast-text';
 
     this.toastEl.append(this.toastIconEl, this.toastTextEl);
+
+    // Live Navigation Compass Pill
+    this.navPillEl = document.createElement('div');
+    this.navPillEl.className = 'vm-slab vm-nav-pill is-hidden';
+    this.navPillEl.setAttribute('role', 'status');
+    this.navPillEl.setAttribute('aria-live', 'off');
+    this.navPillEl.setAttribute('aria-hidden', 'true');
+    this.navPillEl.addEventListener('pointerdown', (e: PointerEvent) => e.stopPropagation());
+
+    this.navArrowEl = document.createElement('span');
+    this.navArrowEl.className = 'vm-nav-arrow';
+    this.navArrowEl.setAttribute('aria-hidden', 'true');
+    this.navArrowEl.innerHTML =
+      '<svg viewBox="0 0 16 16" class="vm-nav-arrow-svg" aria-hidden="true">' +
+      '<polygon points="8,1 14,14 8,10.5 2,14" fill="currentColor" stroke="#05070d" stroke-width="1.2" stroke-linejoin="miter"/>' +
+      '</svg>';
+
+    this.navTextEl = document.createElement('span');
+    this.navTextEl.className = 'vm-nav-text';
+
+    this.navDistEl = document.createElement('span');
+    this.navDistEl.className = 'vm-nav-dist';
+
+    this.navCloseBtnEl = document.createElement('button');
+    this.navCloseBtnEl.type = 'button';
+    this.navCloseBtnEl.className = 'vm-nav-close';
+    this.navCloseBtnEl.textContent = '✕';
+    this.navCloseBtnEl.title = t('cancel');
+    this.navCloseBtnEl.setAttribute('aria-label', t('cancel'));
+    this.navCloseBtnEl.addEventListener('pointerdown', (e: PointerEvent) => e.stopPropagation());
+    this.navCloseBtnEl.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      this.callbacks.onCancelNavigation?.();
+      this.navCloseBtnEl.blur();
+    });
+
+    this.navPillEl.append(this.navArrowEl, this.navTextEl, this.navDistEl, this.navCloseBtnEl);
 
     const alertStack = document.createElement('div');
     alertStack.className = 'vm-alert-stack';
@@ -2265,6 +2325,7 @@ export class Hud {
       this.tapFlashRightEl,
       topLeftCol,
       this.toastEl,
+      this.navPillEl,
       alertStack,
       this.sniperPickerEl,
       this.scopeLayerEl,
@@ -2896,6 +2957,53 @@ export class Hud {
     this.root.classList.toggle('is-offtrack-quiet', next);
   }
 
+  /**
+   * Updates the live top-center navigation compass pill.
+   * Angle convention: `relativeAngleRad = 0` points UP (straight ahead);
+   * positive values rotate clockwise (right); negative values rotate counter-clockwise (left).
+   */
+  setNavigationHud(target: NavHudTarget | null): void {
+    if (!target) {
+      if (this.navVisible) {
+        this.navVisible = false;
+        this.lastNavTargetName = null;
+        this.lastNavDistText = '';
+        this.lastNavAngleHalfDeg = Number.NaN;
+        this.navPillEl.classList.add('is-hidden');
+        this.navPillEl.setAttribute('aria-hidden', 'true');
+      }
+      return;
+    }
+
+    if (!this.navVisible) {
+      this.navVisible = true;
+      this.navPillEl.classList.remove('is-hidden');
+      this.navPillEl.setAttribute('aria-hidden', 'false');
+    }
+
+    const cleanName = target.name.trim() || t('navLabel');
+    if (cleanName !== this.lastNavTargetName) {
+      this.lastNavTargetName = cleanName;
+      this.navTextEl.textContent = `${t('navLabel')} · ${cleanName}`;
+    }
+
+    const safeDist = Number.isFinite(target.distanceM) ? Math.max(0, target.distanceM) : 0;
+    const distText =
+      safeDist >= 1000 ? `${(safeDist / 1000).toFixed(1)}km` : `${Math.round(safeDist)}m`;
+    if (distText !== this.lastNavDistText) {
+      this.lastNavDistText = distText;
+      this.navDistEl.textContent = distText;
+    }
+
+    const safeAngle = Number.isFinite(target.relativeAngleRad) ? target.relativeAngleRad : 0;
+    const deg = (safeAngle * 180) / Math.PI;
+    const halfDeg = Math.round(deg * 2);
+    if (halfDeg !== this.lastNavAngleHalfDeg) {
+      this.lastNavAngleHalfDeg = halfDeg;
+      this.navArrowEl.style.transform = `rotate(${(halfDeg * 0.5).toFixed(1)}deg)`;
+    }
+  }
+
   private getOnFootCamShortLabel(mode: 0 | 1 | 2): string {
     if (mode === 0) return '1P';
     if (mode === 1) return '3P';
@@ -3195,6 +3303,11 @@ export class Hud {
     this.footJumpLabelEl.textContent = t('jumpBtn');
     this.footCamLabelEl.textContent = t('footCamBtn');
     this.footInteractLabelEl.textContent = t('interactBtn');
+    this.navCloseBtnEl.title = t('cancel');
+    this.navCloseBtnEl.setAttribute('aria-label', t('cancel'));
+    if (this.navVisible && this.lastNavTargetName) {
+      this.navTextEl.textContent = `${t('navLabel')} · ${this.lastNavTargetName}`;
+    }
     this.syncCameraIndicator();
     const spec = BLOCK_SPEC_BY_ID[this.lastSelectedBlock];
     if (spec) {

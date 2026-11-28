@@ -236,6 +236,10 @@ const ZH_DICT = {
   avatarSwitchedToast: '已切换自定义形象并同步全服!',
   avatarResetToast: '已恢复默认内置角色形象',
   offTrackQuietToast: '已进入开放世界自由探索，赛道信息已隐藏',
+  navStartedToast: '导航已开启：{label}',
+  navArrivedToast: '已抵达目的地：{label}',
+  navCancelledToast: '已取消导航',
+  navLabel: '导航',
 } as const;
 
 export type I18nKey = keyof typeof ZH_DICT;
@@ -471,6 +475,10 @@ const EN_DICT: Record<I18nKey, string> = {
   avatarSwitchedToast: 'Custom avatar synced to world!',
   avatarResetToast: 'Reverted to default avatar',
   offTrackQuietToast: 'Open-world mode: track HUD hidden',
+  navStartedToast: 'Navigating to {label}',
+  navArrivedToast: 'Arrived at {label}',
+  navCancelledToast: 'Navigation cancelled',
+  navLabel: 'NAV',
 };
 
 const ITEM_NAMES: Readonly<Record<Lang, Readonly<Record<ItemType, string>>>> = {

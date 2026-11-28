@@ -3,6 +3,7 @@ import {
   signedTrackDelta,
 } from './RoadMath';
 import { BlockType, VoxelRaycastHit, VoxelWorld } from './VoxelWorld';
+import { StaticObstacle, collectNearbyStaticObstacles } from './WorldObstacles';
 
 export interface OnFootInput {
   forward: number; // -1..1
@@ -83,6 +84,54 @@ export class OnFootController {
 
   private prevJump = false;
   private stepAccum = 0;
+  private readonly _nearbyObs: StaticObstacle[] = [];
+
+  private overlapsStaticObstacles(
+    wx: number,
+    wy: number,
+    ws: number,
+    halfW: number,
+    height: number
+  ): boolean {
+    const obs = this._nearbyObs;
+    for (let i = 0; i < obs.length; i++) {
+      const o = obs[i];
+      if (wy + 0.08 >= o.wy + o.height || wy + height <= o.wy) continue;
+      const effHalfX = o.kind === 'pole' ? o.halfX * 0.72 : o.halfX;
+      const effHalfZ = o.kind === 'pole' ? o.halfZ * 0.72 : o.halfZ;
+      if (
+        Math.abs(wx - o.wx) < effHalfX + halfW &&
+        Math.abs(signedTrackDelta(ws, o.ws)) < effHalfZ + halfW
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private pushOutOfStaticObstacles(): void {
+    const st = this.state;
+    const obs = this._nearbyObs;
+    for (let i = 0; i < obs.length; i++) {
+      const o = obs[i];
+      if (st.wy + 0.08 >= o.wy + o.height || st.wy + PLAYER_HEIGHT <= o.wy) continue;
+      const effHalfX = o.kind === 'pole' ? o.halfX * 0.72 : o.halfX;
+      const effHalfZ = o.kind === 'pole' ? o.halfZ * 0.72 : o.halfZ;
+      const dx = st.wx - o.wx;
+      const ds = signedTrackDelta(st.ws, o.ws);
+      const penX = effHalfX + PLAYER_HALF_W - Math.abs(dx);
+      const penS = effHalfZ + PLAYER_HALF_W - Math.abs(ds);
+      if (penX > 0 && penS > 0) {
+        if (penX < penS) {
+          st.wx += (dx >= 0 ? 1 : -1) * (penX + 0.01);
+          st.vx = 0;
+        } else {
+          st.ws += (ds >= 0 ? 1 : -1) * (penS + 0.01);
+          st.vs = 0;
+        }
+      }
+    }
+  }
 
   dismountFromBike(
     bikeWx: number,
@@ -98,6 +147,8 @@ export class OnFootController {
     st.parkedBike.ws = bikeWs;
     st.parkedBike.yaw = bikeYaw;
 
+    collectNearbyStaticObstacles(bikeWx, bikeWs, 12, this._nearbyObs);
+
     // Step off to the left side of the bike if clear, else right side
     const leftX = -Math.cos(bikeYaw);
     const leftS = -Math.sin(bikeYaw);
@@ -108,7 +159,10 @@ export class OnFootController {
       voxels.getSupportHeight(spawnWx, spawnWs, PLAYER_HALF_W, PLAYER_HALF_W, bikeWy + 1.1)
     );
 
-    if (voxels.overlapsBox(spawnWx, spawnWy, spawnWs, PLAYER_HALF_W, PLAYER_HEIGHT, PLAYER_HALF_W)) {
+    if (
+      voxels.overlapsBox(spawnWx, spawnWy, spawnWs, PLAYER_HALF_W, PLAYER_HEIGHT, PLAYER_HALF_W) ||
+      this.overlapsStaticObstacles(spawnWx, spawnWy, spawnWs, PLAYER_HALF_W, PLAYER_HEIGHT)
+    ) {
       spawnWx = bikeWx - leftX * 1.45;
       spawnWs = bikeWs - leftS * 1.45;
       spawnWy = Math.max(
@@ -330,23 +384,34 @@ export class OnFootController {
     st.vy -= GRAVITY * step;
     if (st.vy < -32) st.vy = -32;
 
-    // 5. Axis-separated AABB collision resolution (X -> S -> Y)
+    // 5. Axis-separated AABB collision resolution (X -> S -> Y) against voxels + static world obstacles
+    collectNearbyStaticObstacles(st.wx, st.ws, 16, this._nearbyObs);
+
     const nextWx = st.wx + st.vx * step;
-    if (!voxels.overlapsBox(nextWx, st.wy + 0.08, st.ws, PLAYER_HALF_W, PLAYER_HEIGHT - 0.08, PLAYER_HALF_W)) {
+    if (
+      !voxels.overlapsBox(nextWx, st.wy + 0.08, st.ws, PLAYER_HALF_W, PLAYER_HEIGHT - 0.08, PLAYER_HALF_W) &&
+      !this.overlapsStaticObstacles(nextWx, st.wy, st.ws, PLAYER_HALF_W, PLAYER_HEIGHT)
+    ) {
       st.wx = nextWx;
     } else {
       st.vx = 0;
     }
 
     const nextWs = st.ws + st.vs * step;
-    if (!voxels.overlapsBox(st.wx, st.wy + 0.08, nextWs, PLAYER_HALF_W, PLAYER_HEIGHT - 0.08, PLAYER_HALF_W)) {
+    if (
+      !voxels.overlapsBox(st.wx, st.wy + 0.08, nextWs, PLAYER_HALF_W, PLAYER_HEIGHT - 0.08, PLAYER_HALF_W) &&
+      !this.overlapsStaticObstacles(st.wx, st.wy, nextWs, PLAYER_HALF_W, PLAYER_HEIGHT)
+    ) {
       st.ws = nextWs;
     } else {
       st.vs = 0;
     }
 
+    // Safety push-out if already overlapping a static obstacle (e.g. after dismount/teleport)
+    this.pushOutOfStaticObstacles();
+
     // Infinite open world: zero lateral walls!
-    // Vertical resolution (blocks + natural open-world ground)
+    // Vertical resolution (blocks + static obstacle tops + natural open-world ground)
     const prevWy = st.wy;
     let nextWy = st.wy + st.vy * step;
     const groundY = openWorldGroundY(st.wx, st.ws);
@@ -360,8 +425,23 @@ export class OnFootController {
       }
       st.grounded = false;
     } else {
+      let staticSupport = groundY;
+      for (let i = 0; i < this._nearbyObs.length; i++) {
+        const o = this._nearbyObs[i];
+        const effHalfX = o.kind === 'pole' ? o.halfX * 0.72 : o.halfX;
+        const effHalfZ = o.kind === 'pole' ? o.halfZ * 0.72 : o.halfZ;
+        if (
+          Math.abs(st.wx - o.wx) < effHalfX + PLAYER_HALF_W - 0.02 &&
+          Math.abs(signedTrackDelta(st.ws, o.ws)) < effHalfZ + PLAYER_HALF_W - 0.02
+        ) {
+          const top = o.wy + o.height;
+          if (top > staticSupport && top <= prevWy + 0.22) {
+            staticSupport = top;
+          }
+        }
+      }
       const supportY = Math.max(
-        groundY,
+        staticSupport,
         voxels.getSupportHeight(st.wx, st.ws, PLAYER_HALF_W, PLAYER_HALF_W, prevWy + 0.22)
       );
       if (nextWy <= supportY + 0.002) {

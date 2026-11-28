@@ -38,6 +38,12 @@ export interface WorldMapBuildingCenter {
   label?: string;
 }
 
+export interface WorldMapNavTarget {
+  name: string;
+  wx: number;
+  ws: number;
+}
+
 export interface WorldMapSnapshot {
   playerWx: number;
   playerWy?: number;
@@ -50,6 +56,7 @@ export interface WorldMapSnapshot {
   myBuildingCenters: readonly WorldMapBuildingCenter[];
   namedBuildings?: readonly NamedBuilding[];
   teleportCards: number;
+  navTarget?: WorldMapNavTarget | null;
 }
 
 export interface WorldMapModalCallbacks {
@@ -62,6 +69,8 @@ export interface WorldMapModalCallbacks {
     useCard: boolean,
     intruderId?: string
   ): void | Promise<void>;
+  onNavigateTo?(wx: number, ws: number, label: string): void;
+  onCancelNavigation?(): void;
   onAddMarker(
     name: string,
     wx: number,
@@ -74,6 +83,53 @@ export interface WorldMapModalCallbacks {
   onDeleteNamedBuilding?(id: string): void | Promise<void>;
   onDismissIntruder(id: string): void | Promise<void>;
   onOpenShop?(): void;
+}
+
+interface MapLabelRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+interface PendingMapLabel {
+  text: string;
+  x: number;
+  y: number;
+  textColor: string;
+  borderColor?: string;
+  priority: number;
+  force?: boolean;
+}
+
+const MAP_LABEL_FONT = 'bold 12px "Microsoft YaHei", "PingFang SC", system-ui, sans-serif';
+const MAP_BIOME_FONT = 'bold 11px "Microsoft YaHei", "PingFang SC", system-ui, sans-serif';
+
+function drawRoundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+): void {
+  const radius = Math.min(r, w * 0.5, h * 0.5);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+function rectsOverlap(a: MapLabelRect, b: MapLabelRect, gap = 2): boolean {
+  return !(
+    a.x + a.w + gap <= b.x ||
+    b.x + b.w + gap <= a.x ||
+    a.y + a.h + gap <= b.y ||
+    b.y + b.h + gap <= a.y
+  );
 }
 
 const MARKER_PRESET_COLORS = [
@@ -123,13 +179,17 @@ function defaultSnapshot(): WorldMapSnapshot {
 export class WorldMapModal {
   private readonly cb: WorldMapModalCallbacks;
   private readonly overlayEl: HTMLDivElement;
+  private readonly cancelNavBtn: HTMLButtonElement;
   private readonly tpPillEl: HTMLSpanElement;
   private readonly coordBadgeEl: HTMLSpanElement;
+  private readonly coordXInput: HTMLInputElement;
+  private readonly coordZInput: HTMLInputElement;
   private readonly canvasEl: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly tabBtns: Record<WorldMapTab, HTMLButtonElement>;
   private readonly panelBodyEl: HTMLDivElement;
   private readonly quickSelMarkBtn: HTMLButtonElement;
+  private readonly quickSelNavBtn: HTMLButtonElement;
   private readonly quickSelTpBtn: HTMLButtonElement;
 
   private modalOpen = false;
@@ -138,7 +198,9 @@ export class WorldMapModal {
   private rafId: number | null = null;
   private panelSig = '';
 
-  // Map camera state
+  // Map viewport & camera state (CSS pixel coordinates)
+  private viewCssW = 440;
+  private viewCssH = 400;
   private viewCenterWx = 0;
   private viewCenterWs = 0;
   private metersPerPx = DEFAULT_METERS_PER_PX;
@@ -212,6 +274,19 @@ export class WorldMapModal {
     const statusWrap = document.createElement('div');
     statusWrap.className = 'vm-home-status';
 
+    this.cancelNavBtn = document.createElement('button');
+    this.cancelNavBtn.type = 'button';
+    this.cancelNavBtn.className = 'vm-home-room-pill';
+    this.cancelNavBtn.style.cursor = 'pointer';
+    this.cancelNavBtn.style.borderColor = 'var(--vm-gold)';
+    this.cancelNavBtn.style.color = 'var(--vm-gold)';
+    this.cancelNavBtn.style.background = 'rgba(255, 190, 59, 0.14)';
+    this.cancelNavBtn.style.display = 'none';
+    this.cancelNavBtn.textContent = '🧭 取消导航';
+    this.cancelNavBtn.addEventListener('click', () => {
+      this.cb.onCancelNavigation?.();
+    });
+
     this.tpPillEl = document.createElement('span');
     this.tpPillEl.className = 'vm-home-room-pill';
     this.tpPillEl.style.borderColor = 'var(--vm-sky)';
@@ -225,7 +300,7 @@ export class WorldMapModal {
     closeBtn.textContent = '✕';
     closeBtn.addEventListener('click', () => this.close());
 
-    statusWrap.append(this.tpPillEl, closeBtn);
+    statusWrap.append(this.cancelNavBtn, this.tpPillEl, closeBtn);
     head.append(titleWrap, statusWrap);
 
     // Main split layout: Canvas left + Tabbed panel right (responsive CSS in style.css)
@@ -241,7 +316,8 @@ export class WorldMapModal {
 
     this.canvasEl = document.createElement('canvas');
     this.canvasEl.className = 'vm-map-canvas';
-    this.canvasEl.width = 400;
+    this.canvasEl.style.imageRendering = 'auto';
+    this.canvasEl.width = 440;
     this.canvasEl.height = 400;
     this.ctx = this.canvasEl.getContext('2d')!;
 
@@ -299,10 +375,84 @@ export class WorldMapModal {
 
     canvasWrap.append(this.canvasEl, zoomBar, this.coordBadgeEl);
 
+    // Coordinate input bar right below map canvas
+    const coordBar = document.createElement('div');
+    coordBar.className = 'vm-map-coord-bar';
+
+    this.coordXInput = document.createElement('input');
+    this.coordXInput.type = 'number';
+    this.coordXInput.step = '1';
+    this.coordXInput.inputMode = 'numeric';
+    this.coordXInput.className = 'vm-home-input vm-map-coord-input';
+    this.coordXInput.placeholder = 'X 坐标';
+    this.coordXInput.setAttribute('aria-label', 'X 坐标');
+
+    this.coordZInput = document.createElement('input');
+    this.coordZInput.type = 'number';
+    this.coordZInput.step = '1';
+    this.coordZInput.inputMode = 'numeric';
+    this.coordZInput.className = 'vm-home-input vm-map-coord-input';
+    this.coordZInput.placeholder = 'Z 坐标';
+    this.coordZInput.setAttribute('aria-label', 'Z 坐标');
+
+    const handleCoordEnter = (e: KeyboardEvent): void => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const pt = this.parseCoordInputs();
+        if (pt) this.focusPoint(pt.wx, pt.ws, true);
+      }
+    };
+    this.coordXInput.addEventListener('keydown', handleCoordEnter);
+    this.coordZInput.addEventListener('keydown', handleCoordEnter);
+
+    const coordLocBtn = document.createElement('button');
+    coordLocBtn.type = 'button';
+    coordLocBtn.className = 'vm-home-recent-chip vm-map-coord-btn';
+    coordLocBtn.textContent = '定位';
+    coordLocBtn.addEventListener('click', () => {
+      const pt = this.parseCoordInputs();
+      if (!pt) return;
+      this.focusPoint(pt.wx, pt.ws, true);
+    });
+
+    const coordNavBtn = document.createElement('button');
+    coordNavBtn.type = 'button';
+    coordNavBtn.className = 'vm-home-btn vm-home-btn-public vm-map-coord-btn';
+    coordNavBtn.textContent = '导航';
+    coordNavBtn.addEventListener('click', () => {
+      const pt = this.parseCoordInputs();
+      if (!pt) return;
+      const label = `坐标 (${Math.round(pt.wx)}, ${Math.round(pt.ws)})`;
+      this.cb.onNavigateTo?.(pt.wx, pt.ws, label);
+      this.close();
+    });
+
+    const coordTpBtn = document.createElement('button');
+    coordTpBtn.type = 'button';
+    coordTpBtn.className = 'vm-home-btn vm-home-btn-primary vm-map-coord-btn';
+    coordTpBtn.textContent = '传送';
+    coordTpBtn.addEventListener('click', () => {
+      const pt = this.parseCoordInputs();
+      if (!pt) return;
+      const label = `坐标 (${Math.round(pt.wx)}, ${Math.round(pt.ws)})`;
+      void this.cb.onTeleportTo(pt.wx, pt.ws, label, false);
+      this.close();
+    });
+
+    const coordInputsWrap = document.createElement('div');
+    coordInputsWrap.className = 'vm-map-coord-inputs';
+    coordInputsWrap.append(this.coordXInput, this.coordZInput);
+
+    const coordActionsWrap = document.createElement('div');
+    coordActionsWrap.className = 'vm-map-coord-actions';
+    coordActionsWrap.append(coordLocBtn, coordNavBtn, coordTpBtn);
+
+    coordBar.append(coordInputsWrap, coordActionsWrap);
+
     // Quick buttons under map
     const quickBar = document.createElement('div');
     quickBar.style.display = 'grid';
-    quickBar.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
+    quickBar.style.gridTemplateColumns = 'repeat(4, minmax(0, 1fr))';
     quickBar.style.gap = '6px';
 
     this.quickSelMarkBtn = document.createElement('button');
@@ -310,7 +460,8 @@ export class WorldMapModal {
     this.quickSelMarkBtn.className = 'vm-home-btn vm-home-btn-public';
     this.quickSelMarkBtn.style.height = '30px';
     this.quickSelMarkBtn.style.fontSize = '11px';
-    this.quickSelMarkBtn.textContent = '标记此处';
+    this.quickSelMarkBtn.style.padding = '0 4px';
+    this.quickSelMarkBtn.textContent = '标记选点';
     this.quickSelMarkBtn.addEventListener('click', () => {
       const wx = this.selectedWx ?? this.snapshot.playerWx;
       const ws = this.selectedWs ?? wrapTrackS(this.snapshot.playerWs);
@@ -325,7 +476,8 @@ export class WorldMapModal {
     quickHereBtn.className = 'vm-home-btn';
     quickHereBtn.style.height = '30px';
     quickHereBtn.style.fontSize = '11px';
-    quickHereBtn.textContent = '标记当前位置';
+    quickHereBtn.style.padding = '0 4px';
+    quickHereBtn.textContent = '标记当前';
     quickHereBtn.addEventListener('click', () => {
       const wx = this.snapshot.playerWx;
       const wy = this.snapshot.playerWy ?? 0;
@@ -335,12 +487,30 @@ export class WorldMapModal {
       void this.cb.onAddMarker(name, wx, wy, ws, this.markerColorDraft);
     });
 
+    this.quickSelNavBtn = document.createElement('button');
+    this.quickSelNavBtn.type = 'button';
+    this.quickSelNavBtn.className = 'vm-home-btn vm-home-btn-public';
+    this.quickSelNavBtn.style.height = '30px';
+    this.quickSelNavBtn.style.fontSize = '11px';
+    this.quickSelNavBtn.style.padding = '0 4px';
+    this.quickSelNavBtn.textContent = '导航到选点';
+    this.quickSelNavBtn.addEventListener('click', () => {
+      if (this.selectedWx === null || this.selectedWs === null) {
+        this.cb.onToast?.('请先点击地图选择一个坐标点', 'gold');
+        return;
+      }
+      const label = `(${Math.round(this.selectedWx)}, ${Math.round(this.selectedWs)})`;
+      this.cb.onNavigateTo?.(this.selectedWx, this.selectedWs, label);
+      this.close();
+    });
+
     this.quickSelTpBtn = document.createElement('button');
     this.quickSelTpBtn.type = 'button';
     this.quickSelTpBtn.className = 'vm-home-btn vm-home-btn-primary';
     this.quickSelTpBtn.style.height = '30px';
     this.quickSelTpBtn.style.fontSize = '11px';
-    this.quickSelTpBtn.textContent = '传送到选中点';
+    this.quickSelTpBtn.style.padding = '0 4px';
+    this.quickSelTpBtn.textContent = '传送到选点';
     this.quickSelTpBtn.addEventListener('click', () => {
       if (this.selectedWx === null || this.selectedWs === null) {
         this.cb.onToast?.('请先点击地图选择一个坐标点', 'gold');
@@ -351,7 +521,7 @@ export class WorldMapModal {
       this.close();
     });
 
-    quickBar.append(this.quickSelMarkBtn, quickHereBtn, this.quickSelTpBtn);
+    quickBar.append(this.quickSelMarkBtn, quickHereBtn, this.quickSelNavBtn, this.quickSelTpBtn);
 
     // Legend strip
     const legend = document.createElement('div');
@@ -367,7 +537,7 @@ export class WorldMapModal {
       '<span style="color:#60b4ff">■ 建筑</span>' +
       '<span style="color:#ff3b5c">⚠ 入侵追踪</span>';
 
-    mapCol.append(canvasWrap, quickBar, legend);
+    mapCol.append(canvasWrap, coordBar, quickBar, legend);
 
     // Right: Tabs + List panel (styled by .vm-map-panel & .vm-map-list in style.css)
     const panel = document.createElement('div');
@@ -466,13 +636,38 @@ export class WorldMapModal {
   }
 
   private focusPoint(wx: number, ws: number, select = true): void {
+    const wrappedWs = wrapTrackS(ws);
     this.viewCenterWx = wx;
-    this.viewCenterWs = wrapTrackS(ws);
+    this.viewCenterWs = wrappedWs;
     if (select) {
       this.selectedWx = wx;
-      this.selectedWs = wrapTrackS(ws);
+      this.selectedWs = wrappedWs;
+      this.syncCoordInputs(wx, wrappedWs);
       this.updateCoordBadge();
     }
+  }
+
+  private syncCoordInputs(wx: number, ws: number): void {
+    this.coordXInput.value = String(Math.round(wx));
+    this.coordZInput.value = String(Math.round(wrapTrackS(ws)));
+  }
+
+  private parseCoordInputs(): { wx: number; ws: number } | null {
+    const rawX = this.coordXInput.value.trim();
+    const rawZ = this.coordZInput.value.trim();
+    if (!rawX || !rawZ) {
+      this.cb.onToast?.('请先输入有效的数字坐标', 'gold');
+      (!rawX ? this.coordXInput : this.coordZInput).focus();
+      return null;
+    }
+    const x = Number(rawX);
+    const z = Number(rawZ);
+    if (!Number.isFinite(x) || !Number.isFinite(z)) {
+      this.cb.onToast?.('坐标必须是有效数字', 'gold');
+      (!Number.isFinite(x) ? this.coordXInput : this.coordZInput).focus();
+      return null;
+    }
+    return { wx: x, ws: wrapTrackS(z) };
   }
 
   private adjustZoom(factor: number): void {
@@ -485,6 +680,16 @@ export class WorldMapModal {
   private updatePillsAndTabs(): void {
     const tp = Math.max(0, Math.floor(this.snapshot.teleportCards ?? 0));
     this.tpPillEl.textContent = `🎫 传送卡: ${tp}`;
+
+    const nav = this.snapshot.navTarget;
+    if (nav) {
+      this.cancelNavBtn.style.display = 'inline-flex';
+      this.cancelNavBtn.title = `导航目标：${nav.name}`;
+      this.cancelNavBtn.textContent = '🧭 取消导航';
+    } else {
+      this.cancelNavBtn.style.display = 'none';
+    }
+
     const intruderCount = this.snapshot.intruders.length;
     const playerCount = this.snapshot.remotePlayers.length + 1;
     const bldCount = (this.snapshot.namedBuildings?.length ?? 0) || this.snapshot.myBuildingCenters.length;
@@ -509,9 +714,11 @@ export class WorldMapModal {
   private updateCoordBadge(): void {
     if (this.selectedWx !== null && this.selectedWs !== null) {
       this.coordBadgeEl.textContent = `选中 X:${Math.round(this.selectedWx)} Z:${Math.round(this.selectedWs)}`;
+      this.quickSelNavBtn.disabled = false;
       this.quickSelTpBtn.disabled = false;
     } else {
       this.coordBadgeEl.textContent = `当前 X:${Math.round(this.snapshot.playerWx)} Z:${Math.round(wrapTrackS(this.snapshot.playerWs))} · 点击选点`;
+      this.quickSelNavBtn.disabled = true;
       this.quickSelTpBtn.disabled = true;
     }
   }
@@ -519,8 +726,8 @@ export class WorldMapModal {
   private bindCanvasEvents(): void {
     const toCanvasPx = (e: PointerEvent): { cx: number; cy: number } => {
       const rect = this.canvasEl.getBoundingClientRect();
-      const scaleX = rect.width > 0 ? this.canvasEl.width / rect.width : 1;
-      const scaleY = rect.height > 0 ? this.canvasEl.height / rect.height : 1;
+      const scaleX = rect.width > 0 ? this.viewCssW / rect.width : 1;
+      const scaleY = rect.height > 0 ? this.viewCssH / rect.height : 1;
       return {
         cx: (e.clientX - rect.left) * scaleX,
         cy: (e.clientY - rect.top) * scaleY,
@@ -568,8 +775,10 @@ export class WorldMapModal {
       }
       if (!this.dragMoved) {
         const { wx, ws } = this.screenToWorld(cx, cy);
+        const wrappedWs = wrapTrackS(ws);
         this.selectedWx = wx;
-        this.selectedWs = wrapTrackS(ws);
+        this.selectedWs = wrappedWs;
+        this.syncCoordInputs(wx, wrappedWs);
         this.updateCoordBadge();
       }
     };
@@ -588,9 +797,24 @@ export class WorldMapModal {
     );
   }
 
+  private syncCanvasSize(): { w: number; h: number; dpr: number } {
+    const cssW = Math.round(this.canvasEl.clientWidth) || 440;
+    const cssH = Math.round(this.canvasEl.clientHeight) || 400;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const backingW = Math.max(1, Math.round(cssW * dpr));
+    const backingH = Math.max(1, Math.round(cssH * dpr));
+    if (this.canvasEl.width !== backingW || this.canvasEl.height !== backingH) {
+      this.canvasEl.width = backingW;
+      this.canvasEl.height = backingH;
+    }
+    this.viewCssW = cssW;
+    this.viewCssH = cssH;
+    return { w: cssW, h: cssH, dpr };
+  }
+
   private worldToScreen(wx: number, ws: number): { sx: number; sy: number } {
-    const w = this.canvasEl.width;
-    const h = this.canvasEl.height;
+    const w = this.viewCssW;
+    const h = this.viewCssH;
     let ds = (wrapTrackS(ws) - wrapTrackS(this.viewCenterWs)) % TRACK_LENGTH;
     if (ds >= TRACK_LENGTH * 0.5) ds -= TRACK_LENGTH;
     else if (ds < -TRACK_LENGTH * 0.5) ds += TRACK_LENGTH;
@@ -601,11 +825,77 @@ export class WorldMapModal {
   }
 
   private screenToWorld(sx: number, sy: number): { wx: number; ws: number } {
-    const w = this.canvasEl.width;
-    const h = this.canvasEl.height;
+    const w = this.viewCssW;
+    const h = this.viewCssH;
     const wx = this.viewCenterWx + (sx - w * 0.5) * this.metersPerPx;
     const ws = wrapTrackS(this.viewCenterWs - (sy - h * 0.5) * this.metersPerPx);
     return { wx, ws };
+  }
+
+  private drawMapLabel(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    x: number,
+    y: number,
+    textColor: string,
+    borderColor?: string,
+    placedRects?: MapLabelRect[],
+    boundsW?: number,
+    boundsH?: number,
+    force = false
+  ): boolean {
+    if (!text) return false;
+    ctx.save();
+    ctx.font = MAP_LABEL_FONT;
+    const padX = 6;
+    const pillH = 20;
+    const textW = Math.ceil(ctx.measureText(text).width);
+    const pillW = textW + padX * 2;
+    const maxW = boundsW ?? this.viewCssW;
+    const maxH = boundsH ?? this.viewCssH;
+
+    let rx = Math.round(x);
+    if (rx + pillW > maxW - 4) {
+      rx = Math.round(x - 18 - pillW);
+    }
+    rx = Math.max(4, Math.min(maxW - pillW - 4, rx));
+
+    const baseY = Math.max(4, Math.min(maxH - pillH - 4, Math.round(y - pillH * 0.5)));
+    let chosenY = baseY;
+
+    if (placedRects) {
+      const step = pillH + 3;
+      const offsets = [0, -step, step, -step * 2, step * 2];
+      let found = false;
+      for (const dy of offsets) {
+        const cy = Math.max(4, Math.min(maxH - pillH - 4, baseY + dy));
+        const cand: MapLabelRect = { x: rx, y: cy, w: pillW, h: pillH };
+        if (!placedRects.some((r) => rectsOverlap(r, cand, 2))) {
+          chosenY = cy;
+          found = true;
+          break;
+        }
+      }
+      if (!found && !force) {
+        ctx.restore();
+        return false;
+      }
+      placedRects.push({ x: rx, y: chosenY, w: pillW, h: pillH });
+    }
+
+    drawRoundedRectPath(ctx, rx + 0.5, chosenY + 0.5, pillW - 1, pillH - 1, 5);
+    ctx.fillStyle = 'rgba(7, 11, 22, 0.88)';
+    ctx.fill();
+    ctx.strokeStyle = borderColor || 'rgba(95, 116, 158, 0.72)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = textColor;
+    ctx.fillText(text, rx + padX, chosenY + pillH * 0.5 + 0.5);
+    ctx.restore();
+    return true;
   }
 
   private startLoop(): void {
@@ -627,10 +917,13 @@ export class WorldMapModal {
 
   private drawMap(nowMs: number): void {
     const ctx = this.ctx;
-    const w = this.canvasEl.width;
-    const h = this.canvasEl.height;
+    const { w, h, dpr } = this.syncCanvasSize();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
     const halfH = h * 0.5;
     const mpp = this.metersPerPx;
+    const pendingLabels: PendingMapLabel[] = [];
+    const placedRects: MapLabelRect[] = [];
 
     // 1. Dark retro map backdrop
     ctx.fillStyle = '#070b14';
@@ -716,15 +1009,24 @@ export class WorldMapModal {
       ctx.restore();
     }
 
-    // Biome labels along road
-    ctx.font = 'bold 9px monospace';
-    ctx.fillStyle = 'rgba(147, 163, 196, 0.55)';
+    // Biome labels along road (crisp bold 11px with dark outline)
+    ctx.save();
+    ctx.font = MAP_BIOME_FONT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(5, 7, 13, 0.92)';
+    ctx.lineWidth = 3;
+    ctx.fillStyle = 'rgba(205, 220, 245, 0.88)';
     for (const b of BIOME_LABELS) {
       const p = this.worldToScreen(roadX(b.s) + 28, b.s);
-      if (p.sx > -40 && p.sx < w + 40 && p.sy > 10 && p.sy < h - 10) {
-        ctx.fillText(getLang() === 'zh' ? b.zh : b.en, p.sx, p.sy);
+      if (p.sx > -40 && p.sx < w + 40 && p.sy > 12 && p.sy < h - 12) {
+        const text = getLang() === 'zh' ? b.zh : b.en;
+        ctx.strokeText(text, p.sx, p.sy);
+        ctx.fillText(text, p.sx, p.sy);
       }
     }
+    ctx.restore();
 
     // 5. Resource nodes
     for (const node of this.snapshot.resourceNodes) {
@@ -752,9 +1054,14 @@ export class WorldMapModal {
       ctx.lineWidth = 1.5;
       ctx.strokeRect(p.sx - 5, p.sy - 5, 10, 10);
       if (b.label || b.count) {
-        ctx.font = 'bold 10px monospace';
-        ctx.fillStyle = b.label ? '#ffe699' : '#bfe2ff';
-        ctx.fillText(b.label || `建筑(${b.count})`, p.sx + 7, p.sy + 3);
+        pendingLabels.push({
+          text: b.label || `建筑(${b.count})`,
+          x: p.sx + 9,
+          y: p.sy,
+          textColor: b.label ? '#ffe699' : '#bfe2ff',
+          borderColor: b.label ? '#ffbe3b' : '#60b4ff',
+          priority: b.label ? 65 : 30,
+        });
       }
     }
     if (this.snapshot.namedBuildings) {
@@ -766,9 +1073,14 @@ export class WorldMapModal {
         ctx.strokeStyle = '#05070d';
         ctx.lineWidth = 1.5;
         ctx.strokeRect(p.sx - 5, p.sy - 5, 10, 10);
-        ctx.font = 'bold 10px "Microsoft YaHei", monospace';
-        ctx.fillStyle = '#fff0b3';
-        ctx.fillText(`🏠 ${nb.name}`, p.sx + 8, p.sy + 3);
+        pendingLabels.push({
+          text: `🏠 ${nb.name}`,
+          x: p.sx + 9,
+          y: p.sy,
+          textColor: '#fff0b3',
+          borderColor: '#ffbe3b',
+          priority: 70,
+        });
       }
     }
 
@@ -776,7 +1088,8 @@ export class WorldMapModal {
     for (const mk of this.snapshot.markers) {
       const p = this.worldToScreen(mk.wx, mk.ws);
       if (p.sx < -20 || p.sx > w + 20 || p.sy < -20 || p.sy > h + 20) continue;
-      ctx.fillStyle = mk.color || '#ffbe3b';
+      const color = mk.color || '#ffbe3b';
+      ctx.fillStyle = color;
       ctx.beginPath();
       ctx.arc(p.sx, p.sy - 4, 5, 0, Math.PI * 2);
       ctx.fill();
@@ -790,16 +1103,22 @@ export class WorldMapModal {
       ctx.lineWidth = 1.2;
       ctx.stroke();
 
-      ctx.font = 'bold 10px monospace';
-      ctx.fillStyle = '#f4f7fc';
-      ctx.fillText(mk.name, p.sx + 7, p.sy - 1);
+      pendingLabels.push({
+        text: mk.name,
+        x: p.sx + 9,
+        y: p.sy - 2,
+        textColor: '#f4f7fc',
+        borderColor: color,
+        priority: 60,
+      });
     }
 
     // 8. Remote Players
     for (const rp of this.snapshot.remotePlayers) {
       const p = this.worldToScreen(rp.wx, rp.ws);
       if (p.sx < -16 || p.sx > w + 16 || p.sy < -16 || p.sy > h + 16) continue;
-      ctx.fillStyle = rp.color || '#38e2d4';
+      const color = rp.color || '#38e2d4';
+      ctx.fillStyle = color;
       ctx.beginPath();
       ctx.arc(p.sx, p.sy, 4.5, 0, Math.PI * 2);
       ctx.fill();
@@ -807,9 +1126,14 @@ export class WorldMapModal {
       ctx.lineWidth = 1.5;
       ctx.stroke();
 
-      ctx.font = 'bold 10px monospace';
-      ctx.fillStyle = '#9ffaf2';
-      ctx.fillText(rp.name, p.sx + 7, p.sy + 3);
+      pendingLabels.push({
+        text: rp.name,
+        x: p.sx + 9,
+        y: p.sy,
+        textColor: '#9ffaf2',
+        borderColor: color,
+        priority: 50,
+      });
     }
 
     // 9. Intruders: Flashing red site icon + animated dashed vector to live position
@@ -855,8 +1179,10 @@ export class WorldMapModal {
         ctx.lineWidth = 1.2;
         ctx.stroke();
         ctx.fillStyle = '#05070d';
-        ctx.font = 'bold 9px monospace';
-        ctx.fillText('!', sp.sx - 2.5, sp.sy + 3);
+        ctx.font = 'bold 10px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('!', sp.sx, sp.sy + 0.5);
         ctx.restore();
       }
 
@@ -874,19 +1200,86 @@ export class WorldMapModal {
         ctx.beginPath();
         ctx.arc(lp.sx, lp.sy, 4, 0, Math.PI * 2);
         ctx.fill();
-
-        ctx.font = 'bold 10px monospace';
-        ctx.fillStyle = '#ff9bb0';
-        ctx.fillText(
-          `⚠ ${rec.intruderName}${rec.online ? '' : '(离线)'}`,
-          lp.sx + 9,
-          lp.sy - 4
-        );
         ctx.restore();
+
+        pendingLabels.push({
+          text: `⚠ ${rec.intruderName}${rec.online ? '' : '(离线)'}`,
+          x: lp.sx + 10,
+          y: lp.sy - 2,
+          textColor: '#ff9bb0',
+          borderColor: rec.online ? '#ff3b5c' : '#ff8c2b',
+          priority: 90,
+          force: true,
+        });
       }
     }
 
-    // 10. Selected Target Crosshair
+    // 10. Active Navigation Route & Target Beacon
+    const me = this.worldToScreen(this.snapshot.playerWx, this.snapshot.playerWs);
+    const navTarget = this.snapshot.navTarget;
+    if (navTarget) {
+      const nt = this.worldToScreen(navTarget.wx, navTarget.ws);
+      const navDashOff = -((nowMs * 0.055) % 16);
+
+      ctx.save();
+      ctx.lineCap = 'round';
+      // Soft cyan glow under route
+      ctx.strokeStyle = 'rgba(56, 226, 212, 0.24)';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(me.sx, me.sy);
+      ctx.lineTo(nt.sx, nt.sy);
+      ctx.stroke();
+
+      // Animated dashed cyan-to-gold route line
+      const grad = ctx.createLinearGradient(me.sx, me.sy, nt.sx, nt.sy);
+      grad.addColorStop(0, '#38e2d4');
+      grad.addColorStop(1, '#ffbe3b');
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 2.4;
+      ctx.setLineDash([9, 7]);
+      ctx.lineDashOffset = navDashOff;
+      ctx.beginPath();
+      ctx.moveTo(me.sx, me.sy);
+      ctx.lineTo(nt.sx, nt.sy);
+      ctx.stroke();
+      ctx.restore();
+
+      // Pulsing destination ring
+      if (nt.sx > -36 && nt.sx < w + 36 && nt.sy > -36 && nt.sy < h + 36) {
+        ctx.save();
+        const outerR = 9 + pulse * 6;
+        ctx.strokeStyle = `rgba(255, 190, 59, ${0.45 + pulse * 0.5})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(nt.sx, nt.sy, outerR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#38e2d4';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(nt.sx, nt.sy, 5.5, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffbe3b';
+        ctx.beginPath();
+        ctx.arc(nt.sx, nt.sy, 2.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        pendingLabels.push({
+          text: `🧭 ${navTarget.name}`,
+          x: nt.sx + 12,
+          y: nt.sy,
+          textColor: '#ffe699',
+          borderColor: '#38e2d4',
+          priority: 100,
+          force: true,
+        });
+      }
+    }
+
+    // 11. Selected Target Crosshair
     if (this.selectedWx !== null && this.selectedWs !== null) {
       const sel = this.worldToScreen(this.selectedWx, this.selectedWs);
       ctx.save();
@@ -902,8 +1295,7 @@ export class WorldMapModal {
       ctx.restore();
     }
 
-    // 11. Local Player Heading Arrow
-    const me = this.worldToScreen(this.snapshot.playerWx, this.snapshot.playerWs);
+    // 12. Local Player Heading Arrow
     ctx.save();
     ctx.translate(me.sx, me.sy);
     // In world space, yaw=0 faces -Z (+ws = UP on map), positive yaw turns left (CCW)
@@ -920,6 +1312,23 @@ export class WorldMapModal {
     ctx.lineWidth = 1.6;
     ctx.stroke();
     ctx.restore();
+
+    // 13. Decluttered High-Contrast Pill Labels (drawn last so icons/routes never obscure text)
+    pendingLabels.sort((a, b) => b.priority - a.priority);
+    for (const item of pendingLabels) {
+      this.drawMapLabel(
+        ctx,
+        item.text,
+        item.x,
+        item.y,
+        item.textColor,
+        item.borderColor,
+        placedRects,
+        w,
+        h,
+        item.force
+      );
+    }
   }
 
   private buildingNameDraft = '';
@@ -1081,6 +1490,18 @@ export class WorldMapModal {
       focusBtn.textContent = '定位';
       focusBtn.addEventListener('click', () => this.focusPoint(nb.gx + 0.5, nb.gz + 0.5, true));
 
+      const navBtn = document.createElement('button');
+      navBtn.type = 'button';
+      navBtn.className = 'vm-home-btn vm-home-btn-public';
+      navBtn.style.height = '24px';
+      navBtn.style.fontSize = '10px';
+      navBtn.style.padding = '0 8px';
+      navBtn.textContent = '导航';
+      navBtn.addEventListener('click', () => {
+        this.cb.onNavigateTo?.(nb.gx + 0.5, wrapTrackS(nb.gz + 0.5), nb.name);
+        this.close();
+      });
+
       const tpBtn = document.createElement('button');
       tpBtn.type = 'button';
       tpBtn.className = 'vm-home-btn vm-home-btn-primary';
@@ -1104,7 +1525,7 @@ export class WorldMapModal {
         void this.cb.onDeleteNamedBuilding?.(nb.id);
       });
 
-      actions.append(focusBtn, tpBtn, delBtn);
+      actions.append(focusBtn, navBtn, tpBtn, delBtn);
       card.append(top, actions);
       this.panelBodyEl.appendChild(card);
     }
@@ -1139,7 +1560,9 @@ export class WorldMapModal {
       saveBtn.className = 'vm-home-btn vm-home-btn-public';
       saveBtn.style.height = '24px';
       saveBtn.style.fontSize = '10px';
-      saveBtn.style.padding = '0 8px';
+      saveBtn.style.padding = '0 10px';
+      saveBtn.style.whiteSpace = 'nowrap';
+      saveBtn.style.flexShrink = '0';
       saveBtn.textContent = '命名';
       saveBtn.addEventListener('click', () => {
         const nm = quickInput.value.trim();
@@ -1320,6 +1743,18 @@ export class WorldMapModal {
       focusBtn.textContent = '定位';
       focusBtn.addEventListener('click', () => this.focusPoint(mk.wx, mk.ws, true));
 
+      const navBtn = document.createElement('button');
+      navBtn.type = 'button';
+      navBtn.className = 'vm-home-btn vm-home-btn-public';
+      navBtn.style.height = '24px';
+      navBtn.style.fontSize = '10px';
+      navBtn.style.padding = '0 8px';
+      navBtn.textContent = '导航';
+      navBtn.addEventListener('click', () => {
+        this.cb.onNavigateTo?.(mk.wx, wrapTrackS(mk.ws), mk.name);
+        this.close();
+      });
+
       const tpBtn = document.createElement('button');
       tpBtn.type = 'button';
       tpBtn.className = 'vm-home-btn vm-home-btn-primary';
@@ -1343,7 +1778,7 @@ export class WorldMapModal {
         void this.cb.onDeleteMarker(mk.id);
       });
 
-      actions.append(focusBtn, tpBtn, delBtn);
+      actions.append(focusBtn, navBtn, tpBtn, delBtn);
       card.append(top, actions);
       this.panelBodyEl.appendChild(card);
     }
@@ -1447,6 +1882,7 @@ export class WorldMapModal {
 
       const actions = document.createElement('div');
       actions.style.display = 'flex';
+      actions.style.flexWrap = 'wrap';
       actions.style.gap = '5px';
 
       const chaseBtn = document.createElement('button');
@@ -1454,7 +1890,7 @@ export class WorldMapModal {
       chaseBtn.className = 'vm-home-btn vm-home-btn-primary';
       chaseBtn.style.height = '26px';
       chaseBtn.style.fontSize = '10px';
-      chaseBtn.style.flex = '1';
+      chaseBtn.style.flex = '1 1 130px';
       chaseBtn.style.borderColor = 'var(--vm-crimson)';
       chaseBtn.textContent = cards > 0 ? '用传送卡追击传送 (-1卡)' : '传送卡不足';
       chaseBtn.disabled = cards <= 0;
@@ -1470,6 +1906,18 @@ export class WorldMapModal {
           true,
           rec.id
         );
+        this.close();
+      });
+
+      const navBtn = document.createElement('button');
+      navBtn.type = 'button';
+      navBtn.className = 'vm-home-btn vm-home-btn-public';
+      navBtn.style.height = '26px';
+      navBtn.style.fontSize = '10px';
+      navBtn.style.padding = '0 8px';
+      navBtn.textContent = '导航';
+      navBtn.addEventListener('click', () => {
+        this.cb.onNavigateTo?.(targetWx, targetWs, `追踪 ${rec.intruderName}`);
         this.close();
       });
 
@@ -1490,7 +1938,7 @@ export class WorldMapModal {
         void this.cb.onDismissIntruder(rec.id);
       });
 
-      actions.append(chaseBtn, locBtn, dismissBtn);
+      actions.append(chaseBtn, navBtn, locBtn, dismissBtn);
       card.append(top, detail1, detail2, actions);
       this.panelBodyEl.appendChild(card);
     }
@@ -1569,7 +2017,19 @@ export class WorldMapModal {
       locBtn.textContent = '定位';
       locBtn.addEventListener('click', () => this.focusPoint(p.wx, p.ws, true));
 
-      btns.appendChild(locBtn);
+      const navBtn = document.createElement('button');
+      navBtn.type = 'button';
+      navBtn.className = 'vm-home-btn vm-home-btn-public';
+      navBtn.style.height = '24px';
+      navBtn.style.fontSize = '10px';
+      navBtn.style.padding = '0 8px';
+      navBtn.textContent = '导航';
+      navBtn.addEventListener('click', () => {
+        this.cb.onNavigateTo?.(p.wx, wrapTrackS(p.ws), p.name);
+        this.close();
+      });
+
+      btns.append(locBtn, navBtn);
       card.append(info, btns);
       this.panelBodyEl.appendChild(card);
     }

@@ -9,7 +9,7 @@ import {
   type VoxelNetEvent,
   type WeaponType,
 } from '../game/types';
-import { ROAD_HALF_WIDTH, dsForMeters } from '../game/RoadMath';
+import { ROAD_HALF_WIDTH, dsForMeters, signedTrackDelta, wrapTrackS } from '../game/RoadMath';
 import { AVATAR_COUNT, isValidCustomAvatarDataUrl } from '../game/PixelAvatars';
 import { sanitizeCustomSkin, type CustomAvatarSkin } from '../game/CustomAvatarSystem';
 
@@ -88,6 +88,10 @@ const STATE_PACKET_BYTES = 34;
 const ACTIVE_PUBLISH_MS = 66; // 15Hz while riding / attacking / wheelieing
 const IDLE_PUBLISH_MS = 400; // 2.5Hz while stationary so newcomers discover parked riders quickly
 const EDGE_PUBLISH_MIN_MS = 28;
+const OW_ACTIVE_PUBLISH_MS = 100; // ~10Hz while moving in open-world or on-foot
+const OW_IDLE_PUBLISH_MS = 1_000; // 1Hz while idle in open-world or on-foot
+const OW_EDGE_PUBLISH_MS = 36; // immediate on freeRoam/onFoot transition, block change or swing
+const OW_SNAP_DIST = 28.0;
 const PROFILE_REFRESH_MS = 10_000;
 const PEER_TIMEOUT_MS = 6_500;
 
@@ -288,12 +292,30 @@ interface StateSnapshot {
   arrivalMs: number;
 }
 
+interface OpenWorldPose {
+  freeRoam: boolean;
+  onFoot: boolean;
+  wx?: number;
+  wy?: number;
+  ws?: number;
+  hd?: number;
+  fx?: number;
+  fy?: number;
+  fs?: number;
+  fyaw?: number;
+  wp?: number;
+  fb?: number;
+  sw?: number;
+  arrivalMs: number;
+}
+
 interface RemotePeer {
   id: string;
   hasLiveState: boolean;
   customAvatar: string | null;
   prevSnap: StateSnapshot;
   currSnap: StateSnapshot;
+  owTarget: OpenWorldPose | null;
   lastSeq: number;
   lastStateAt: number;
   render: RiderRenderState;
@@ -301,6 +323,21 @@ interface RemotePeer {
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
+function round3(v: number): number {
+  return Math.round(v * 1000) / 1000;
+}
+
+function lerpAngle(cur: number, target: number, alpha: number): number {
+  let diff = (target - cur) % (Math.PI * 2);
+  if (diff > Math.PI) diff -= Math.PI * 2;
+  else if (diff < -Math.PI) diff += Math.PI * 2;
+  return cur + diff * alpha;
 }
 
 function normalizeAvatar(idx: number): number {
@@ -621,6 +658,7 @@ export class MqttSync {
   // Dynamic room topic strings & pre-allocated zero-GC binary state PUBLISH packet
   private topicPrefix = '';
   private topicState = '';
+  private topicOpenWorld = '';
   private topicProfile = '';
   private topicAvatar = '';
   private topicEvents = '';
@@ -633,13 +671,16 @@ export class MqttSync {
   private lastLobbyAnnounceMs = -Infinity;
   private lastRoomInfoPublishMs = -Infinity;
   private statePrefix = '';
+  private openWorldPrefix = '';
   private profilePrefix = '';
   private avatarPrefix = '';
 
+  private topicOpenWorldBytes!: Uint8Array;
   private topicProfileBytes!: Uint8Array;
   private topicAvatarBytes!: Uint8Array;
   private topicEventsBytes!: Uint8Array;
   private topicRoomInfoBytes!: Uint8Array;
+  private clearOpenWorldPacket!: Uint8Array;
   private clearAvatarPacket!: Uint8Array;
   private unloadCoalescedPacket!: Uint8Array;
   private disposeCoalescedPacket!: Uint8Array;
@@ -689,9 +730,22 @@ export class MqttSync {
 
   private seq = 0;
   private lastStatePublishMs = -Infinity;
+  private lastOwPublishMs = -Infinity;
   private lastProfilePublishMs = -Infinity;
   private prevLocalAttackSide: 0 | 1 | 2 = 0;
   private prevLocalCrashed = false;
+  private prevLocalOwActive = false;
+  private prevLocalOnFoot = false;
+  private prevLocalOwWx = Number.NaN;
+  private prevLocalOwWy = Number.NaN;
+  private prevLocalOwWs = Number.NaN;
+  private prevLocalOwHd = Number.NaN;
+  private prevLocalFootWx = Number.NaN;
+  private prevLocalFootWy = Number.NaN;
+  private prevLocalFootWs = Number.NaN;
+  private prevLocalFootYaw = Number.NaN;
+  private prevLocalFootBlock = -1;
+  private prevLocalFootSwing = 0;
 
   // Initial pack discovery window state (runs once per joined room)
   private initialSpawnDone = false;
@@ -699,6 +753,7 @@ export class MqttSync {
   private firstLivePeerAtMs: number | null = null;
 
   private readonly profiles = new Map<string, PeerProfile>();
+  private readonly openWorldPoses = new Map<string, OpenWorldPose>();
   private readonly customAvatars = new Map<string, string>();
   private readonly customSkins = new Map<string, CustomAvatarSkin>();
   private readonly customSkinSigs = new Map<string, string>();
@@ -1106,6 +1161,82 @@ export class MqttSync {
         this.prevLocalAttackSide = local.attackSide;
         this.prevLocalCrashed = local.crashed;
       }
+
+      // Open-world & On-Foot pose sync (~10Hz moving / 1Hz idle / immediate on transitions & swings)
+      const owFreeRoam = Boolean(local.freeRoam);
+      const owOnFoot = Boolean(local.onFoot);
+      const owActive = owFreeRoam || owOnFoot;
+      if (owActive) {
+        const wx = local.worldX;
+        const wy = local.worldY;
+        const ws = local.worldS;
+        const hd = local.heading ?? 0;
+        const fx = local.footWx;
+        const fy = local.footWy;
+        const fs = local.footWs;
+        const fyaw = local.footYaw ?? 0;
+        const fb = local.footBlock ?? 3;
+        const sw = local.footSwing ?? 0;
+
+        const modeChanged = !this.prevLocalOwActive || owOnFoot !== this.prevLocalOnFoot;
+        const swingEdge = sw > 0.12 && this.prevLocalFootSwing <= 0.12;
+        const blockChanged = owOnFoot && fb !== this.prevLocalFootBlock;
+
+        const bikeMoved =
+          Math.abs(local.speed) > 0.35 ||
+          (wx !== undefined &&
+            (!Number.isFinite(this.prevLocalOwWx) || Math.abs(wx - this.prevLocalOwWx) > 0.03)) ||
+          (wy !== undefined &&
+            (!Number.isFinite(this.prevLocalOwWy) || Math.abs(wy - this.prevLocalOwWy) > 0.03)) ||
+          (ws !== undefined &&
+            (!Number.isFinite(this.prevLocalOwWs) ||
+              Math.abs(signedTrackDelta(ws, this.prevLocalOwWs)) > 0.03)) ||
+          !Number.isFinite(this.prevLocalOwHd) ||
+          Math.abs(hd - this.prevLocalOwHd) > 0.025;
+
+        const footMoved =
+          owOnFoot &&
+          ((fx !== undefined &&
+            (!Number.isFinite(this.prevLocalFootWx) || Math.abs(fx - this.prevLocalFootWx) > 0.025)) ||
+            (fy !== undefined &&
+              (!Number.isFinite(this.prevLocalFootWy) || Math.abs(fy - this.prevLocalFootWy) > 0.025)) ||
+            (fs !== undefined &&
+              (!Number.isFinite(this.prevLocalFootWs) ||
+                Math.abs(signedTrackDelta(fs, this.prevLocalFootWs)) > 0.025)) ||
+            !Number.isFinite(this.prevLocalFootYaw) ||
+            Math.abs(fyaw - this.prevLocalFootYaw) > 0.025 ||
+            sw > 0.01);
+
+        const owInterval =
+          modeChanged || swingEdge || blockChanged
+            ? OW_EDGE_PUBLISH_MS
+            : bikeMoved || footMoved
+              ? OW_ACTIVE_PUBLISH_MS
+              : OW_IDLE_PUBLISH_MS;
+
+        if (clockMs - this.lastOwPublishMs >= owInterval) {
+          this.publishOpenWorldPose(local);
+          this.lastOwPublishMs = clockMs;
+          this.prevLocalOwActive = true;
+          this.prevLocalOnFoot = owOnFoot;
+          this.prevLocalOwWx = wx ?? Number.NaN;
+          this.prevLocalOwWy = wy ?? Number.NaN;
+          this.prevLocalOwWs = ws ?? Number.NaN;
+          this.prevLocalOwHd = hd;
+          this.prevLocalFootWx = fx ?? Number.NaN;
+          this.prevLocalFootWy = fy ?? Number.NaN;
+          this.prevLocalFootWs = fs ?? Number.NaN;
+          this.prevLocalFootYaw = fyaw;
+          this.prevLocalFootBlock = fb;
+          this.prevLocalFootSwing = sw;
+        }
+      } else if (this.prevLocalOwActive) {
+        this.publishOpenWorldClear();
+        this.lastOwPublishMs = clockMs;
+        this.prevLocalOwActive = false;
+        this.prevLocalOnFoot = false;
+        this.prevLocalFootSwing = 0;
+      }
     }
 
     // 3. Prune stale remote peers & advance smooth dead-reckoning / interpolation (zero array alloc)
@@ -1116,6 +1247,7 @@ export class MqttSync {
       if (clockMs - peer.lastStateAt > PEER_TIMEOUT_MS) {
         this.peers.delete(peerId);
         this.profiles.delete(peerId);
+        this.openWorldPoses.delete(peerId);
         prunedAny = true;
         if (peerId === this._roomHostId) {
           prunedHost = true;
@@ -1280,6 +1412,7 @@ export class MqttSync {
     this.rxRemainder = null;
     this.peers.clear();
     this.profiles.clear();
+    this.openWorldPoses.clear();
     this.customAvatars.clear();
     this.customSkins.clear();
     this.customSkinSigs.clear();
@@ -1293,20 +1426,24 @@ export class MqttSync {
     this.channelRoom = channelRoom;
     this.topicPrefix = `${TOPIC_VERSION}/${channelRoom}`;
     this.topicState = `${this.topicPrefix}/s/${this.clientId}`;
+    this.topicOpenWorld = `${this.topicPrefix}/ow/${this.clientId}`;
     this.topicProfile = `${this.topicPrefix}/p/${this.clientId}`;
     this.topicAvatar = `${this.topicPrefix}/a/${this.clientId}`;
     this.topicEvents = `${this.topicPrefix}/e`;
     this.topicRoomInfo = `${this.topicPrefix}/r`;
     this.topicWildcard = `${this.topicPrefix}/#`;
     this.statePrefix = `${this.topicPrefix}/s/`;
+    this.openWorldPrefix = `${this.topicPrefix}/ow/`;
     this.profilePrefix = `${this.topicPrefix}/p/`;
     this.avatarPrefix = `${this.topicPrefix}/a/`;
 
+    this.topicOpenWorldBytes = textEncoder.encode(this.topicOpenWorld);
     this.topicProfileBytes = textEncoder.encode(this.topicProfile);
     this.topicAvatarBytes = textEncoder.encode(this.topicAvatar);
     this.topicEventsBytes = textEncoder.encode(this.topicEvents);
     this.topicRoomInfoBytes = textEncoder.encode(this.topicRoomInfo);
     const clearProfilePacket = buildPublishPacket(this.topicProfileBytes, EMPTY_BYTES, true);
+    this.clearOpenWorldPacket = buildPublishPacket(this.topicOpenWorldBytes, EMPTY_BYTES, true);
     this.clearAvatarPacket = buildPublishPacket(this.topicAvatarBytes, EMPTY_BYTES, true);
     const byeEventPacket = buildPublishPacket(
       this.topicEventsBytes,
@@ -1315,11 +1452,20 @@ export class MqttSync {
     );
 
     // Coalesce unload cleanup into a single atomic WS frame WITHOUT DISCONNECT so EMQX LWT always backs up tab close
-    const unloadLen = byeEventPacket.byteLength + clearProfilePacket.byteLength + this.clearAvatarPacket.byteLength;
+    const unloadLen =
+      byeEventPacket.byteLength +
+      clearProfilePacket.byteLength +
+      this.clearAvatarPacket.byteLength +
+      this.clearOpenWorldPacket.byteLength;
     this.unloadCoalescedPacket = new Uint8Array(unloadLen);
-    this.unloadCoalescedPacket.set(byeEventPacket, 0);
-    this.unloadCoalescedPacket.set(clearProfilePacket, byeEventPacket.byteLength);
-    this.unloadCoalescedPacket.set(this.clearAvatarPacket, byeEventPacket.byteLength + clearProfilePacket.byteLength);
+    let uOff = 0;
+    this.unloadCoalescedPacket.set(byeEventPacket, uOff);
+    uOff += byeEventPacket.byteLength;
+    this.unloadCoalescedPacket.set(clearProfilePacket, uOff);
+    uOff += clearProfilePacket.byteLength;
+    this.unloadCoalescedPacket.set(this.clearAvatarPacket, uOff);
+    uOff += this.clearAvatarPacket.byteLength;
+    this.unloadCoalescedPacket.set(this.clearOpenWorldPacket, uOff);
 
     // Coalesce programmatic dispose / room-switch cleanup WITH MQTT DISCONNECT
     this.disposeCoalescedPacket = new Uint8Array(unloadLen + PKT_DISCONNECT.byteLength);
@@ -1387,6 +1533,7 @@ export class MqttSync {
     }
     this.peers.clear();
     this.profiles.clear();
+    this.openWorldPoses.clear();
     this.customAvatars.clear();
     this.customSkins.clear();
     this.customSkinSigs.clear();
@@ -1424,7 +1571,20 @@ export class MqttSync {
     this.subackAtMs = null;
     this.firstLivePeerAtMs = null;
     this.lastStatePublishMs = -Infinity;
+    this.lastOwPublishMs = -Infinity;
     this.lastProfilePublishMs = -Infinity;
+    this.prevLocalOwActive = false;
+    this.prevLocalOnFoot = false;
+    this.prevLocalOwWx = Number.NaN;
+    this.prevLocalOwWy = Number.NaN;
+    this.prevLocalOwWs = Number.NaN;
+    this.prevLocalOwHd = Number.NaN;
+    this.prevLocalFootWx = Number.NaN;
+    this.prevLocalFootWy = Number.NaN;
+    this.prevLocalFootWs = Number.NaN;
+    this.prevLocalFootYaw = Number.NaN;
+    this.prevLocalFootBlock = -1;
+    this.prevLocalFootSwing = 0;
     this.seq = 0;
     this.roomSubPacketId = 0;
 
@@ -1548,6 +1708,9 @@ export class MqttSync {
       this.emitLobbyRooms();
     }
     this.lastStatePublishMs = -Infinity;
+    this.lastOwPublishMs = -Infinity;
+    this.prevLocalOwActive = false;
+    this.prevLocalOnFoot = false;
   }
 
   private emitRoomInfo(): void {
@@ -2199,6 +2362,46 @@ export class MqttSync {
     }
   }
 
+  private publishOpenWorldPose(local: RiderRenderState): void {
+    const ws = this.ws;
+    if (!this.activeInRoom || !this.mqttConnected || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) return;
+
+    const body: Record<string, number> = {
+      f: local.freeRoam ? 1 : 0,
+      of: local.onFoot ? 1 : 0,
+    };
+    if (local.worldX !== undefined && Number.isFinite(local.worldX)) body.wx = round2(local.worldX);
+    if (local.worldY !== undefined && Number.isFinite(local.worldY)) body.wy = round2(local.worldY);
+    if (local.worldS !== undefined && Number.isFinite(local.worldS)) body.ws = round2(local.worldS);
+    if (local.heading !== undefined && Number.isFinite(local.heading)) body.hd = round3(local.heading);
+
+    if (local.onFoot) {
+      if (local.footWx !== undefined && Number.isFinite(local.footWx)) body.fx = round2(local.footWx);
+      if (local.footWy !== undefined && Number.isFinite(local.footWy)) body.fy = round2(local.footWy);
+      if (local.footWs !== undefined && Number.isFinite(local.footWs)) body.fs = round2(local.footWs);
+      if (local.footYaw !== undefined && Number.isFinite(local.footYaw)) body.fyaw = round3(local.footYaw);
+      if (local.footWalkPhase !== undefined && Number.isFinite(local.footWalkPhase)) {
+        body.wp = round2(local.footWalkPhase);
+      }
+      if (local.footBlock !== undefined && Number.isFinite(local.footBlock)) {
+        body.fb = clamp(Math.trunc(local.footBlock), 1, 10);
+      }
+      if (local.footSwing !== undefined && Number.isFinite(local.footSwing) && local.footSwing > 0.005) {
+        body.sw = round3(clamp(local.footSwing, 0, 1));
+      }
+    }
+
+    const payload = textEncoder.encode(JSON.stringify(body));
+    this.sendRaw(buildPublishPacket(this.topicOpenWorldBytes, payload, true));
+  }
+
+  private publishOpenWorldClear(): void {
+    if (!this.isRoomActive()) return;
+    const payload = textEncoder.encode('{"f":0,"of":0}');
+    this.sendRaw(buildPublishPacket(this.topicOpenWorldBytes, payload, true));
+  }
+
   private handleMessage(topic: string, payload: Uint8Array, isRetained: boolean): void {
     // Intercept room lock metadata query responses first
     if (this.metaQuery && topic === this.metaQuery.topic) {
@@ -2238,6 +2441,13 @@ export class MqttSync {
       const peerId = topic.slice(this.statePrefix.length);
       if (!peerId || peerId === this.clientId) return;
       this.handleStatePacket(peerId, payload);
+      return;
+    }
+
+    if (topic.startsWith(this.openWorldPrefix)) {
+      const peerId = topic.slice(this.openWorldPrefix.length);
+      if (!peerId || peerId === this.clientId) return;
+      this.handleOpenWorldPacket(peerId, payload);
       return;
     }
 
@@ -2420,12 +2630,32 @@ export class MqttSync {
       incomingLockName: null,
     };
 
+    const pendingOw = this.openWorldPoses.get(peerId) ?? null;
+    if (pendingOw) {
+      render.freeRoam = pendingOw.freeRoam;
+      render.onFoot = pendingOw.onFoot;
+      if (pendingOw.wx !== undefined) render.worldX = pendingOw.wx;
+      if (pendingOw.wy !== undefined) render.worldY = pendingOw.wy;
+      if (pendingOw.ws !== undefined) render.worldS = pendingOw.ws;
+      if (pendingOw.hd !== undefined) render.heading = pendingOw.hd;
+      if (pendingOw.onFoot) {
+        if (pendingOw.fx !== undefined) render.footWx = pendingOw.fx;
+        if (pendingOw.fy !== undefined) render.footWy = pendingOw.fy;
+        if (pendingOw.fs !== undefined) render.footWs = pendingOw.fs;
+        if (pendingOw.fyaw !== undefined) render.footYaw = pendingOw.fyaw;
+        if (pendingOw.wp !== undefined) render.footWalkPhase = pendingOw.wp;
+        if (pendingOw.fb !== undefined) render.footBlock = pendingOw.fb;
+        if (pendingOw.sw !== undefined) render.footSwing = pendingOw.sw;
+      }
+    }
+
     const peer: RemotePeer = {
       id: peerId,
       hasLiveState: true,
       customAvatar: pendingCustomAvatar,
       prevSnap,
       currSnap,
+      owTarget: pendingOw,
       lastSeq: seq,
       lastStateAt: arrivalMs,
       render,
@@ -2457,6 +2687,86 @@ export class MqttSync {
       }
     } else {
       this.callbacks.onPeerEvent?.(`${name} JOINED`);
+    }
+  }
+
+  private clearPeerOpenWorld(peer: RemotePeer): void {
+    peer.owTarget = null;
+    const r = peer.render;
+    r.freeRoam = false;
+    r.onFoot = false;
+    r.worldX = undefined;
+    r.worldY = undefined;
+    r.worldS = undefined;
+    r.heading = undefined;
+    r.footWx = undefined;
+    r.footWy = undefined;
+    r.footWs = undefined;
+    r.footYaw = undefined;
+    r.footWalkPhase = undefined;
+    r.footBlock = undefined;
+    r.footSwing = undefined;
+  }
+
+  private handleOpenWorldPacket(peerId: string, payload: Uint8Array): void {
+    if (payload.byteLength === 0) {
+      this.openWorldPoses.delete(peerId);
+      const peer = this.peers.get(peerId);
+      if (peer) this.clearPeerOpenWorld(peer);
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(textDecoder.decode(payload));
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object') return;
+    const obj = parsed as Record<string, unknown>;
+
+    const freeRoam = Boolean(obj.f);
+    const onFoot = Boolean(obj.of);
+    if (!freeRoam && !onFoot) {
+      this.openWorldPoses.delete(peerId);
+      const peer = this.peers.get(peerId);
+      if (peer) this.clearPeerOpenWorld(peer);
+      return;
+    }
+
+    const num = (v: unknown, lo: number, hi: number): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) ? clamp(v, lo, hi) : undefined;
+
+    const pose: OpenWorldPose = {
+      freeRoam: freeRoam || onFoot,
+      onFoot,
+      wx: num(obj.wx, -100_000, 100_000),
+      wy: num(obj.wy, -128, 512),
+      ws: typeof obj.ws === 'number' && Number.isFinite(obj.ws) ? obj.ws : undefined,
+      hd: typeof obj.hd === 'number' && Number.isFinite(obj.hd) ? obj.hd : undefined,
+      fx: num(obj.fx, -100_000, 100_000),
+      fy: num(obj.fy, -128, 512),
+      fs: typeof obj.fs === 'number' && Number.isFinite(obj.fs) ? obj.fs : undefined,
+      fyaw: typeof obj.fyaw === 'number' && Number.isFinite(obj.fyaw) ? obj.fyaw : undefined,
+      wp: typeof obj.wp === 'number' && Number.isFinite(obj.wp) ? obj.wp : undefined,
+      fb:
+        typeof obj.fb === 'number' && Number.isFinite(obj.fb)
+          ? clamp(Math.trunc(obj.fb), 1, 10)
+          : undefined,
+      sw: num(obj.sw, 0, 1),
+      arrivalMs: monotonicNow(),
+    };
+
+    this.openWorldPoses.set(peerId, pose);
+    const peer = this.peers.get(peerId);
+    if (peer) {
+      peer.owTarget = pose;
+      if (pose.fb !== undefined) {
+        peer.render.footBlock = pose.fb;
+      }
+      if (pose.sw !== undefined && pose.sw > (peer.render.footSwing ?? 0)) {
+        peer.render.footSwing = pose.sw;
+      }
     }
   }
 
@@ -2756,6 +3066,7 @@ export class MqttSync {
     const existing = this.peers.get(peerId);
     this.peers.delete(peerId);
     this.profiles.delete(peerId);
+    this.openWorldPoses.delete(peerId);
     if (this.customAvatars.delete(peerId)) {
       this.callbacks.onRemoteCustomAvatar?.(peerId, null);
     }
@@ -2834,7 +3145,9 @@ export class MqttSync {
       r.lean += (snap.lean - r.lean) * Math.min(1, dt * 14);
     }
 
-    r.wheelAngle += (Math.max(0, r.speed) / WHEEL_RADIUS) * dt;
+    if (!r.onFoot) {
+      r.wheelAngle += (Math.max(0, r.speed) / WHEEL_RADIUS) * dt;
+    }
     r.hp = snap.hp;
     r.weapon = snap.weapon;
     r.nitroActive = snap.nitroActive;
@@ -2887,6 +3200,91 @@ export class MqttSync {
       } else if (r.invulnTimer > 0) {
         r.invulnTimer = Math.max(0, r.invulnTimer - dt);
       }
+    }
+
+    // Smooth open-world bike & on-foot walking character interpolation
+    const ow = peer.owTarget;
+    if (ow && (ow.freeRoam || ow.onFoot)) {
+      r.freeRoam = ow.freeRoam;
+      r.onFoot = ow.onFoot;
+
+      const alphaBike = Math.min(1, dt * 12);
+      if (ow.wx !== undefined && ow.wy !== undefined && ow.ws !== undefined) {
+        if (r.worldX === undefined || r.worldY === undefined || r.worldS === undefined) {
+          r.worldX = ow.wx;
+          r.worldY = ow.wy;
+          r.worldS = ow.ws;
+          r.heading = ow.hd ?? 0;
+        } else {
+          const dx = ow.wx - r.worldX;
+          const ds = signedTrackDelta(ow.ws, r.worldS);
+          if (Math.hypot(dx, ds) > OW_SNAP_DIST) {
+            r.worldX = ow.wx;
+            r.worldY = ow.wy;
+            r.worldS = ow.ws;
+            if (ow.hd !== undefined) r.heading = ow.hd;
+          } else {
+            r.worldX += dx * alphaBike;
+            r.worldY += (ow.wy - r.worldY) * Math.min(1, dt * 14);
+            r.worldS = wrapTrackS(r.worldS + ds * alphaBike);
+            if (ow.hd !== undefined) {
+              r.heading = lerpAngle(r.heading ?? ow.hd, ow.hd, alphaBike);
+            }
+          }
+        }
+      }
+
+      if (ow.onFoot && ow.fx !== undefined && ow.fy !== undefined && ow.fs !== undefined) {
+        const alphaFoot = Math.min(1, dt * 14);
+        if (r.footWx === undefined || r.footWy === undefined || r.footWs === undefined) {
+          r.footWx = ow.fx;
+          r.footWy = ow.fy;
+          r.footWs = ow.fs;
+          r.footYaw = ow.fyaw ?? 0;
+          r.footWalkPhase = ow.wp ?? 0;
+          r.footBlock = ow.fb ?? 3;
+          r.footSwing = ow.sw ?? 0;
+        } else {
+          const fdx = ow.fx - r.footWx;
+          const fds = signedTrackDelta(ow.fs, r.footWs);
+          if (Math.hypot(fdx, fds) > OW_SNAP_DIST) {
+            r.footWx = ow.fx;
+            r.footWy = ow.fy;
+            r.footWs = ow.fs;
+            if (ow.fyaw !== undefined) r.footYaw = ow.fyaw;
+            if (ow.wp !== undefined) r.footWalkPhase = ow.wp;
+          } else {
+            const stepX = fdx * alphaFoot;
+            const stepS = fds * alphaFoot;
+            r.footWx += stepX;
+            r.footWy += (ow.fy - r.footWy) * Math.min(1, dt * 16);
+            r.footWs = wrapTrackS(r.footWs + stepS);
+            if (ow.fyaw !== undefined) {
+              r.footYaw = lerpAngle(r.footYaw ?? ow.fyaw, ow.fyaw, alphaFoot);
+            }
+            const movedMeters = Math.hypot(stepX, stepS);
+            if (movedMeters > 0.002) {
+              r.footWalkPhase = (r.footWalkPhase ?? 0) + movedMeters * 1.45;
+            }
+          }
+          if (ow.fb !== undefined) {
+            r.footBlock = ow.fb;
+          }
+          if ((r.footSwing ?? 0) > 0) {
+            r.footSwing = Math.max(0, (r.footSwing ?? 0) - dt);
+          }
+        }
+      } else if (!ow.onFoot) {
+        r.footWx = undefined;
+        r.footWy = undefined;
+        r.footWs = undefined;
+        r.footYaw = undefined;
+        r.footWalkPhase = undefined;
+        r.footBlock = undefined;
+        r.footSwing = undefined;
+      }
+    } else if (r.freeRoam || r.onFoot) {
+      this.clearPeerOpenWorld(peer);
     }
   }
 }

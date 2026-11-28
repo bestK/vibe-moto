@@ -380,6 +380,7 @@ export class BikeVisual {
   private cachedPeerSkin: CustomAvatarSkin | null = null;
   private isBot = false;
   private deliveryRole: 'meituan' | 'eleme' | null = null;
+  private hasCharFloat = false;
   private hasFloatingMarks = false;
   private activeAccentColor = '#ffbe3b';
   private shadowEnabled = true;
@@ -470,7 +471,8 @@ export class BikeVisual {
     // Optional unlit floating badges (avatar 5 '???' & avatar 7 glowing alien antenna orbs)
     this.charFloatMesh = new THREE.Mesh(initChar.floatGeo ?? this.upperWithArmsGeo, basicVertexMat);
     this.charFloatMesh.position.set(0, 0.7, -0.22);
-    this.charFloatMesh.visible = initChar.floatGeo !== null;
+    this.hasCharFloat = initChar.floatGeo !== null;
+    this.charFloatMesh.visible = this.hasCharFloat;
     this.torsoGroup.add(this.charFloatMesh);
 
     // Delivery rider glowing visor (shown only for Meituan / Ele.me delivery riders)
@@ -624,6 +626,7 @@ export class BikeVisual {
       this.legLMesh.material = legMat;
       this.legRMesh.material = legMat;
 
+      this.hasCharFloat = false;
       this.charFloatMesh.visible = false;
       this.hasFloatingMarks = false;
 
@@ -666,9 +669,11 @@ export class BikeVisual {
 
       if (charModel.floatGeo) {
         this.charFloatMesh.geometry = charModel.floatGeo;
+        this.hasCharFloat = true;
         this.charFloatMesh.visible = true;
         this.charFloatMesh.position.y = 0.7;
       } else {
+        this.hasCharFloat = false;
         this.charFloatMesh.visible = false;
       }
       this.hasFloatingMarks = Boolean(outfit.hasFloatingMarks);
@@ -761,12 +766,26 @@ export class BikeVisual {
     }
 
     if (state.onFoot) {
-      // Parked empty motorcycle resting gently on kickstand!
+      // Parked empty motorcycle resting gently on kickstand — hide seated rider & weapons!
       this.riderGroup.visible = false;
+      this.upperBodyMesh.visible = false;
+      this.idleLegsMesh.visible = false;
+      this.charFloatMesh.visible = false;
+      this.armLMesh.visible = false;
+      this.armRMesh.visible = false;
+      this.legLMesh.visible = false;
+      this.legRMesh.visible = false;
+      this.leftBat.visible = false;
+      this.rightBat.visible = false;
+      this.leftChain.visible = false;
+      this.rightChain.visible = false;
       this.bikePivot.position.set(0, 0, 0);
       this.bikePivot.rotation.set(0, 0, -0.18);
     } else if (state.crashed) {
       this.riderGroup.visible = true;
+      this.upperBodyMesh.visible = true;
+      this.idleLegsMesh.visible = true;
+      this.charFloatMesh.visible = this.hasCharFloat;
       const t = Math.min(1, state.crashTimer / 1.5);
       this.bikePivot.position.y = Math.max(0, Math.sin(t * Math.PI * 2.2) * (1 - t) * 1.1);
       this.bikePivot.rotation.z =
@@ -781,6 +800,8 @@ export class BikeVisual {
       this.riderGroup.rotation.set(-t * 1.8, 0, t * 2.4);
     } else {
       this.riderGroup.visible = true;
+      this.upperBodyMesh.visible = true;
+      this.charFloatMesh.visible = this.hasCharFloat;
       this.bikePivot.position.set(0, state.freeRoam ? 0 : state.y, 0);
       this.bikePivot.rotation.y =
         state.spinOutTimer > 0 ? state.spinOutTimer * Math.PI * 3.8 : 0;
@@ -796,40 +817,45 @@ export class BikeVisual {
       this.updateCombatLimbs(state.weapon, state.attackSide, state.attackPhase);
     }
 
-    // Update nameplate sprite only when name, rounded HP, avatar, rage, or UI language changes
+    // Update nameplate sprite only when mounted (hidden while onFoot since nameplate moves to walking character!)
     if (this.plateSprite && this.plateCanvas && this.plateTex) {
-      const hpBucket = Math.round(state.hp / 4) * 4;
-      const avatarVer = getAvatarVersion(state.id);
-      const lang = getLang();
-      if (
-        state.name !== this.lastPlateName ||
-        hpBucket !== this.lastPlateHp ||
-        state.avatarIdx !== this.lastPlateAvatar ||
-        avatarVer !== this.lastPlateAvatarVer ||
-        skinVer !== this.lastPlateSkinVer ||
-        enraged !== this.lastPlateEnraged ||
-        lang !== this.lastPlateLang
-      ) {
-        this.lastPlateName = state.name;
-        this.lastPlateHp = hpBucket;
-        this.lastPlateAvatar = state.avatarIdx;
-        this.lastPlateAvatarVer = avatarVer;
-        this.lastPlateSkinVer = skinVer;
-        this.lastPlateEnraged = enraged;
-        this.lastPlateLang = lang;
-        drawNameplateCanvas(
-          this.plateCanvas,
-          state.name,
-          state.hp,
-          this.activeAccentColor,
-          state.isBot,
-          state.avatarIdx,
-          state.id,
-          enraged
-        );
-        this.plateTex.needsUpdate = true;
+      if (state.onFoot) {
+        this.plateSprite.visible = false;
+      } else {
+        this.plateSprite.visible = true;
+        const hpBucket = Math.round(state.hp / 4) * 4;
+        const avatarVer = getAvatarVersion(state.id);
+        const lang = getLang();
+        if (
+          state.name !== this.lastPlateName ||
+          hpBucket !== this.lastPlateHp ||
+          state.avatarIdx !== this.lastPlateAvatar ||
+          avatarVer !== this.lastPlateAvatarVer ||
+          skinVer !== this.lastPlateSkinVer ||
+          enraged !== this.lastPlateEnraged ||
+          lang !== this.lastPlateLang
+        ) {
+          this.lastPlateName = state.name;
+          this.lastPlateHp = hpBucket;
+          this.lastPlateAvatar = state.avatarIdx;
+          this.lastPlateAvatarVer = avatarVer;
+          this.lastPlateSkinVer = skinVer;
+          this.lastPlateEnraged = enraged;
+          this.lastPlateLang = lang;
+          drawNameplateCanvas(
+            this.plateCanvas,
+            state.name,
+            state.hp,
+            this.activeAccentColor,
+            state.isBot,
+            state.avatarIdx,
+            state.id,
+            enraged
+          );
+          this.plateTex.needsUpdate = true;
+        }
+        this.plateSprite.position.y = 2.48 + (state.freeRoam ? 0 : state.y);
       }
-      this.plateSprite.position.y = 2.48 + state.y;
     }
   }
 

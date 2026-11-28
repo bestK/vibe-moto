@@ -19,7 +19,7 @@ import { InputState, ParticleKind, PlayerCallbacks, PlayerPhysics } from './game
 import { OnFootController, OnFootInput } from './game/OnFootController';
 import { BlueprintManager, SavedBlueprint } from './game/BlueprintSystem';
 import { ResourceNodeManager } from './game/ResourceNodes';
-import { getLapNumber, openWorldGroundY, roadX, signedTrackDelta } from './game/RoadMath';
+import { getLapNumber, openWorldGroundY, roadX, signedTrackDelta, wrapTrackS } from './game/RoadMath';
 import { CarItemEffectKind, TrafficSystem } from './game/TrafficSystem';
 import { BLOCK_SPEC_BY_ID, BlockType, VoxelWorld } from './game/VoxelWorld';
 import {
@@ -29,6 +29,7 @@ import {
   ItemNetEvent,
   ItemType,
   NamedBuildingVisual,
+  NavTargetVisual,
   RiderRenderState,
   TrafficCar,
   VoxelNetEvent,
@@ -173,6 +174,7 @@ let mapUiRefreshAccum = 0;
 let mapNetRefreshAccum = 0;
 let intruderSitesBuf: IntruderSiteVisual[] = [];
 let namedBuildingsBuf: NamedBuildingVisual[] = [];
+let navTarget: NavTargetVisual | null = null;
 let shieldHudTickAccum = 0;
 let lastBlockSlowToastMs = 0;
 let lastInteractKind: 'none' | 'computer' | 'resource' | 'blueprint' = 'none';
@@ -621,6 +623,44 @@ function syncNamedBuildingVisuals(): void {
   }));
 }
 
+function startNavigation(wx: number, ws: number, label: string): void {
+  const cleanName = label.trim() || `(${Math.round(wx)}, ${Math.round(wrapTrackS(ws))})`;
+  navTarget = { name: cleanName, wx, ws: wrapTrackS(ws) };
+  audio.playUiClick();
+  hud.showToast(t('navStartedToast', { label: cleanName }), 'cyan', 'map');
+  if (worldMapModal?.isOpen()) {
+    worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+  }
+}
+
+function cancelNavigation(silent = false): void {
+  if (!navTarget) return;
+  navTarget = null;
+  hud.setNavigationHud(null);
+  if (!silent) {
+    audio.playUiClick();
+    hud.showToast(t('navCancelledToast'), 'gold', 'map');
+  }
+  if (worldMapModal?.isOpen()) {
+    worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+  }
+}
+
+function syncLocalOnFootToPlayerState(): void {
+  if (onFoot.state.active) {
+    player.state.onFoot = true;
+    player.state.footWx = onFoot.state.wx;
+    player.state.footWy = onFoot.state.wy;
+    player.state.footWs = onFoot.state.ws;
+    player.state.footYaw = onFoot.state.yaw;
+    player.state.footWalkPhase = onFoot.state.walkPhase;
+    player.state.footBlock = onFoot.state.selectedBlock;
+    player.state.footSwing = onFoot.state.swingTimer;
+  } else if (player.state.onFoot) {
+    player.state.onFoot = false;
+  }
+}
+
 function applyActiveCustomAvatar(av: SavedCustomAvatar | null, broadcast = true): void {
   activeCustomAvatarId = av?.id ?? '';
   setPeerCustomSkin(mqtt.clientId, av ? av.skin : null);
@@ -724,6 +764,7 @@ function buildWorldMapSnapshot(remoteRiders: readonly RiderRenderState[]): World
     })),
     myBuildingCenters: computeMyBuildingCenters(),
     namedBuildings,
+    navTarget,
     teleportCards: economyState.teleportCards ?? 0,
   };
 }
@@ -1449,6 +1490,9 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     audio.playUiClick();
     avatarStudioModal.open(savedCustomAvatars, activeCustomAvatarId);
   },
+  onCancelNavigation() {
+    cancelNavigation(false);
+  },
 });
 
 function applyLoggedInAccount(acc: GameAccount): void {
@@ -1532,6 +1576,13 @@ worldMapModal = new WorldMapModal(hudContainer, {
   },
   async onTeleportTo(wx, ws, label, useCard) {
     await teleportPlayerTo(wx, ws, label, useCard);
+  },
+  onNavigateTo(wx, ws, label) {
+    startNavigation(wx, ws, label);
+    worldMapModal.close();
+  },
+  onCancelNavigation() {
+    cancelNavigation(false);
   },
   async onAddMarker(name, wx, wy, ws, color) {
     const res = await serverClient.saveMapMarker({ name, wx, wy, ws, color });
@@ -2606,6 +2657,7 @@ const perfSnapshot: PerfSnapshot = {
       openAvatarStudio: () => void;
       cycleOnFootCam: () => number;
       setOffTrackQuiet: (hidden: boolean) => void;
+      navigateTo: (wx: number, ws: number, label: string) => void;
       getEconomy: () => EconomyState;
     };
   }
@@ -2637,6 +2689,7 @@ const perfSnapshot: PerfSnapshot = {
     trackInfoHidden = hidden;
     hud.setTrackInfoHidden(hidden);
   },
+  navigateTo: (wx: number, ws: number, label: string) => startNavigation(wx, ws, label),
   getEconomy: () => economyState,
 };
 
@@ -2716,7 +2769,8 @@ function frame(nowPerfMs: number): void {
 
   syncInputState();
 
-  // 1. Network sync & remote rider interpolation
+  // 1. Network sync & remote rider interpolation (sync live on-foot pose first!)
+  syncLocalOnFootToPlayerState();
   mqtt.tick(player.state, nowPerfMs, dt);
   const remoteRiders = mqtt.getRemoteRiders();
 
@@ -2854,10 +2908,36 @@ function frame(nowPerfMs: number): void {
     // Step queued AI / blueprint block placement & natural resource nodes
     stepPendingBuildQueue();
     const curPose = onFoot.state.active
-      ? { wx: onFoot.state.wx, wy: onFoot.state.wy, ws: onFoot.state.ws }
+      ? { wx: onFoot.state.wx, wy: onFoot.state.wy, ws: onFoot.state.ws, yaw: onFoot.state.yaw }
       : player.getWorldPose();
     resourceNodes.update(dt, curPose.wx, curPose.ws);
     serverClient.sendPlayerPosition(curPose.wx, curPose.wy, curPose.ws, onFoot.state.active);
+
+    // Active Navigation Waypoint distance, relative compass angle & arrival detection
+    if (navTarget) {
+      const dx = navTarget.wx - curPose.wx;
+      const ds = signedTrackDelta(navTarget.ws, curPose.ws);
+      const dist = Math.hypot(dx, ds);
+      if (dist < 8.5) {
+        const arrivedName = navTarget.name;
+        navTarget = null;
+        hud.setNavigationHud(null);
+        audio.playFuelChime();
+        hud.showToast(t('navArrivedToast', { label: arrivedName }), 'gold', 'flag');
+      } else {
+        const fwdX = -Math.sin(curPose.yaw);
+        const fwdS = Math.cos(curPose.yaw);
+        const rightX = Math.cos(curPose.yaw);
+        const rightS = Math.sin(curPose.yaw);
+        const dotFwd = dx * fwdX + ds * fwdS;
+        const dotRight = dx * rightX + ds * rightS;
+        hud.setNavigationHud({
+          name: navTarget.name,
+          distanceM: dist,
+          relativeAngleRad: Math.atan2(dotRight, dotFwd),
+        });
+      }
+    }
 
     // Hide race/track HUD automatically after leaving the highway for 10 continuous seconds
     const isOffTrackNow = Boolean(player.state.freeRoam || onFoot.state.active);
@@ -2987,7 +3067,8 @@ function frame(nowPerfMs: number): void {
     resourceNodes.getActiveNodes(),
     blueprints,
     intruderSitesBuf,
-    namedBuildingsBuf
+    namedBuildingsBuf,
+    navTarget
   );
   hud.setWeather(weather.render.current, weather.render.lightningFlash);
   hud.setEnragedWarning(ai.isAnyDeliveryEnraged());
