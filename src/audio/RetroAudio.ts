@@ -107,6 +107,11 @@ export class RetroAudio {
   private turboOsc: OscillatorNode | null = null;
   private turboGain: GainNode | null = null;
 
+  // Continuous procedural weather ambience (rain patter / fog breeze / winter wind)
+  private weatherFilter: BiquadFilterNode | null = null;
+  private weatherGain: GainNode | null = null;
+  private smoothWeatherLevel = 0;
+
   private noiseBuffer: AudioBuffer | null = null;
 
   // Lazy non-blocking studio sample bank (CC0 Freesound SFX curated via vibe-motion/sound)
@@ -290,6 +295,27 @@ export class RetroAudio {
 
         this.turboOsc = turboOsc;
         this.turboGain = turboGain;
+
+        // Subtle continuous weather ambience (reuses shared noise buffer, silent in clear/sunset)
+        const weatherSrc = ctx.createBufferSource();
+        weatherSrc.buffer = buf;
+        weatherSrc.loop = true;
+
+        const weatherFilter = ctx.createBiquadFilter();
+        weatherFilter.type = 'bandpass';
+        weatherFilter.frequency.value = 1200;
+        weatherFilter.Q.value = 0.7;
+
+        const weatherGain = ctx.createGain();
+        weatherGain.gain.value = 0;
+
+        weatherSrc.connect(weatherFilter);
+        weatherFilter.connect(weatherGain);
+        weatherGain.connect(master);
+        weatherSrc.start();
+
+        this.weatherFilter = weatherFilter;
+        this.weatherGain = weatherGain;
 
         this.initialized = true;
       } catch {
@@ -502,6 +528,64 @@ export class RetroAudio {
 
     this.turboOsc.frequency.setTargetAtTime(1480 + this.smoothRpm * 1180 + this.smoothNitro * 320, now, 0.04);
     this.turboGain.gain.setTargetAtTime(this.smoothNitro * 0.028, now, 0.04);
+  }
+
+  updateWeatherAmbience(mode: 'none' | 'rain' | 'fog' | 'snow', level: number, dt: number): void {
+    if (
+      !this.initialized ||
+      this.muted ||
+      this.bgPaused ||
+      !this.ctx ||
+      this.ctx.state !== 'running' ||
+      !this.weatherFilter ||
+      !this.weatherGain
+    ) {
+      return;
+    }
+
+    const step = dt > 0.05 ? 0.05 : dt < 0.001 ? 0.001 : dt;
+    const targetLevel = mode === 'none' ? 0 : clamp(level, 0, 1);
+    this.smoothWeatherLevel += (targetLevel - this.smoothWeatherLevel) * Math.min(1, step * 3.0);
+
+    const now = this.ctx.currentTime;
+    const freq = mode === 'rain' ? 1450 : mode === 'snow' ? 680 : 340;
+    const q = mode === 'rain' ? 0.55 : mode === 'snow' ? 1.15 : 1.6;
+    const gainScale = mode === 'rain' ? 0.052 : mode === 'snow' ? 0.03 : 0.022;
+
+    this.weatherFilter.frequency.setTargetAtTime(freq, now, 0.12);
+    this.weatherFilter.Q.setTargetAtTime(q, now, 0.12);
+    this.weatherGain.gain.setTargetAtTime(this.smoothWeatherLevel * gainScale, now, 0.1);
+  }
+
+  playThunder(intensity = 0.75): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.sfxBus || !this.noiseBuffer) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const lvl = clamp(intensity, 0.35, 1.0);
+
+    // Distant rolling low-pass thunder rumble
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(340 + lvl * 220, now);
+    lp.frequency.exponentialRampToValueAtTime(68, now + 1.45);
+    lp.Q.value = 1.4;
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(0.28 * lvl, now + 0.045);
+    g.gain.linearRampToValueAtTime(0.18 * lvl, now + 0.28);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+
+    src.connect(lp);
+    lp.connect(g);
+    g.connect(this.sfxBus);
+    src.start(now, Math.random() * 0.4, 1.55);
+
+    // Subtle deep sub-bass crack
+    this.playSubPunch(92, 28, 0.48, 0.22 * lvl);
   }
 
   private canPlaySfx(): boolean {

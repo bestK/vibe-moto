@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { t } from '../i18n';
 import { drawRiderAvatarToContext } from './PixelAvatars';
+import type { WeatherId } from './WeatherSystem';
 
 function makePixelCanvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
   const c = document.createElement('canvas');
@@ -36,6 +37,8 @@ export interface PixelTextureAtlas {
   curb: THREE.CanvasTexture;
   terrain: THREE.CanvasTexture;
   sky: THREE.CanvasTexture;
+  skies: Record<WeatherId, THREE.CanvasTexture>;
+  headlightBeam: THREE.CanvasTexture;
   wheel: THREE.CanvasTexture;
   boostPad: THREE.CanvasTexture;
   billboards: THREE.CanvasTexture[];
@@ -53,38 +56,47 @@ let _cachedAtlas: PixelTextureAtlas | null = null;
 
 export function getPixelAtlas(): PixelTextureAtlas {
   if (_cachedAtlas) return _cachedAtlas;
+  const skies: Record<WeatherId, THREE.CanvasTexture> = {
+    clear: createSkyTexture('clear'),
+    sunset: createSkyTexture('sunset'),
+    storm: createSkyTexture('storm'),
+    fog: createSkyTexture('fog'),
+    snow: createSkyTexture('snow'),
+  };
   _cachedAtlas = {
     road: createRoadTexture(),
     curb: createCurbTexture(),
     terrain: createTerrainTexture(),
-    sky: createSkyTexture(),
+    sky: skies.clear,
+    skies,
+    headlightBeam: createHeadlightBeamTexture(),
     wheel: createWheelTexture(),
     boostPad: createBoostPadTexture(),
     billboards: [
-      createBillboardTexture('VIBE 66', '#ff4d6d', '#1b1d2e', '#ffd166'),
-      createBillboardTexture('NITRO X', '#00f5d4', '#101828', '#ff9f1c'),
-      createBillboardTexture('RASH!!', '#ffbe0b', '#22181c', '#fb5607'),
-      createBillboardTexture('EMQX', '#38b000', '#0d1b2a', '#ccff33'),
+      createBillboardTexture('VIBE 66', '#ff526d', '#141926', '#ffbe3b'),
+      createBillboardTexture('NITRO X', '#38e2d4', '#101824', '#ff962e'),
+      createBillboardTexture('RASH!!', '#ffbe3b', '#1e1721', '#ff5d22'),
+      createBillboardTexture('EMQX', '#46d97c', '#0f1b24', '#c7f95a'),
     ],
     bark: createBarkTexture(),
-    foliagePine: createFoliageTexture('#1b4332', '#2d6a4f', '#40916c'),
-    foliagePalm: createFoliageTexture('#2a7221', '#4ea832', '#70c143'),
+    foliagePine: createFoliageTexture('#205948', '#317a61', '#4ca182'),
+    foliagePalm: createFoliageTexture('#2e8549', '#49b560', '#79de7d'),
     canyonRock: createRockTexture(),
     carWindows: createCarWindowTexture(),
     crate: createMysteryCrateTexture(),
     lapArch: createLapArchTexture(),
     hitWords: {
-      POW: createComicBurstTexture('POW!', '#ffe600', '#ff2a54'),
-      SMACK: createComicBurstTexture('SMACK!', '#00f5d4', '#ff595e'),
-      BONK: createComicBurstTexture('BONK!', '#ffbe0b', '#8338ec'),
-      KO: createComicBurstTexture('K.O.!', '#ff0054', '#ffe600'),
-      BOOST: createComicBurstTexture('NITRO!', '#00e5ff', '#2b7fff'),
-      SLAM: createComicBurstTexture('SLAM!', '#ffd166', '#ff4d00'),
-      FLIP: createComicBurstTexture('FLIPPED!', '#ff2a54', '#11121a'),
-      BOOM: createComicBurstTexture('BOOM!', '#ff4d00', '#ffe600'),
-      SLIP: createComicBurstTexture('SLIP!', '#ffe600', '#3a86ff'),
-      SNIPED: createComicBurstTexture('SNIPED!', '#00f5d4', '#ff0054'),
-      DODGED: createComicBurstTexture('DODGED!', '#52e065', '#00f5d4'),
+      POW: createComicBurstTexture('POW!', '#ffe14d', '#ff3b5c'),
+      SMACK: createComicBurstTexture('SMACK!', '#38e2d4', '#ff5266'),
+      BONK: createComicBurstTexture('BONK!', '#ffbe3b', '#8e5ce6'),
+      KO: createComicBurstTexture('K.O.!', '#ff2e55', '#ffe14d'),
+      BOOST: createComicBurstTexture('NITRO!', '#38e2d4', '#3b8cff'),
+      SLAM: createComicBurstTexture('SLAM!', '#ffbe3b', '#ff5d22'),
+      FLIP: createComicBurstTexture('FLIPPED!', '#ff3b5c', '#10131c'),
+      BOOM: createComicBurstTexture('BOOM!', '#ff5d22', '#ffe14d'),
+      SLIP: createComicBurstTexture('SLIP!', '#ffe14d', '#3b8cff'),
+      SNIPED: createComicBurstTexture('SNIPED!', '#38e2d4', '#ff3b5c'),
+      DODGED: createComicBurstTexture('DODGED!', '#46d97c', '#38e2d4'),
     },
   };
   return _cachedAtlas;
@@ -96,18 +108,18 @@ export function getPixelAtlas(): PixelTextureAtlas {
  */
 function createRoadTexture(): THREE.CanvasTexture {
   const [c, ctx] = makePixelCanvas(128, 128);
-  ctx.fillStyle = '#2d303e';
+  ctx.fillStyle = '#2d3446';
   ctx.fillRect(0, 0, 128, 128);
 
-  // Subtle asphalt pixel grain & tire tracks
+  // Subtle cool slate asphalt grain
   for (let y = 0; y < 128; y += 2) {
     for (let x = 0; x < 128; x += 2) {
       const h = ((x * 73 + y * 151 + x * y * 7) >>> 0) % 19;
       if (h === 0) {
-        ctx.fillStyle = '#383c4d';
+        ctx.fillStyle = '#3b4359';
         ctx.fillRect(x, y, 2, 2);
       } else if (h === 1) {
-        ctx.fillStyle = '#242733';
+        ctx.fillStyle = '#242a38';
         ctx.fillRect(x, y, 2, 2);
       }
     }
@@ -115,24 +127,24 @@ function createRoadTexture(): THREE.CanvasTexture {
 
   // Subtle worn wheel ruts in each of 4 lanes
   const rutCenters = [16, 48, 80, 112];
-  ctx.fillStyle = 'rgba(18, 20, 28, 0.34)';
+  ctx.fillStyle = 'rgba(18, 22, 33, 0.30)';
   for (const rc of rutCenters) {
     ctx.fillRect(rc - 6, 0, 4, 128);
     ctx.fillRect(rc + 2, 0, 4, 128);
   }
 
   // Crisp outer white shoulder lines
-  ctx.fillStyle = '#e8ecf2';
+  ctx.fillStyle = '#eef2f7';
   ctx.fillRect(3, 0, 3, 128);
   ctx.fillRect(122, 0, 3, 128);
 
-  // Double amber-yellow centerline
-  ctx.fillStyle = '#f8c630';
+  // Warm golden-amber double centerline
+  ctx.fillStyle = '#ffbe3b';
   ctx.fillRect(61, 0, 2, 128);
   ctx.fillRect(65, 0, 2, 128);
 
   // White dashed lane dividers (at 1/4 and 3/4)
-  ctx.fillStyle = '#edf2f4';
+  ctx.fillStyle = '#edf2f7';
   for (let y = 8; y < 128; y += 32) {
     ctx.fillRect(32, y, 2, 16);
     ctx.fillRect(94, y, 2, 16);
@@ -145,19 +157,19 @@ function createRoadTexture(): THREE.CanvasTexture {
 }
 
 /**
- * Red & cream arcade pixel rumble strip curb.
+ * Red & warm ivory arcade pixel rumble strip curb.
  */
 function createCurbTexture(): THREE.CanvasTexture {
   const [c, ctx] = makePixelCanvas(16, 32);
-  ctx.fillStyle = '#e63946';
+  ctx.fillStyle = '#e8414f';
   ctx.fillRect(0, 0, 16, 16);
-  ctx.fillStyle = '#b91c2b';
+  ctx.fillStyle = '#bd2636';
   ctx.fillRect(0, 14, 16, 2);
   ctx.fillRect(0, 0, 2, 16);
 
-  ctx.fillStyle = '#f4f1de';
+  ctx.fillStyle = '#f5f1e1';
   ctx.fillRect(0, 16, 16, 16);
-  ctx.fillStyle = '#d8d2b8';
+  ctx.fillStyle = '#dcd5bc';
   ctx.fillRect(0, 30, 16, 2);
   ctx.fillRect(0, 16, 2, 16);
 
@@ -168,24 +180,25 @@ function createCurbTexture(): THREE.CanvasTexture {
 }
 
 /**
- * Pixelated warm coastal/prairie shoulder ground with checker dithering.
+ * High-luminance neutral pixel grass/earth texture so biome & weather material tints
+ * stay vivid and clean instead of double-darkening into mud.
  */
 function createTerrainTexture(): THREE.CanvasTexture {
   const [c, ctx] = makePixelCanvas(64, 64);
-  ctx.fillStyle = '#5a7d43';
+  ctx.fillStyle = '#d4dccb';
   ctx.fillRect(0, 0, 64, 64);
 
   for (let y = 0; y < 64; y += 4) {
     for (let x = 0; x < 64; x += 4) {
       const h = ((x * 37 + y * 97) >>> 0) % 11;
       if (h < 3) {
-        ctx.fillStyle = '#4c6d37';
+        ctx.fillStyle = '#bcc7b2';
         ctx.fillRect(x, y, 4, 4);
-      } else if (h === 4) {
-        ctx.fillStyle = '#6f9653';
+      } else if (h === 4 || h === 7) {
+        ctx.fillStyle = '#e6ede0';
         ctx.fillRect(x, y, 4, 4);
       } else if (h === 5) {
-        ctx.fillStyle = '#8b7355';
+        ctx.fillStyle = '#c8c0ad';
         ctx.fillRect(x, y, 2, 2);
       }
     }
@@ -197,82 +210,270 @@ function createTerrainTexture(): THREE.CanvasTexture {
 }
 
 /**
- * Stepped pixel-art sunset sky dome texture (banded zenith-to-horizon sunset + pixel sun + stars).
+ * Crisp 512x256 HD-pixel weather sky dome generator with smooth multi-stop pixel bands
+ * (zero chunky checker artifacts), atmospheric celestial disc, and layered pixel clouds.
  */
-function createSkyTexture(): THREE.CanvasTexture {
-  const [c, ctx] = makePixelCanvas(256, 128);
+function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
+  const W = 512;
+  const H = 256;
+  const [c, ctx] = makePixelCanvas(W, H);
 
-  const bands: Array<[number, string]> = [
-    [0, '#121836'],
-    [14, '#1b264f'],
-    [28, '#2b3467'],
-    [40, '#4f3b78'],
-    [50, '#8f3f65'],
-    [58, '#d6495c'],
-    [65, '#f26a4b'],
-    [71, '#ff9843'],
-    [77, '#ffd166'],
-    [83, '#fff0b3'],
-    [88, '#3b526b'],
-    [128, '#1e2c3d'],
+  const stopsByWeather: Record<WeatherId, Array<[number, string]>> = {
+    clear: [
+      [0, '#165296'],
+      [34, '#216eb8'],
+      [70, '#368fd4'],
+      [104, '#5fb2e6'],
+      [134, '#92d1f2'],
+      [156, '#c8e9f8'],
+      [170, '#fff3d6'],
+      [178, '#638ca3'],
+      [256, '#273f52'],
+    ],
+    sunset: [
+      [0, '#141938'],
+      [32, '#242554'],
+      [66, '#432e69'],
+      [96, '#7a396d'],
+      [122, '#be4b60'],
+      [142, '#ea7149'],
+      [158, '#ffa44f'],
+      [170, '#ffe399'],
+      [178, '#464d6b'],
+      [256, '#1c2438'],
+    ],
+    storm: [
+      [0, '#0c111b'],
+      [38, '#131c2b'],
+      [78, '#1c293d'],
+      [116, '#27374f'],
+      [148, '#344761'],
+      [170, '#465c78'],
+      [178, '#28364a'],
+      [256, '#111824'],
+    ],
+    fog: [
+      [0, '#607384'],
+      [44, '#738899'],
+      [88, '#8ba0b0'],
+      [126, '#a5b8c7'],
+      [154, '#c1d1de'],
+      [172, '#d8e4ed'],
+      [178, '#95aab8'],
+      [256, '#5c6e7c'],
+    ],
+    snow: [
+      [0, '#1f3759'],
+      [40, '#31527c'],
+      [82, '#4d74a1'],
+      [118, '#779ec4'],
+      [148, '#adcbe3'],
+      [168, '#d9e9f5'],
+      [174, '#eaf4fc'],
+      [178, '#8ea7bf'],
+      [256, '#445a70'],
+    ],
+  };
+
+  // Quantize into crisp 4px stepped atmospheric ribbons (retro banded feel without jagged dither teeth)
+  const stops = stopsByWeather[weather];
+  const parseHex = (hex: string): [number, number, number] => [
+    Number.parseInt(hex.slice(1, 3), 16),
+    Number.parseInt(hex.slice(3, 5), 16),
+    Number.parseInt(hex.slice(5, 7), 16),
   ];
 
-  for (let i = 0; i < bands.length - 1; i++) {
-    const [y0, col] = bands[i];
-    const [y1] = bands[i + 1];
-    ctx.fillStyle = col;
-    ctx.fillRect(0, y0, 256, y1 - y0);
-    // Ordered Bayer-style pixel dither seam between bands
-    if (i < bands.length - 2 && y1 < 86) {
-      ctx.fillStyle = bands[i + 1][1];
-      for (let x = 0; x < 256; x += 2) {
-        ctx.fillRect(x, y1 - 1, 1, 1);
-        if (x % 4 === 0) ctx.fillRect(x + 1, y1 - 2, 1, 1);
-      }
+  const bandStep = 4;
+  for (let y = 0; y < H; y += bandStep) {
+    let seg = 0;
+    while (seg < stops.length - 2 && y >= stops[seg + 1][0]) seg++;
+    const [y0, c0Hex] = stops[seg];
+    const [y1, c1Hex] = stops[seg + 1];
+    const t = y1 > y0 ? Math.max(0, Math.min(1, (y - y0) / (y1 - y0))) : 0;
+    const [r0, g0, b0] = parseHex(c0Hex);
+    const [r1, g1, b1] = parseHex(c1Hex);
+    const r = Math.round(r0 + (r1 - r0) * t);
+    const g = Math.round(g0 + (g1 - g0) * t);
+    const b = Math.round(b0 + (b1 - b0) * t);
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(0, y, W, bandStep);
+  }
+
+  // Subtle twinkling stars in upper sunset sky
+  if (weather === 'sunset') {
+    ctx.fillStyle = 'rgba(255, 248, 220, 0.85)';
+    for (let i = 0; i < 64; i++) {
+      const sx = (i * 97 + 23) % W;
+      const sy = 6 + ((i * 41) % 62);
+      ctx.fillRect(sx, sy, 2, 2);
     }
   }
 
-  // Pixel stars in upper sky
-  ctx.fillStyle = '#fff9db';
-  for (let i = 0; i < 42; i++) {
-    const sx = (i * 53 + 17) % 256;
-    const sy = 4 + ((i * 29) % 34);
-    ctx.fillRect(sx, sy, 1, 1);
-  }
-
-  // Retro arcade striped pixel sun near forward horizon (-Z maps to u = 0.75 or 0.5)
-  const sunX = 128;
-  const sunY = 66;
-  const r = 13;
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy <= r * r) {
-        // Horizontal synthwave cutouts near bottom of sun
-        if (dy > 3 && dy % 3 === 0) continue;
-        ctx.fillStyle = dy < -2 ? '#fff7c2' : dy < 4 ? '#ffd166' : '#ff7b54';
-        ctx.fillRect(sunX + dx, sunY + dy, 1, 1);
+  // Forward celestial disc (sun aligned directly ahead at u = 0.5 -> x = 256)
+  const sunX = 256;
+  if (weather === 'clear') {
+    const sunY = 116;
+    // Soft multi-step sunlit corona (solid translucent rings, zero checkerboard noise)
+    const drawDisc = (rad: number, color: string) => {
+      ctx.fillStyle = color;
+      for (let dy = -rad; dy <= rad; dy += 2) {
+        const halfW = Math.floor(Math.sqrt(Math.max(0, rad * rad - dy * dy)) / 2) * 2;
+        if (halfW > 0) ctx.fillRect(sunX - halfW, sunY + dy, halfW * 2, 2);
       }
+    };
+    drawDisc(30, 'rgba(255, 248, 214, 0.16)');
+    drawDisc(22, 'rgba(255, 246, 204, 0.34)');
+    drawDisc(15, '#fff6cc');
+    drawDisc(11, '#fffdf2');
+  } else if (weather === 'sunset') {
+    const sunY = 134;
+    const r = 24;
+    // Warm sunset aura
+    ctx.fillStyle = 'rgba(255, 190, 108, 0.22)';
+    for (let dy = -32; dy <= 32; dy += 2) {
+      const hw = Math.floor(Math.sqrt(Math.max(0, 32 * 32 - dy * dy)) / 2) * 2;
+      if (hw > 0) ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 2);
+    }
+    for (let dy = -r; dy <= r; dy += 2) {
+      // Iconic OutRun horizontal stripe cutouts near bottom of sun
+      if (dy > 6 && dy % 6 === 0) continue;
+      const hw = Math.floor(Math.sqrt(Math.max(0, r * r - dy * dy)) / 2) * 2;
+      if (hw <= 0) continue;
+      ctx.fillStyle = dy < -4 ? '#fff8cc' : dy < 8 ? '#ffd06b' : '#ff7b4a';
+      ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 2);
+    }
+  } else if (weather === 'fog' || weather === 'snow') {
+    const sunY = 120;
+    const rOuter = 24;
+    const rInner = 14;
+    ctx.fillStyle = weather === 'fog' ? 'rgba(236, 244, 250, 0.22)' : 'rgba(238, 248, 255, 0.28)';
+    for (let dy = -rOuter; dy <= rOuter; dy += 2) {
+      const hw = Math.floor(Math.sqrt(Math.max(0, rOuter * rOuter - dy * dy)) / 2) * 2;
+      if (hw > 0) ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 2);
+    }
+    ctx.fillStyle = weather === 'fog' ? 'rgba(244, 249, 255, 0.45)' : 'rgba(246, 251, 255, 0.62)';
+    for (let dy = -rInner; dy <= rInner; dy += 2) {
+      const hw = Math.floor(Math.sqrt(Math.max(0, rInner * rInner - dy * dy)) / 2) * 2;
+      if (hw > 0) ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 2);
     }
   }
 
-  // Crisp blocky pixel clouds
-  const clouds = [
-    [28, 46, 28, 6],
-    [74, 52, 22, 5],
-    [164, 48, 30, 6],
-    [216, 42, 24, 5],
-  ];
-  for (const [cx, cy, cw, ch] of clouds) {
-    ctx.fillStyle = '#ffe5b4';
-    ctx.fillRect(cx + 4, cy - 2, cw - 8, 3);
+  // Weather-specific layered pixel clouds
+  const cloudSets: Record<
+    WeatherId,
+    { hi: string; mid: string; lo: string; rects: Array<[number, number, number, number]> }
+  > = {
+    clear: {
+      hi: '#ffffff',
+      mid: '#eef7fc',
+      lo: '#badcf2',
+      rects: [
+        [34, 88, 58, 10],
+        [130, 100, 48, 8],
+        [326, 92, 64, 10],
+        [426, 80, 52, 8],
+      ],
+    },
+    sunset: {
+      hi: '#ffebc4',
+      mid: '#f7b288',
+      lo: '#c76472',
+      rects: [
+        [46, 92, 60, 10],
+        [146, 104, 46, 8],
+        [332, 94, 62, 10],
+        [432, 84, 52, 8],
+      ],
+    },
+    storm: {
+      hi: '#4f6480',
+      mid: '#2c3d54',
+      lo: '#172233',
+      rects: [
+        [8, 66, 102, 20],
+        [114, 78, 114, 22],
+        [232, 66, 120, 22],
+        [356, 76, 110, 20],
+        [460, 70, 52, 18],
+      ],
+    },
+    fog: {
+      hi: '#d7e4ed',
+      mid: '#bdcedb',
+      lo: '#9eb4c4',
+      rects: [
+        [20, 96, 110, 12],
+        [180, 108, 124, 12],
+        [346, 98, 120, 12],
+      ],
+    },
+    snow: {
+      hi: '#eef6fc',
+      mid: '#c8dceb',
+      lo: '#92b0ca',
+      rects: [
+        [28, 80, 78, 14],
+        [140, 90, 86, 12],
+        [298, 84, 90, 14],
+        [412, 76, 74, 12],
+      ],
+    },
+  };
+
+  const cs = cloudSets[weather];
+  for (const [cx, cy, cw, ch] of cs.rects) {
+    ctx.fillStyle = cs.hi;
+    ctx.fillRect(cx + 8, cy - 4, cw - 16, 4);
+    ctx.fillStyle = cs.mid;
     ctx.fillRect(cx, cy, cw, ch);
-    ctx.fillStyle = '#f28482';
-    ctx.fillRect(cx + 2, cy + ch - 2, cw - 4, 2);
+    ctx.fillStyle = cs.lo;
+    ctx.fillRect(cx + 4, cy + ch - 4, cw - 8, 4);
   }
 
   const tex = toCrispTexture(c, 1, 1);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
+  return tex;
+}
+
+/**
+ * Soft conical pixel-arcade headlight ground glow texture (narrow at bike nose,
+ * fanning forward and fading cleanly to zero at edges — never a harsh rectangle).
+ */
+function createHeadlightBeamTexture(): THREE.CanvasTexture {
+  const W = 64;
+  const H = 128;
+  const [c, ctx] = makePixelCanvas(W, H);
+  ctx.clearRect(0, 0, W, H);
+
+  for (let y = 0; y < H; y += 2) {
+    // y = H-1 is near the bike nose (bottom of texture -> +Z), y = 0 is far ahead (-Z)
+    const distNorm = 1 - y / (H - 1); // 0 at bike nose -> 1 at far tip
+    const halfWidth = 4 + distNorm * 27;
+    const longitudinalFade =
+      distNorm < 0.08
+        ? distNorm / 0.08
+        : Math.pow(Math.max(0, 1 - (distNorm - 0.08) / 0.92), 1.65);
+
+    for (let x = 0; x < W; x += 2) {
+      const dx = Math.abs(x + 1 - W * 0.5);
+      if (dx >= halfWidth) continue;
+      const radialFade = Math.pow(1 - dx / halfWidth, 1.8);
+      const alpha = longitudinalFade * radialFade;
+      if (alpha <= 0.015) continue;
+      // Quantize alpha subtly for clean arcade feel without hard seams
+      const q = Math.min(1, Math.round(alpha * 16) / 16);
+      ctx.fillStyle = `rgba(255, 245, 204, ${(q * 0.9).toFixed(3)})`;
+      ctx.fillRect(x, y, 2, 2);
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
   return tex;
 }
 
@@ -392,12 +593,12 @@ function createFoliageTexture(dark: string, mid: string, light: string): THREE.C
 
 function createRockTexture(): THREE.CanvasTexture {
   const [c, ctx] = makePixelCanvas(16, 16);
-  ctx.fillStyle = '#b5563c';
+  ctx.fillStyle = '#c96c4a';
   ctx.fillRect(0, 0, 16, 16);
-  ctx.fillStyle = '#99432d';
+  ctx.fillStyle = '#a85134';
   ctx.fillRect(0, 4, 16, 3);
   ctx.fillRect(0, 11, 16, 3);
-  ctx.fillStyle = '#d47451';
+  ctx.fillStyle = '#e68e62';
   ctx.fillRect(2, 1, 10, 2);
   ctx.fillRect(4, 8, 9, 2);
   return toCrispTexture(c, 1, 1);

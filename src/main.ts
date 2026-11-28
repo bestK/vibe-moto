@@ -23,10 +23,11 @@ import {
   WeaponType,
 } from './game/types';
 import { CameraMode, WorldRenderer } from './game/WorldRenderer';
-import { t } from './i18n';
+import { WeatherCallbacks, WeatherId, WeatherSystem } from './game/WeatherSystem';
+import { t, weatherName } from './i18n';
 import { ConnectionStatus, MqttSync, PackSpawnTarget } from './net/MqttSync';
 import { Hud, TouchInputPatch } from './ui/Hud';
-import { ANIMAL_ICON_MAP, type PixelIconId } from './ui/PixelIcons';
+import { ANIMAL_ICON_MAP, WEATHER_ICON_MAP, type PixelIconId } from './ui/PixelIcons';
 
 const STORAGE_NAME_KEY = 'vibemoto_name';
 const STORAGE_COLOR_KEY = 'vibemoto_color';
@@ -118,6 +119,7 @@ const traffic = new TrafficSystem();
 const ai = new AiRivals();
 const items = new ItemSystem();
 const animals = new AnimalSystem();
+const weather = new WeatherSystem('clear');
 
 const GAS_STATION_STOPS = [420, 1620] as const;
 let gasRefillCooldown = 0;
@@ -382,14 +384,37 @@ function spawnParticlePreset(kind: ParticleKind, s: number, x: number, y: number
       world.spawnParticles(s, x, y, 5, 0xd4a373, 3.6, 0.2, 0.4, 4, vs);
       break;
     case 'nitro':
-      world.spawnParticles(s, x, y, 5, 0x00f5d4, 2.2, 0.18, 0.26, 0, vs);
+      world.spawnParticles(s, x, y, 5, 0x38e2d4, 2.2, 0.18, 0.26, 0, vs);
+      break;
+    case 'water':
+      world.spawnParticles(s, x, y, 4, 0xbfe4ff, 4.4, 0.14, 0.28, 12, vs);
+      break;
+    case 'snow':
+      world.spawnParticles(s, x, y, 4, 0xf0f8ff, 3.8, 0.16, 0.34, 8, vs);
       break;
     case 'crash':
-      world.spawnParticles(s, x, y, 16, 0xff4d00, 10.0, 0.22, 0.56, 15, vs);
-      world.spawnParticles(s, x, y + 0.15, 10, 0xffd166, 9.0, 0.16, 0.42, 14, vs);
+      world.spawnParticles(s, x, y, 16, 0xff5d22, 10.0, 0.22, 0.56, 15, vs);
+      world.spawnParticles(s, x, y + 0.15, 10, 0xffbe3b, 9.0, 0.16, 0.42, 14, vs);
       break;
   }
 }
+
+const weatherCallbacks: WeatherCallbacks = {
+  onWeatherChange(next: WeatherId, manual: boolean) {
+    hud.setWeather(next);
+    const accent = next === 'storm' || next === 'fog' || next === 'snow' ? 'cyan' : 'gold';
+    const icon = WEATHER_ICON_MAP[next];
+    const label = weatherName(next);
+    hud.showToast(label, accent, icon);
+    if (!manual) {
+      hud.pushBroadcast(label, accent, icon);
+    }
+  },
+  onThunder(intensity: number) {
+    audio.playThunder(intensity);
+    world.triggerShake(0.14 * intensity, 0.16);
+  },
+};
 
 hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   onNameChange(name: string) {
@@ -457,6 +482,10 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   },
   onCycleCamera() {
     return cycleCamera();
+  },
+  onCycleWeather() {
+    audio.unlock();
+    return weather.cycleWeather(weatherCallbacks);
   },
   onSelectWeapon(w: WeaponType) {
     audio.unlock();
@@ -958,6 +987,11 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
       hud.showToast(scale === 2 ? t('pixelMode') : t('hdMode'), 'gold');
       break;
     }
+    case 'KeyV': {
+      audio.unlock();
+      weather.cycleWeather(weatherCallbacks);
+      break;
+    }
   }
 });
 
@@ -1103,6 +1137,19 @@ const perfSnapshot: PerfSnapshot = {
   aspectDiff: 0,
 };
 (window as unknown as { __VMOTO_PERF__?: PerfSnapshot }).__VMOTO_PERF__ = perfSnapshot;
+(
+  window as unknown as {
+    __VMOTO_WEATHER__?: {
+      get: () => WeatherId;
+      set: (w: WeatherId) => void;
+      cycle: () => WeatherId;
+    };
+  }
+).__VMOTO_WEATHER__ = {
+  get: () => weather.getWeather(),
+  set: (w: WeatherId) => weather.setWeather(w, true, weatherCallbacks),
+  cycle: () => weather.cycleWeather(weatherCallbacks),
+};
 
 function syncPerfViewportMetrics(): void {
   const m = world.getViewportMetrics();
@@ -1196,6 +1243,8 @@ function frame(nowPerfMs: number): void {
     }
   }
 
+  weather.update(dt, weatherCallbacks);
+
   // 2. Step gameplay simulation (pauses briefly during 42ms melee hitstop)
   if (hitstopTimer > 0) {
     hitstopTimer = Math.max(0, hitstopTimer - dt);
@@ -1223,7 +1272,8 @@ function frame(nowPerfMs: number): void {
       combatTargets,
       currentTraffic,
       playerCallbacks,
-      traffic.getFallenCargo()
+      traffic.getFallenCargo(),
+      weather.physics
     );
 
     // Crossing village animals on the Chinese National Highway
@@ -1282,13 +1332,14 @@ function frame(nowPerfMs: number): void {
     items.update(dt, player.state, combatTargets, allRiders, itemCallbacks, currentTraffic);
   }
 
-  // 5. Engine audio, 3D HD-pixel frame, enraged delivery hunter & sniper HUD, and throttled HUD refresh
+  // 5. Engine + weather audio, 3D HD-pixel frame, weather FX & throttled HUD refresh
   audio.updateEngine(
     player.state.speed,
     player.state.nitroActive || player.state.turboShieldTimer > 0,
     player.state.crashed,
     dt
   );
+  audio.updateWeatherAmbience(weather.render.ambienceMode, weather.render.ambienceLevel, dt);
   world.renderFrame(
     player.state,
     allRiders,
@@ -1297,8 +1348,10 @@ function frame(nowPerfMs: number): void {
     timeSec,
     items.visuals,
     traffic.getFallenCargo(),
-    currentAnimals
+    currentAnimals,
+    weather.render
   );
+  hud.setWeather(weather.render.current, weather.render.lightningFlash);
   hud.setEnragedWarning(ai.isAnyDeliveryEnraged());
   hud.setSniperState(items.getSniperHudState(), items.getSniperCandidates());
   hud.update(player.state, allRiders, pressedKeys, dt);

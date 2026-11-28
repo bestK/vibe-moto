@@ -1,4 +1,5 @@
 import type { ItemType, WeaponType } from './game/types';
+import type { WeatherId } from './game/WeatherSystem';
 
 export type Lang = 'zh' | 'en';
 
@@ -233,6 +234,23 @@ const DELIVERY_NAMES: Readonly<Record<Lang, Readonly<Record<'meituan' | 'eleme',
   },
 };
 
+const WEATHER_NAMES: Readonly<Record<Lang, Readonly<Record<WeatherId, string>>>> = {
+  zh: {
+    clear: '晴朗',
+    sunset: '黄昏',
+    storm: '暴雨',
+    fog: '浓雾',
+    snow: '暴雪',
+  },
+  en: {
+    clear: 'CLEAR',
+    sunset: 'SUNSET',
+    storm: 'STORM',
+    fog: 'FOG',
+    snow: 'SNOW',
+  },
+};
+
 function detectInitialLang(): Lang {
   try {
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_LANG_KEY) : null;
@@ -298,6 +316,10 @@ export function weaponName(w: WeaponType): string {
 
 export function deliveryName(role: 'meituan' | 'eleme'): string {
   return DELIVERY_NAMES[currentLang][role];
+}
+
+export function weatherName(id: WeatherId): string {
+  return WEATHER_NAMES[currentLang][id];
 }
 
 export function t(key: I18nKey, vars?: Record<string, string | number>): string {

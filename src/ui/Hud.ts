@@ -27,13 +27,16 @@ import {
   t,
   toggleLang,
   weaponName,
+  weatherName,
 } from '../i18n';
 import {
   ITEM_ICON_MAP,
   PixelIconId,
   WEAPON_ICON_MAP,
+  WEATHER_ICON_MAP,
   getPixelIconSvg,
 } from './PixelIcons';
+import type { WeatherId } from '../game/WeatherSystem';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline';
 export type ToastAccent = 'gold' | 'cyan' | 'red';
@@ -70,6 +73,7 @@ export interface HudCallbacks {
   onToggleMute(): boolean;
   onTogglePixelScale(): number;
   onCycleCamera(): number;
+  onCycleWeather?(): WeatherId;
   onSelectWeapon(w: 0 | 1 | 2): void;
   onRegroupPack(): void;
   onGyroSteer(steer: number | null): void;
@@ -233,6 +237,10 @@ export class Hud {
   private readonly muteBtnEl: HTMLButtonElement;
   private readonly pxBtnEl: HTMLButtonElement;
   private readonly camPips: HTMLSpanElement[] = [];
+  private readonly weatherBtnEl: HTMLButtonElement;
+  private readonly weatherIconEl: HTMLSpanElement;
+  private readonly weatherLabelEl: HTMLSpanElement;
+  private readonly weatherFxEl: HTMLDivElement;
   private readonly homeBtnEl: HTMLButtonElement;
   private readonly langBtnEl: HTMLButtonElement;
   private readonly gyroBtnEl: HTMLButtonElement;
@@ -327,6 +335,8 @@ export class Hud {
   private muted = false;
   private pixelScale = 1;
   private cameraMode = 0;
+  private currentWeather: WeatherId = 'clear';
+  private lastWeatherFlash = false;
   private connStatus: ConnectionStatus = 'connecting';
   private onlineCount = 1;
   private hasOnlinePeers = false;
@@ -644,6 +654,26 @@ export class Hud {
       camBtnEl.blur();
     });
 
+    this.weatherBtnEl = document.createElement('button');
+    this.weatherBtnEl.type = 'button';
+    this.weatherBtnEl.className = 'vm-btn vm-btn-weather';
+    this.weatherBtnEl.dataset.weather = this.currentWeather;
+    this.weatherBtnEl.setAttribute('aria-label', 'Cycle weather');
+    this.weatherIconEl = document.createElement('span');
+    this.weatherIconEl.className = 'vm-btn-icon';
+    this.weatherIconEl.innerHTML = getPixelIconSvg(WEATHER_ICON_MAP[this.currentWeather]);
+    this.weatherLabelEl = document.createElement('span');
+    this.weatherLabelEl.className = 'vm-weather-label';
+    this.weatherLabelEl.textContent = weatherName(this.currentWeather);
+    this.weatherBtnEl.append(this.weatherIconEl, this.weatherLabelEl);
+    this.weatherBtnEl.addEventListener('click', () => {
+      const next = this.callbacks.onCycleWeather?.();
+      if (next) {
+        this.setWeather(next);
+      }
+      this.weatherBtnEl.blur();
+    });
+
     this.langBtnEl = document.createElement('button');
     this.langBtnEl.type = 'button';
     this.langBtnEl.className = 'vm-btn vm-btn-lang';
@@ -686,6 +716,7 @@ export class Hud {
       this.muteBtnEl,
       this.pxBtnEl,
       camBtnEl,
+      this.weatherBtnEl,
       this.langBtnEl,
       this.gyroBtnEl,
       this.regroupBtnEl
@@ -1179,6 +1210,10 @@ export class Hud {
     this.keycapsEl = this.buildKeycaps();
     const touchLayer = this.buildTouchControls();
 
+    this.weatherFxEl = document.createElement('div');
+    this.weatherFxEl.className = 'vm-weather-fx';
+    this.weatherFxEl.dataset.weather = this.currentWeather;
+
     this.tapFlashLeftEl = document.createElement('div');
     this.tapFlashLeftEl.className = 'vm-tap-flash vm-tap-flash-left';
 
@@ -1363,6 +1398,7 @@ export class Hud {
     this.homeOverlayEl.appendChild(homeCard);
 
     this.root.append(
+      this.weatherFxEl,
       this.tapFlashLeftEl,
       this.tapFlashRightEl,
       topLeftCol,
@@ -1662,6 +1698,21 @@ export class Hud {
     this.applyCameraMode(mode);
   }
 
+  setWeather(weather: WeatherId, lightningFlash = 0): void {
+    if (weather !== this.currentWeather) {
+      this.currentWeather = weather;
+      this.weatherBtnEl.dataset.weather = weather;
+      this.weatherIconEl.innerHTML = getPixelIconSvg(WEATHER_ICON_MAP[weather]);
+      this.weatherLabelEl.textContent = weatherName(weather);
+      this.weatherFxEl.dataset.weather = weather;
+    }
+    const flashing = lightningFlash > 0.16;
+    if (flashing !== this.lastWeatherFlash) {
+      this.lastWeatherFlash = flashing;
+      this.weatherFxEl.classList.toggle('is-flash', flashing);
+    }
+  }
+
   isEditingName(): boolean {
     return this.editingName;
   }
@@ -1794,6 +1845,7 @@ export class Hud {
 
   private applyLocale(): void {
     this.langBtnEl.textContent = t('langBtn');
+    this.weatherLabelEl.textContent = weatherName(this.currentWeather);
     this.homeBtnEl.title = t('homeTitle');
     this.homeTitleTextEl.textContent = t('homeTitle');
     this.homeCopyBtnEl.title = t('copyLink');
@@ -2418,7 +2470,7 @@ export class Hud {
       const rect = leftStick.getBoundingClientRect();
       leftCx = rect.left + rect.width * 0.5;
       leftCy = rect.top + rect.height * 0.5;
-      leftMaxR = Math.max(18, rect.width * 0.36);
+      leftMaxR = Math.max(24, rect.width * 0.34);
       leftStick.classList.add('is-active');
       updateLeftStick(e.clientX, e.clientY);
     });
@@ -2538,7 +2590,8 @@ export class Hud {
 
     const resetRightStick = (allowTap: boolean): void => {
       const elapsed = performance.now() - rightDownMs;
-      const isQuickTap = allowTap && elapsed < 220 && rightMaxDist < 10 && !rightItemFired;
+      const tapSlop = Math.max(11, rightMaxR * 0.32);
+      const isQuickTap = allowTap && elapsed < 220 && rightMaxDist < tapSlop && !rightItemFired;
 
       rightPid = null;
       rightItemFired = false;
@@ -2584,7 +2637,7 @@ export class Hud {
       const rect = rightStick.getBoundingClientRect();
       rightCx = rect.left + rect.width * 0.5;
       rightCy = rect.top + rect.height * 0.5;
-      rightMaxR = Math.max(18, rect.width * 0.36);
+      rightMaxR = Math.max(24, rect.width * 0.34);
       rightStick.classList.add('is-active');
       updateRightStick(e.clientX, e.clientY);
     });
@@ -2956,7 +3009,7 @@ export class Hud {
           : role === 'eleme'
             ? '#0091ff'
             : isLocal
-              ? '#ffd166'
+              ? '#ffbe3b'
               : getRiderColor(rider.colorIdx, rider.isBot);
       const avatarIdx = normalizeAvatarIdx(rider.avatarIdx);
       const avatarVer = getAvatarVersion(rider.id);

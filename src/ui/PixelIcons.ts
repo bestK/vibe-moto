@@ -1,5 +1,6 @@
 import type { AnimalSpecies } from '../game/AnimalSystem';
 import type { ItemType, WeaponType } from '../game/types';
+import type { WeatherId } from '../game/WeatherSystem';
 
 export type PixelIconId =
   | 'edit'
@@ -30,6 +31,11 @@ export type PixelIconId =
   | 'copy'
   | 'dice'
   | 'door'
+  | 'weather_clear'
+  | 'weather_sunset'
+  | 'weather_storm'
+  | 'weather_fog'
+  | 'weather_snow'
   | 'item_rpg'
   | 'item_airstrike'
   | 'item_sniper'
@@ -318,6 +324,54 @@ const ICON_BODIES: Readonly<Record<PixelIconId, string>> = {
     '<rect x="5" y="5" width="6" height="6" fill="#ffe600"/>' +
     '<rect x="7" y="7" width="2" height="2" fill="#ffffff"/>',
 
+  // --- 5 Weather Icons ---
+  weather_clear:
+    '<rect x="7" y="1" width="2" height="2" fill="#ffbe3b"/>' +
+    '<rect x="7" y="13" width="2" height="2" fill="#ffbe3b"/>' +
+    '<rect x="1" y="7" width="2" height="2" fill="#ffbe3b"/>' +
+    '<rect x="13" y="7" width="2" height="2" fill="#ffbe3b"/>' +
+    '<rect x="3" y="3" width="2" height="2" fill="#ff962e"/>' +
+    '<rect x="11" y="3" width="2" height="2" fill="#ff962e"/>' +
+    '<rect x="3" y="11" width="2" height="2" fill="#ff962e"/>' +
+    '<rect x="11" y="11" width="2" height="2" fill="#ff962e"/>' +
+    '<rect x="5" y="4" width="6" height="8" fill="#ffbe3b"/>' +
+    '<rect x="4" y="5" width="8" height="6" fill="#ffbe3b"/>' +
+    '<rect x="6" y="6" width="4" height="4" fill="#fff5cc"/>',
+
+  weather_sunset:
+    '<rect x="5" y="3" width="6" height="2" fill="#ffe173"/>' +
+    '<rect x="3" y="5" width="10" height="3" fill="#ffbe3b"/>' +
+    '<rect x="4" y="8" width="8" height="2" fill="#ff7a45"/>' +
+    '<rect x="1" y="10" width="14" height="2" fill="#ff3b5c"/>' +
+    '<rect x="3" y="13" width="10" height="2" fill="#7c4dff"/>',
+
+  weather_storm:
+    '<rect x="4" y="2" width="6" height="2" fill="#94a3b8"/>' +
+    '<rect x="2" y="4" width="11" height="4" fill="#cbd5e1"/>' +
+    '<rect x="3" y="6" width="11" height="3" fill="#64748b"/>' +
+    '<rect x="7" y="9" width="3" height="2" fill="#ffbe3b"/>' +
+    '<rect x="6" y="11" width="3" height="2" fill="#ffe173"/>' +
+    '<rect x="7" y="13" width="2" height="2" fill="#ff962e"/>' +
+    '<rect x="3" y="10" width="1" height="3" fill="#60b4ff"/>' +
+    '<rect x="11" y="10" width="1" height="3" fill="#60b4ff"/>' +
+    '<rect x="13" y="11" width="1" height="3" fill="#60b4ff"/>',
+
+  weather_fog:
+    '<rect x="2" y="3" width="9" height="2" fill="#dbe6f0"/>' +
+    '<rect x="5" y="6" width="9" height="2" fill="#b4c8d9"/>' +
+    '<rect x="1" y="9" width="11" height="2" fill="#dbe6f0"/>' +
+    '<rect x="4" y="12" width="10" height="2" fill="#8fa8bd"/>',
+
+  weather_snow:
+    '<rect x="7" y="1" width="2" height="14" fill="#e6f4ff"/>' +
+    '<rect x="1" y="7" width="14" height="2" fill="#e6f4ff"/>' +
+    '<rect x="3" y="3" width="2" height="2" fill="#9bd1ff"/>' +
+    '<rect x="11" y="3" width="2" height="2" fill="#9bd1ff"/>' +
+    '<rect x="3" y="11" width="2" height="2" fill="#9bd1ff"/>' +
+    '<rect x="11" y="11" width="2" height="2" fill="#9bd1ff"/>' +
+    '<rect x="5" y="5" width="6" height="6" fill="#9bd1ff"/>' +
+    '<rect x="6" y="6" width="4" height="4" fill="#ffffff"/>',
+
   // --- 8 Powerup Item Icons ---
   item_rpg:
     '<rect x="10" y="2" width="4" height="4" fill="#ff4d00"/>' +
@@ -515,6 +569,14 @@ export const WEAPON_ICON_MAP: Readonly<Record<WeaponType, PixelIconId>> = {
   0: 'weapon_fist',
   1: 'weapon_bat',
   2: 'weapon_chain',
+};
+
+export const WEATHER_ICON_MAP: Readonly<Record<WeatherId, PixelIconId>> = {
+  clear: 'weather_clear',
+  sunset: 'weather_sunset',
+  storm: 'weather_storm',
+  fog: 'weather_fog',
+  snow: 'weather_snow',
 };
 
 const svgCache = new Map<string, string>();

@@ -23,14 +23,14 @@ export interface ItemSpec {
 }
 
 export const ITEMS: readonly ItemSpec[] = [
-  { id: 'rpg', idx: 0, code: 'RPG', zhName: 'RPG 火箭筒', icon: 'item_rpg', color: '#ff4d00', needsTarget: false },
-  { id: 'airstrike', idx: 1, code: 'AIR', zhName: '空中支援', icon: 'item_airstrike', color: '#ff0054', needsTarget: false },
-  { id: 'sniper', idx: 2, code: 'SNP', zhName: '狙击枪', icon: 'item_sniper', color: '#00f5d4', needsTarget: true },
-  { id: 'police', idx: 3, code: 'COP', zhName: '警车拦截', icon: 'item_police', color: '#3a86ff', needsTarget: false },
-  { id: 'turbo', idx: 4, code: 'MAX', zhName: '超级加速', icon: 'item_turbo', color: '#ffd166', needsTarget: false },
-  { id: 'trap', idx: 5, code: 'TRP', zhName: '路钉陷阱', icon: 'item_trap', color: '#ef233c', needsTarget: false },
-  { id: 'magnet', idx: 6, code: 'MAG', zhName: '磁铁', icon: 'item_magnet', color: '#9b5de5', needsTarget: false },
-  { id: 'banana', idx: 7, code: 'BAN', zhName: '香蕉皮', icon: 'item_banana', color: '#ffe600', needsTarget: false },
+  { id: 'rpg', idx: 0, code: 'RPG', zhName: 'RPG 火箭筒', icon: 'item_rpg', color: '#ff6b2b', needsTarget: false },
+  { id: 'airstrike', idx: 1, code: 'AIR', zhName: '空中支援', icon: 'item_airstrike', color: '#ff3b5c', needsTarget: false },
+  { id: 'sniper', idx: 2, code: 'SNP', zhName: '狙击枪', icon: 'item_sniper', color: '#38e2d4', needsTarget: true },
+  { id: 'police', idx: 3, code: 'COP', zhName: '警车拦截', icon: 'item_police', color: '#4c9aff', needsTarget: false },
+  { id: 'turbo', idx: 4, code: 'MAX', zhName: '超级加速', icon: 'item_turbo', color: '#ffbe3b', needsTarget: false },
+  { id: 'trap', idx: 5, code: 'TRP', zhName: '路钉陷阱', icon: 'item_trap', color: '#f24b60', needsTarget: false },
+  { id: 'magnet', idx: 6, code: 'MAG', zhName: '磁铁', icon: 'item_magnet', color: '#a875ff', needsTarget: false },
+  { id: 'banana', idx: 7, code: 'BAN', zhName: '香蕉皮', icon: 'item_banana', color: '#ffe14d', needsTarget: false },
 ] as const;
 
 export const ITEM_BY_ID: Record<ItemType, ItemSpec> = {
@@ -104,24 +104,24 @@ export interface BikePalette {
 }
 
 export const BIKE_PALETTES: readonly BikePalette[] = [
-  { name: 'CRIMSON', primary: '#e63946', secondary: '#1d1e2c', jacket: '#232533', helmet: '#f1faee', visor: '#00f5d4', accent: '#ffb703' },
-  { name: 'COBALT', primary: '#2b7fff', secondary: '#141b2d', jacket: '#1c2541', helmet: '#ffd166', visor: '#ff595e', accent: '#00e5ff' },
-  { name: 'ACID', primary: '#52e065', secondary: '#18241d', jacket: '#22222b', helmet: '#1a1a24', visor: '#aaff00', accent: '#ffdd00' },
-  { name: 'AMBER', primary: '#ff9f1c', secondary: '#261a14', jacket: '#2b1e19', helmet: '#fff3e0', visor: '#ff2a6d', accent: '#ffe66d' },
-  { name: 'VIOLET', primary: '#9b5de5', secondary: '#1b1429', jacket: '#251a38', helmet: '#f8f7ff', visor: '#00f5d4', accent: '#f15bb5' },
-  { name: 'CYAN', primary: '#00bbf9', secondary: '#10202b', jacket: '#172530', helmet: '#ff4d6d', visor: '#ffe66d', accent: '#72efdd' },
-  { name: 'PEARL', primary: '#edf2f4', secondary: '#2b2d42', jacket: '#d90429', helmet: '#1a1b26', visor: '#ffbe0b', accent: '#ef233c' },
-  { name: 'MAGMA', primary: '#ff4d00', secondary: '#211515', jacket: '#1e1b1e', helmet: '#ffbe0b', visor: '#3a86ff', accent: '#fff07c' },
+  { name: 'CRIMSON', primary: '#ef3e56', secondary: '#1c202e', jacket: '#232838', helmet: '#f4f7fb', visor: '#38e2d4', accent: '#ffbe3b' },
+  { name: 'COBALT', primary: '#3b8cff', secondary: '#151d30', jacket: '#1d2842', helmet: '#ffbe3b', visor: '#ff5266', accent: '#5ce8e0' },
+  { name: 'EMERALD', primary: '#46d97c', secondary: '#17261f', jacket: '#1f262e', helmet: '#1a2029', visor: '#b6f55c', accent: '#ffda47' },
+  { name: 'AMBER', primary: '#ff962e', secondary: '#261c16', jacket: '#2d211b', helmet: '#fff5e4', visor: '#ff3b6b', accent: '#ffe173' },
+  { name: 'VIOLET', primary: '#9f6ef5', secondary: '#1d172e', jacket: '#261e3b', helmet: '#f8f7ff', visor: '#38e2d4', accent: '#ff6db8' },
+  { name: 'CYAN', primary: '#26c6f0', secondary: '#12222e', jacket: '#192a38', helmet: '#ff526d', visor: '#ffe173', accent: '#7ef2e2' },
+  { name: 'PEARL', primary: '#edf2f7', secondary: '#282d40', jacket: '#de2b43', helmet: '#191d29', visor: '#ffbe3b', accent: '#ff3b5c' },
+  { name: 'MAGMA', primary: '#ff5d22', secondary: '#241818', jacket: '#211d22', helmet: '#ffbe3b', visor: '#4c9aff', accent: '#ffea75' },
 ] as const;
 
 export const BOT_PALETTE: BikePalette = {
   name: 'BOT',
-  primary: '#8d99ae',
-  secondary: '#2b2d42',
-  jacket: '#3d405b',
-  helmet: '#edf2f4',
-  visor: '#ef233c',
-  accent: '#ffd166',
+  primary: '#97a6bd',
+  secondary: '#282e42',
+  jacket: '#3a425c',
+  helmet: '#edf2f7',
+  visor: '#ff3b5c',
+  accent: '#ffbe3b',
 };
 
 export interface RiderRenderState {

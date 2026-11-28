@@ -21,6 +21,7 @@ import { CrossingAnimal } from './AnimalSystem';
 import { BikeVisual } from './BikeModel';
 import { ItemVisuals } from './ItemSystem';
 import { BIKE_PALETTES, FallenCargo, RiderRenderState, TrafficCar } from './types';
+import type { WeatherId, WeatherRenderSnapshot } from './WeatherSystem';
 
 // Progressive road LOD slices: 3m near camera (-24m..+108m), 6m far (+114m..+324m)
 // Snapping baseS to 6m (LCM of 3 & 6) eliminates vertex shimmer while cutting ~30% road verts & trig calls.
@@ -40,6 +41,7 @@ const MAX_FALLEN_CARGO_RENDER = 20;
 const MAX_ANIMAL_RENDER = 16;
 const MAX_SIREN_RENDER = 12;
 const MAX_POPUPS = 14;
+const MAX_WEATHER_DROPS = 240;
 
 const CARGO_DEBRIS_COLORS = [0x3b82f6, 0xc68642, 0x52b788, 0xe9c46a, 0xd62828, 0x8d99ae] as const;
 const TRUCK_CARGO_TINTS = [0xffffff, 0xd8a47f, 0x80ed99] as const;
@@ -141,22 +143,30 @@ interface HitPopup {
 }
 
 const CAR_COLORS = [
-  0xd62828, 0x2a9d8f, 0xe9c46a, 0x457b9d, 0xf4a261, 0x7209b7, 0x52b788, 0xe5e5e5,
+  0xe63946, 0x2a9d8f, 0xf4c44e, 0x3f84c7, 0xf78c4f, 0x8b5cf6, 0x46c97a, 0xe8edf2,
 ];
 
 const BIOME_FOG = [
-  new THREE.Color('#ff9b6a'), // 0 Coastal sunset
-  new THREE.Color('#d98a6c'), // 1 Pine highland
-  new THREE.Color('#e07a5f'), // 2 Red canyon
-  new THREE.Color('#352a5c'), // 3 Twilight neon
+  new THREE.Color('#c8e4f5'), // 0 Coastal sky-horizon
+  new THREE.Color('#b6dec9'), // 1 Pine highland
+  new THREE.Color('#e8b288'), // 2 Red canyon
+  new THREE.Color('#475285'), // 3 Twilight neon ridge
 ];
 
 const BIOME_TERRAIN_TINT = [
-  new THREE.Color('#c2a878'), // warm sandy coast
-  new THREE.Color('#5a8f49'), // lush highland pine
-  new THREE.Color('#b85d3b'), // red canyon mesa
-  new THREE.Color('#354066'), // twilight ridge
+  new THREE.Color('#84b565'), // sunlit coastal meadow
+  new THREE.Color('#5a9e60'), // lush highland pine valley
+  new THREE.Color('#d48455'), // warm terracotta canyon mesa
+  new THREE.Color('#4b5d8a'), // cool indigo twilight ridge
 ];
+
+interface WeatherDrop {
+  rx: number;
+  ry: number;
+  rz: number;
+  phase: number;
+  speedMul: number;
+}
 
 export class WorldRenderer {
   readonly renderer: THREE.WebGLRenderer;
@@ -164,11 +174,24 @@ export class WorldRenderer {
   readonly camera: THREE.PerspectiveCamera;
   private readonly fog: THREE.Fog;
   private readonly skyDome: THREE.Mesh;
+  private readonly skyDomeMat: THREE.MeshBasicMaterial;
+  private readonly skyDomeBlend: THREE.Mesh;
+  private readonly skyDomeBlendMat: THREE.MeshBasicMaterial;
   private readonly sunLight: THREE.DirectionalLight;
   private readonly hemiLight: THREE.HemisphereLight;
+  private readonly headlightBeam: THREE.Mesh;
+  private readonly headlightBeamMat: THREE.MeshBasicMaterial;
+  private readonly weatherDropsInst: THREE.InstancedMesh;
+  private readonly weatherDropsMat: THREE.MeshBasicMaterial;
+  private readonly weatherDrops: WeatherDrop[] = [];
+  private lastWeatherDropCount = 0;
+  private lastSkyWeather: WeatherId = 'clear';
+  private lastSkyPrev: WeatherId = 'clear';
+  private lastWeatherLampBoost = false;
 
   // Dynamic sliding road geometries (updated in-place, 0 allocs/frame)
   private readonly roadGeo: THREE.BufferGeometry;
+  private readonly roadMat: THREE.MeshLambertMaterial;
   private readonly curbLGeo: THREE.BufferGeometry;
   private readonly curbRGeo: THREE.BufferGeometry;
   private readonly terrainLGeo: THREE.BufferGeometry;
@@ -280,6 +303,9 @@ export class WorldRenderer {
   private readonly _scale = new THREE.Vector3();
   private readonly _dummy = new THREE.Object3D();
   private readonly _tmpColor = new THREE.Color();
+  private readonly _targetFogColor = new THREE.Color();
+  private readonly _targetTerrainColor = new THREE.Color();
+  private readonly _flashColor = new THREE.Color('#eef6ff');
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({
@@ -292,41 +318,94 @@ export class WorldRenderer {
     this.renderer.toneMapping = THREE.NoToneMapping;
 
     this.scene = new THREE.Scene();
-    this.fog = new THREE.Fog('#ff9b6a', 95, 315);
+    this.fog = new THREE.Fog('#9cd3f0', 112, 345);
     this.scene.fog = this.fog;
 
     this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.25, 620);
 
     const atlas = getPixelAtlas();
 
-    // Crisp sunset sky dome
+    // Dual-layer pixel sky domes for seamless zero-pop weather crossfading (1 draw call when steady)
     const skyGeo = new THREE.SphereGeometry(460, 24, 16);
-    const skyMat = new THREE.MeshBasicMaterial({
-      map: atlas.sky,
+    this.skyDomeMat = new THREE.MeshBasicMaterial({
+      map: atlas.skies.clear,
       side: THREE.BackSide,
       fog: false,
       depthWrite: false,
     });
-    this.skyDome = new THREE.Mesh(skyGeo, skyMat);
-    this.skyDome.rotation.y = Math.PI * 0.5; // place retro sun directly ahead (-Z)
+    this.skyDome = new THREE.Mesh(skyGeo, this.skyDomeMat);
+    this.skyDome.rotation.y = Math.PI * 0.5;
     this.scene.add(this.skyDome);
 
-    // Punchy arcade golden-hour lighting
-    this.hemiLight = new THREE.HemisphereLight('#ffe5b4', '#384163', 1.15);
+    const skyBlendGeo = new THREE.SphereGeometry(452, 24, 16);
+    this.skyDomeBlendMat = new THREE.MeshBasicMaterial({
+      map: atlas.skies.clear,
+      side: THREE.BackSide,
+      fog: false,
+      depthWrite: false,
+      transparent: true,
+      opacity: 0,
+    });
+    this.skyDomeBlend = new THREE.Mesh(skyBlendGeo, this.skyDomeBlendMat);
+    this.skyDomeBlend.rotation.y = Math.PI * 0.5;
+    this.skyDomeBlend.visible = false;
+    this.scene.add(this.skyDomeBlend);
+
+    // Crisp arcade lighting (smoothly modulated by WeatherSystem)
+    this.hemiLight = new THREE.HemisphereLight('#b6e0ff', '#4a5b50', 1.24);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight('#ffd89b', 1.55);
+    this.sunLight = new THREE.DirectionalLight('#fff1d4', 1.52);
     this.sunLight.position.set(18, 42, -90);
     this.scene.add(this.sunLight);
 
     // Sliding ribbon meshes (road, curbs, terrain shoulders)
     this.roadGeo = this.createRibbonGeometry(ROAD_SLICES);
-    const roadMesh = new THREE.Mesh(
-      this.roadGeo,
-      new THREE.MeshLambertMaterial({ map: atlas.road })
-    );
+    this.roadMat = new THREE.MeshLambertMaterial({ map: atlas.road, color: 0xffffff });
+    const roadMesh = new THREE.Mesh(this.roadGeo, this.roadMat);
     roadMesh.frustumCulled = false;
     this.scene.add(roadMesh);
+
+    // Local bike soft conical headlight beam for low-visibility weather (Storm, Fog, Snow, Sunset)
+    const beamGeo = new THREE.PlaneGeometry(5.8, 26.0);
+    beamGeo.rotateX(-Math.PI / 2);
+    beamGeo.translate(0, 0, -13.4);
+    this.headlightBeamMat = new THREE.MeshBasicMaterial({
+      map: atlas.headlightBeam,
+      color: 0xfff5d4,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+    });
+    this.headlightBeam = new THREE.Mesh(beamGeo, this.headlightBeamMat);
+    this.headlightBeam.visible = false;
+    this.scene.add(this.headlightBeam);
+
+    // Instanced 3D weather precipitation pool (rain streaks / drifting snowflakes / fog wisps)
+    const dropGeo = new THREE.BoxGeometry(1, 1, 1);
+    this.weatherDropsMat = new THREE.MeshBasicMaterial({
+      color: 0xcce8ff,
+      transparent: true,
+      opacity: 0.62,
+      depthWrite: false,
+    });
+    this.weatherDropsInst = new THREE.InstancedMesh(dropGeo, this.weatherDropsMat, MAX_WEATHER_DROPS);
+    this.weatherDropsInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.weatherDropsInst.frustumCulled = false;
+    this.weatherDropsInst.count = 0;
+    this.scene.add(this.weatherDropsInst);
+    for (let i = 0; i < MAX_WEATHER_DROPS; i++) {
+      this.weatherDrops.push({
+        rx: (Math.random() - 0.5) * 44,
+        ry: Math.random() * 18,
+        rz: -2 - Math.random() * 48,
+        phase: Math.random() * Math.PI * 2,
+        speedMul: 0.78 + Math.random() * 0.48,
+      });
+    }
 
     const curbMat = new THREE.MeshLambertMaterial({ map: atlas.curb });
     this.curbLGeo = this.createRibbonGeometry(ROAD_SLICES);
@@ -1009,7 +1088,8 @@ export class WorldRenderer {
     timeSec: number,
     itemVisuals?: ItemVisuals,
     fallenCargo?: readonly FallenCargo[],
-    animals?: readonly CrossingAnimal[]
+    animals?: readonly CrossingAnimal[],
+    weather?: WeatherRenderSnapshot
   ): void {
     // Self-healing zero-stretch guard: ensures camera.aspect & WebGL buffer ALWAYS match actual CSS canvas box
     const dom = this.renderer.domElement;
@@ -1031,12 +1111,16 @@ export class WorldRenderer {
     const originX = roadX(originS);
     const originY = roadY(originS);
 
-    // Smooth biome atmosphere blending
+    // Smooth biome + weather atmosphere blending
     const biome = getBiomeAt(originS);
-    this.smoothFogColor.lerp(BIOME_FOG[biome], Math.min(1, dt * 1.4));
-    this.fog.color.copy(this.smoothFogColor);
-    this.smoothTerrainTint.lerp(BIOME_TERRAIN_TINT[biome], Math.min(1, dt * 1.4));
-    this.terrainMat.color.copy(this.smoothTerrainTint);
+    if (weather) {
+      this.applyWeatherAtmosphere(biome, weather, dt);
+    } else {
+      this.smoothFogColor.lerp(BIOME_FOG[biome], Math.min(1, dt * 1.4));
+      this.fog.color.copy(this.smoothFogColor);
+      this.smoothTerrainTint.lerp(BIOME_TERRAIN_TINT[biome], Math.min(1, dt * 1.4));
+      this.terrainMat.color.copy(this.smoothTerrainTint);
+    }
 
     // 1. Update sliding road & terrain ribbons
     this.updateRoadRibbons(originS, originX, originY);
@@ -1069,10 +1153,221 @@ export class WorldRenderer {
     // 7. Update arcade camera
     this.updateCamera(local, originS, originX, originY, dt);
 
-    // Keep sky dome centered on camera
+    // 8. Update local bike headlight beam & 3D weather precipitation
+    if (weather) {
+      this.updateHeadlightBeam(local, originS, originX, originY, weather);
+      this.updateWeatherPrecipitation(weather, local.speed, dt, timeSec);
+    }
+
+    // Keep sky domes centered on camera
     this.skyDome.position.copy(this.camera.position);
+    if (this.skyDomeBlend.visible) {
+      this.skyDomeBlend.position.copy(this.camera.position);
+    }
 
     this.renderer.render(this.scene, this.camera);
+  }
+
+  private applyWeatherAtmosphere(biome: number, w: WeatherRenderSnapshot, dt: number): void {
+    const atlas = getPixelAtlas();
+    const rate = Math.min(1, dt * 2.2);
+
+    // Crossfade sky dome textures cleanly with 0 extra draw calls when steady
+    if (w.transition < 0.999) {
+      if (this.lastSkyPrev !== w.prev || this.lastSkyWeather !== w.current) {
+        this.lastSkyPrev = w.prev;
+        this.lastSkyWeather = w.current;
+        this.skyDomeMat.map = atlas.skies[w.prev];
+        this.skyDomeMat.needsUpdate = true;
+        this.skyDomeBlendMat.map = atlas.skies[w.current];
+        this.skyDomeBlendMat.needsUpdate = true;
+      }
+      this.skyDomeBlend.visible = true;
+      this.skyDomeBlendMat.opacity = w.transition;
+    } else {
+      if (this.lastSkyWeather !== w.current || this.skyDomeMat.map !== atlas.skies[w.current]) {
+        this.lastSkyWeather = w.current;
+        this.lastSkyPrev = w.current;
+        this.skyDomeMat.map = atlas.skies[w.current];
+        this.skyDomeMat.needsUpdate = true;
+      }
+      if (this.skyDomeBlend.visible) {
+        this.skyDomeBlend.visible = false;
+      }
+    }
+
+    // Lightning flash briefly brightens sky dome & lighting in storm
+    const flash = w.lightningFlash;
+    if (flash > 0.01) {
+      this._tmpColor.setRGB(1 + flash * 0.85, 1 + flash * 0.92, 1 + flash * 1.15);
+      this.skyDomeMat.color.copy(this._tmpColor);
+    } else {
+      this.skyDomeMat.color.setHex(0xffffff);
+    }
+
+    // Fog color & visibility depth
+    this._targetFogColor.copy(w.fogColor).lerp(BIOME_FOG[biome], w.fogBlendBiome);
+    if (flash > 0.01) {
+      this._targetFogColor.lerp(this._flashColor, flash * 0.55);
+    }
+    this.smoothFogColor.lerp(this._targetFogColor, rate);
+    this.fog.color.copy(this.smoothFogColor);
+    this.fog.near = w.fogNear;
+    this.fog.far = w.fogFar;
+
+    // Terrain & wet/frosted road color grading
+    this._targetTerrainColor.copy(BIOME_TERRAIN_TINT[biome]).lerp(w.terrainTint, w.terrainBlend);
+    this.smoothTerrainTint.lerp(this._targetTerrainColor, rate);
+    this.terrainMat.color.copy(this.smoothTerrainTint);
+    this.roadMat.color.copy(w.roadTint);
+
+    // Directional sunlight + hemisphere ambient lighting
+    this.sunLight.color.copy(w.sunColor);
+    this.sunLight.intensity = w.sunIntensity + flash * 1.75;
+    this.hemiLight.color.copy(w.hemiSky);
+    this.hemiLight.groundColor.copy(w.hemiGround);
+    this.hemiLight.intensity = w.hemiIntensity + flash * 0.95;
+
+    this.lastWeatherLampBoost = w.lampBoost;
+  }
+
+  private updateHeadlightBeam(
+    local: RiderRenderState,
+    originS: number,
+    originX: number,
+    originY: number,
+    w: WeatherRenderSnapshot
+  ): void {
+    const op = local.crashed ? 0 : w.headlightOpacity * 0.62;
+    if (op <= 0.015) {
+      if (this.headlightBeam.visible) {
+        this.headlightBeam.visible = false;
+      }
+      return;
+    }
+    this.headlightBeam.visible = true;
+    this.headlightBeamMat.opacity = op;
+    sampleRoadFrame(local.s, this._f);
+    roadFrameToLocalWorld(this._f, local.s, local.x, 0.14 + local.y * 0.25, originS, originX, originY, this._v1);
+    this.headlightBeam.position.copy(this._v1);
+    this.setRoadBasisQuaternion(this._f, this.headlightBeam.quaternion);
+  }
+
+  private updateWeatherPrecipitation(
+    w: WeatherRenderSnapshot,
+    playerSpeed: number,
+    dt: number,
+    timeSec: number
+  ): void {
+    const rain = w.rainIntensity;
+    const snow = w.snowIntensity;
+    const fogWisp = w.fogWispIntensity;
+
+    const mode =
+      rain >= snow && rain >= fogWisp && rain > 0.04
+        ? 1
+        : snow >= fogWisp && snow > 0.04
+          ? 2
+          : fogWisp > 0.04
+            ? 3
+            : 0;
+
+    if (mode === 0) {
+      if (this.lastWeatherDropCount > 0) {
+        this.weatherDropsInst.count = 0;
+        this.lastWeatherDropCount = 0;
+      }
+      return;
+    }
+
+    const camX = this.camera.position.x;
+    const camY = this.camera.position.y;
+    const camZ = this.camera.position.z;
+    const d = this._dummy;
+    const windTilt = w.windX * 0.045;
+    let count = 0;
+
+    if (mode === 1) {
+      // Heavy slanted 3D rain streaks rushing past camera
+      count = Math.max(12, Math.floor(MAX_WEATHER_DROPS * rain));
+      this.weatherDropsMat.color.setHex(0xc8e8ff);
+      this.weatherDropsMat.opacity = 0.68 * rain;
+      const fallVy = 34.0;
+      const streakZ = Math.max(16, playerSpeed * 0.72 + 12);
+      const streakTiltX = 0.28 + Math.min(0.45, playerSpeed * 0.008);
+
+      for (let i = 0; i < count; i++) {
+        const drop = this.weatherDrops[i];
+        drop.ry -= fallVy * drop.speedMul * dt;
+        drop.rx += w.windX * 1.4 * dt;
+        drop.rz += streakZ * drop.speedMul * dt;
+
+        if (drop.ry < -1.5) drop.ry += 19.5;
+        if (drop.rz > 2.5) drop.rz -= 50;
+        if (drop.rx < -22) drop.rx += 44;
+        else if (drop.rx > 22) drop.rx -= 44;
+
+        d.position.set(camX + drop.rx, camY + drop.ry - 3.5, camZ + drop.rz);
+        d.rotation.set(streakTiltX, 0, -windTilt);
+        d.scale.set(0.052, 1.8, 0.052);
+        d.updateMatrix();
+        this.weatherDropsInst.setMatrixAt(i, d.matrix);
+      }
+    } else if (mode === 2) {
+      // Crisp drifting pixel snowflakes
+      count = Math.max(12, Math.floor(200 * snow));
+      this.weatherDropsMat.color.setHex(0xf4f9ff);
+      this.weatherDropsMat.opacity = 0.85 * snow;
+      const forwardZ = Math.max(10, playerSpeed * 0.45 + 6);
+
+      for (let i = 0; i < count; i++) {
+        const drop = this.weatherDrops[i];
+        drop.ry -= (4.8 + drop.speedMul * 2.4) * dt;
+        drop.rx += (w.windX * 1.1 + Math.sin(timeSec * 2.4 + drop.phase) * 2.2) * dt;
+        drop.rz += forwardZ * drop.speedMul * dt;
+
+        if (drop.ry < -1.5) drop.ry += 18.5;
+        if (drop.rz > 2.5) drop.rz -= 48;
+        if (drop.rx < -22) drop.rx += 44;
+        else if (drop.rx > 22) drop.rx -= 44;
+
+        const sz = 0.14 + (i % 3) * 0.04;
+        d.position.set(camX + drop.rx, camY + drop.ry - 3.0, camZ + drop.rz);
+        d.rotation.set(timeSec * 1.5 + drop.phase, timeSec * 1.1 + drop.phase, 0);
+        d.scale.set(sz, sz, sz);
+        d.updateMatrix();
+        this.weatherDropsInst.setMatrixAt(i, d.matrix);
+      }
+    } else {
+      // Low rolling mist puffs drifting across shoulders in fog
+      count = Math.max(8, Math.floor(38 * fogWisp));
+      this.weatherDropsMat.color.setHex(0xd9e6f0);
+      this.weatherDropsMat.opacity = 0.14 * fogWisp;
+      const forwardZ = Math.max(8, playerSpeed * 0.36 + 4);
+
+      for (let i = 0; i < count; i++) {
+        const drop = this.weatherDrops[i];
+        drop.rx += Math.sin(timeSec * 0.6 + drop.phase) * 1.4 * dt;
+        drop.rz += forwardZ * drop.speedMul * dt;
+
+        if (drop.rz > 2.0) {
+          drop.rz -= 58;
+          drop.rx = (Math.random() - 0.5) * 34;
+        }
+        if (drop.rx < -20) drop.rx += 40;
+        else if (drop.rx > 20) drop.rx -= 40;
+
+        d.position.set(camX + drop.rx, camY - 1.1 + (i % 4) * 0.65, camZ + drop.rz - 6);
+        d.rotation.set(0, 0, 0);
+        d.scale.set(5.2, 1.35, 2.4);
+        d.updateMatrix();
+        this.weatherDropsInst.setMatrixAt(i, d.matrix);
+      }
+    }
+
+    this.weatherDropsInst.count = count;
+    this.weatherDropsInst.instanceMatrix.needsUpdate = true;
+    this.lastWeatherDropCount = count;
   }
 
   private updateRoadRibbons(originS: number, originX: number, originY: number): void {
@@ -1228,8 +1523,13 @@ export class WorldRenderer {
         const h2 = hash1(wSlot * 71 + (side > 0 ? 19 : 83));
         const dist = SHOULDER_HALF_WIDTH + 3.2 + h2 * 18.0;
 
-        // Street lamps in twilight biome or periodic highway lamps
-        if (lampC < MAX_PROPS_PER_POOL && ((biome === 3 && wSlot % 2 === 0) || wSlot % 6 === 0)) {
+        // Street lamps in twilight biome, low-visibility weather, or periodic highway lamps
+        if (
+          lampC < MAX_PROPS_PER_POOL &&
+          ((biome === 3 && wSlot % 2 === 0) ||
+            (this.lastWeatherLampBoost && wSlot % 3 === 0) ||
+            wSlot % 6 === 0)
+        ) {
           if ((wSlot + (side > 0 ? 1 : 0)) % 2 === 0) {
             roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH + 0.8), 0, originS, originX, originY, pos);
             d.position.copy(pos);

@@ -8,6 +8,7 @@ import {
 } from './RoadMath';
 import { AVATAR_COUNT } from './PixelAvatars';
 import { FallenCargo, RiderRenderState, TrafficCar, WEAPONS, WeaponType } from './types';
+import type { WeatherPhysicsMod } from './WeatherSystem';
 
 export interface InputState {
   throttle: boolean;
@@ -23,7 +24,7 @@ export interface InputState {
   weaponSwitch?: WeaponType;
 }
 
-export type ParticleKind = 'spark' | 'smoke' | 'dust' | 'nitro' | 'crash';
+export type ParticleKind = 'spark' | 'smoke' | 'dust' | 'nitro' | 'crash' | 'water' | 'snow';
 
 export interface PlayerCallbacks {
   onAttackSwing(side: 1 | 2, weapon: WeaponType): void;
@@ -337,7 +338,8 @@ export class PlayerPhysics {
     targets: RiderRenderState[],
     traffic: TrafficCar[],
     cb: PlayerCallbacks,
-    fallenCargo?: readonly FallenCargo[]
+    fallenCargo?: readonly FallenCargo[],
+    weatherMod?: WeatherPhysicsMod
   ): void {
     const step = dt > 0.05 ? 0.05 : dt < 0.0001 ? 0.0001 : dt;
     const st = this.state;
@@ -546,10 +548,14 @@ export class PlayerPhysics {
 
     st.braking = inp.brake && st.speed > 0.5;
 
+    const weatherGrip = weatherMod ? weatherMod.grip : 1.0;
+    const weatherBrake = weatherMod ? weatherMod.brakeMul : 1.0;
+    const weatherWindX = weatherMod ? weatherMod.windX : 0;
+
     if (st.spinOutTimer > 0) {
       st.speed = Math.max(10, st.speed - 22.0 * step);
     } else if (inp.brake) {
-      st.speed = Math.max(0, st.speed - 44.0 * step);
+      st.speed = Math.max(0, st.speed - 44.0 * weatherBrake * step);
     } else if (inp.throttle || st.nitroActive || this.boostPadTimer > 0 || st.turboShieldTimer > 0) {
       const speedRatio = clamp(st.speed / topSpeed, 0, 1.2);
       let accel = 28.0 * (1.08 - 0.68 * Math.min(1, speedRatio));
@@ -576,14 +582,16 @@ export class PlayerPhysics {
     const speedAuthority = clamp(st.speed / 12.0, 0, 1);
     const airFactor = st.y > 0.15 ? 0.48 : 1.0;
     const spinFactor = st.spinOutTimer > 0 ? 0.35 : 1.0;
-    const steerAccel = steer * 45.0 * (0.45 + 0.72 * speedAuthority) * airFactor * spinFactor;
+    const steerGrip = 0.85 + 0.15 * weatherGrip;
+    const steerAccel = steer * 45.0 * steerGrip * (0.45 + 0.72 * speedAuthority) * airFactor * spinFactor;
     const spinWobble = st.spinOutTimer > 0 ? Math.sin(st.spinOutTimer * 22) * 14.0 : 0;
 
     // Positive curvature => road bends right => centrifugal force pushes left (-x)
     const centrifugal = -this._frame.curvature * st.speed * st.speed * 0.46;
+    const crosswind = weatherWindX * speedAuthority * (st.turboShieldTimer > 0 ? 0.25 : 1.0);
 
-    st.vx += (steerAccel + centrifugal + spinWobble) * step;
-    const latDamp = Math.abs(steer) > 0.05 ? 5.6 : 8.8;
+    st.vx += (steerAccel + centrifugal + spinWobble + crosswind) * step;
+    const latDamp = (Math.abs(steer) > 0.05 ? 5.6 : 8.8) * weatherGrip;
     st.vx *= Math.exp(-latDamp * step);
 
     // Keep stopped bike from drifting sideways
@@ -850,6 +858,9 @@ export class PlayerPhysics {
       } else if (st.braking && st.speed > 16 && st.y < 0.1) {
         this.particleTimer = 0;
         cb.onParticles('smoke', st.s - 0.9, st.x, 0.12, st.speed * 0.15);
+      } else if (weatherMod && weatherMod.sprayKind !== 'none' && st.speed > 18 && st.y < 0.1) {
+        this.particleTimer = 0;
+        cb.onParticles(weatherMod.sprayKind, st.s - 1.05, st.x, 0.14, st.speed * 0.3);
       }
     }
   }

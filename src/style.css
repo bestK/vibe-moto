@@ -1,26 +1,30 @@
-/* Vibe Moto — Crisp HD-Pixel Golden-Hour Arcade HUD */
+/* Vibe Moto — Crisp HD-Pixel Arcade Highway HUD */
 
 :root {
-  --vm-bg: #0d101d;
-  --vm-bg-slab: rgba(13, 16, 29, 0.92);
-  --vm-bg-deep: #070912;
-  --vm-ink: #04050a;
-  --vm-steel: #2e3759;
-  --vm-steel-hi: #556499;
-  --vm-text: #f4f6ff;
-  --vm-dim: #8a94ba;
-  --vm-gold: #ffd166;
-  --vm-amber: #ff9f1c;
-  --vm-crimson: #ff2a54;
-  --vm-cyan: #00f5d4;
-  --vm-green: #52e065;
+  --vm-bg: #10131c;
+  --vm-bg-slab: rgba(15, 19, 30, 0.86);
+  --vm-bg-deep: #090c14;
+  --vm-ink: #05070d;
+  --vm-steel: #33415e;
+  --vm-steel-hi: #5f749e;
+  --vm-text: #f4f7fc;
+  --vm-dim: #93a3c4;
+  --vm-gold: #ffbe3b;
+  --vm-amber: #ff8c2b;
+  --vm-crimson: #ff3b5c;
+  --vm-cyan: #38e2d4;
+  --vm-green: #46d97c;
+  --vm-sky: #60b4ff;
+
+  --vm-joy-size: clamp(114px, 29vmin, 136px);
+  --vm-joy-knob: clamp(44px, 11.2vmin, 52px);
 
   --vm-font-display: 'Press Start 2P', monospace;
   --vm-font-ui: 'Silkscreen', monospace;
 
   --vm-shadow: 3px 3px 0 var(--vm-ink);
   --vm-shadow-sm: 2px 2px 0 var(--vm-ink);
-  --vm-bevel: inset 2px 2px 0 rgba(255, 255, 255, 0.08), inset -2px -2px 0 rgba(0, 0, 0, 0.4);
+  --vm-bevel: inset 0 1px 0 rgba(255, 255, 255, 0.12), inset 0 -2px 0 rgba(0, 0, 0, 0.42);
 }
 
 *,
@@ -104,8 +108,8 @@ body {
 }
 
 .vm-px-icon.vm-joy-icon {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
 }
 
 .vm-btn-icon,
@@ -540,17 +544,62 @@ body {
 }
 
 .vm-btn-regroup:hover:not(:disabled) {
-  background: rgba(0, 245, 212, 0.16);
+  background: rgba(56, 226, 212, 0.16);
   border-color: var(--vm-cyan);
   color: #ffffff;
 }
 
 .vm-btn-regroup:disabled {
-  border-color: #21263d;
-  color: #4b5475;
-  opacity: 0.55;
+  border-color: #242d45;
+  color: #546385;
+  opacity: 0.58;
   cursor: default;
   box-shadow: var(--vm-shadow-sm);
+}
+
+.vm-btn-weather {
+  min-width: 32px;
+  padding: 0 7px;
+  gap: 5px;
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  transition: border-color 100ms steps(2), color 100ms steps(2);
+}
+
+.vm-btn-weather[data-weather='clear'] {
+  border-color: rgba(255, 190, 59, 0.72);
+  color: var(--vm-gold);
+}
+
+.vm-btn-weather[data-weather='sunset'] {
+  border-color: rgba(255, 140, 43, 0.78);
+  color: var(--vm-amber);
+}
+
+.vm-btn-weather[data-weather='storm'] {
+  border-color: rgba(96, 180, 255, 0.82);
+  color: var(--vm-sky);
+}
+
+.vm-btn-weather[data-weather='fog'] {
+  border-color: rgba(190, 210, 226, 0.72);
+  color: #d6e4f0;
+}
+
+.vm-btn-weather[data-weather='snow'] {
+  border-color: rgba(155, 214, 255, 0.82);
+  color: #d9f0ff;
+}
+
+.vm-weather-label {
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+@media (max-width: 1023px) {
+  .vm-weather-label {
+    display: none;
+  }
 }
 
 .vm-btn-gyro {
@@ -609,9 +658,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: rgba(13, 16, 29, 0.97);
+  background: rgba(15, 19, 30, 0.96);
   border: 3px solid var(--vm-gold);
-  box-shadow: 6px 6px 0 var(--vm-ink), inset 2px 2px 0 rgba(255, 255, 255, 0.1);
+  box-shadow: 6px 6px 0 var(--vm-ink), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .vm-home-head {
@@ -912,12 +961,55 @@ body {
 .vm-btn-gyro.is-active {
   border-color: var(--vm-cyan);
   color: var(--vm-cyan);
-  background: rgba(0, 245, 212, 0.14);
+  background: rgba(56, 226, 212, 0.14);
 }
 
 .vm-btn-gyro.is-active:hover {
   border-color: var(--vm-cyan);
   color: #ffffff;
+}
+
+/* Weather Atmospheric Screen-Edge Overlay (GPU opacity only, zero pointer events) */
+.vm-weather-fx {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  opacity: 0;
+  transition: opacity 420ms ease;
+}
+
+.vm-weather-fx[data-weather='storm'] {
+  opacity: 1;
+  background: radial-gradient(
+    ellipse at 50% 48%,
+    transparent 56%,
+    rgba(16, 28, 48, 0.34) 100%
+  );
+}
+
+.vm-weather-fx[data-weather='fog'] {
+  opacity: 1;
+  background: radial-gradient(
+    ellipse at 50% 55%,
+    transparent 44%,
+    rgba(184, 204, 218, 0.24) 100%
+  );
+}
+
+.vm-weather-fx[data-weather='snow'] {
+  opacity: 1;
+  background: radial-gradient(
+    ellipse at 50% 50%,
+    transparent 58%,
+    rgba(186, 220, 248, 0.22) 100%
+  );
+}
+
+.vm-weather-fx.is-flash {
+  opacity: 1;
+  background: rgba(226, 242, 255, 0.28);
+  transition: none;
 }
 
 /* Tap-Screen-to-Attack Arcade Edge Flashes (GPU transform/opacity only) */
@@ -936,14 +1028,14 @@ body {
 .vm-tap-flash-left {
   left: 0;
   border-left: 5px solid var(--vm-crimson);
-  background: linear-gradient(90deg, rgba(255, 42, 84, 0.36) 0%, rgba(255, 209, 102, 0.12) 48%, transparent 100%);
+  background: linear-gradient(90deg, rgba(255, 59, 92, 0.36) 0%, rgba(255, 190, 59, 0.12) 48%, transparent 100%);
   transform: translate3d(-10px, 0, 0);
 }
 
 .vm-tap-flash-right {
   right: 0;
   border-right: 5px solid var(--vm-crimson);
-  background: linear-gradient(270deg, rgba(255, 42, 84, 0.36) 0%, rgba(255, 209, 102, 0.12) 48%, transparent 100%);
+  background: linear-gradient(270deg, rgba(255, 59, 92, 0.36) 0%, rgba(255, 190, 59, 0.12) 48%, transparent 100%);
   transform: translate3d(10px, 0, 0);
 }
 
@@ -1390,9 +1482,9 @@ body {
   align-items: center;
   gap: 7px;
   padding: 8px 16px;
-  background: rgba(13, 16, 29, 0.96);
+  background: rgba(15, 19, 30, 0.94);
   border: 3px solid var(--vm-gold);
-  box-shadow: 4px 4px 0 var(--vm-ink), inset 2px 2px 0 rgba(255, 255, 255, 0.14);
+  box-shadow: 4px 4px 0 var(--vm-ink), inset 0 1px 0 rgba(255, 255, 255, 0.14);
   font-family: var(--vm-font-display), 'Microsoft YaHei', monospace;
   font-size: 13px;
   line-height: 1.25;
@@ -1407,13 +1499,13 @@ body {
 }
 
 .vm-toast[data-accent='cyan'] {
-  background: rgba(7, 22, 26, 0.96);
+  background: rgba(10, 24, 30, 0.95);
   border-color: var(--vm-cyan);
   color: var(--vm-cyan);
 }
 
 .vm-toast[data-accent='red'] {
-  background: rgba(28, 8, 16, 0.96);
+  background: rgba(30, 10, 18, 0.95);
   border-color: var(--vm-crimson);
   color: var(--vm-crimson);
 }
@@ -2399,6 +2491,9 @@ body {
 
 /* ==========================================================================
    DUAL VIRTUAL JOYSTICKS (ONLY ON TOUCH-CAPABLE COARSE POINTER DEVICES)
+   - Fluid thumb-ergonomic sizing via --vm-joy-size & --vm-joy-knob
+   - Pure CSS crosshair + inner deadzone ring; ::before expands touch hit slop
+   - Harmonized obsidian translucent pad + racing amber (L) & aqua-teal (R) caps
    ========================================================================== */
 .vm-touch-layer {
   display: none;
@@ -2411,60 +2506,80 @@ body {
 .vm-joy {
   pointer-events: auto;
   position: absolute;
-  width: 94px;
-  height: 94px;
+  width: var(--vm-joy-size);
+  height: var(--vm-joy-size);
   border-radius: 50%;
-  background: rgba(11, 14, 24, 0.34);
-  border: 2px solid rgba(255, 209, 102, 0.45);
-  box-shadow: 2px 2px 0 rgba(4, 5, 10, 0.55), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  background:
+    radial-gradient(
+      circle at center,
+      rgba(244, 247, 252, 0.06) 0 18%,
+      rgba(244, 247, 252, 0.16) 18% 20%,
+      transparent 20% 100%
+    ),
+    linear-gradient(
+      90deg,
+      transparent calc(50% - 0.5px),
+      rgba(244, 247, 252, 0.12) 50%,
+      transparent calc(50% + 0.5px)
+    ),
+    linear-gradient(
+      0deg,
+      transparent calc(50% - 0.5px),
+      rgba(244, 247, 252, 0.12) 50%,
+      transparent calc(50% + 0.5px)
+    ),
+    rgba(15, 19, 30, 0.42);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 100% 100%, 56% 1px, 1px 56%, 100% 100%;
+  border: 2px solid rgba(244, 247, 252, 0.26);
+  box-shadow:
+    0 3px 0 rgba(5, 7, 13, 0.62),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.05);
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   contain: layout style;
+  transition: border-color 120ms ease, background-color 120ms ease;
 }
 
-.vm-joy::before,
-.vm-joy::after {
+/* Invisible outer touch slop ring for effortless thumb acquisition */
+.vm-joy::before {
   content: '';
   position: absolute;
-  background: rgba(255, 255, 255, 0.09);
-  pointer-events: none;
-}
-
-.vm-joy::before {
-  left: 20px;
-  right: 20px;
-  top: 50%;
-  height: 1px;
-}
-
-.vm-joy::after {
-  top: 20px;
-  bottom: 20px;
-  left: 50%;
-  width: 1px;
+  inset: -10px;
+  border-radius: 50%;
+  background: transparent;
 }
 
 .vm-joy-left {
-  left: max(12px, env(safe-area-inset-left));
-  bottom: max(10px, env(safe-area-inset-bottom));
-  border-color: rgba(255, 209, 102, 0.45);
+  left: max(14px, env(safe-area-inset-left));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  border-color: rgba(255, 190, 59, 0.48);
 }
 
 .vm-joy-left.is-active {
-  background: rgba(11, 14, 24, 0.48);
-  border-color: rgba(255, 209, 102, 0.85);
+  background-color: rgba(15, 19, 30, 0.58);
+  border-color: var(--vm-gold);
+  box-shadow:
+    0 3px 0 rgba(5, 7, 13, 0.72),
+    0 0 0 2px rgba(255, 190, 59, 0.22),
+    inset 0 0 0 2px rgba(255, 190, 59, 0.14);
 }
 
 .vm-joy-right {
-  right: max(12px, env(safe-area-inset-right));
-  bottom: max(10px, env(safe-area-inset-bottom));
-  border-color: rgba(0, 245, 212, 0.45);
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  border-color: rgba(56, 226, 212, 0.48);
 }
 
 .vm-joy-right.is-active {
-  background: rgba(11, 14, 24, 0.48);
-  border-color: rgba(0, 245, 212, 0.88);
+  background-color: rgba(15, 19, 30, 0.58);
+  border-color: var(--vm-cyan);
+  box-shadow:
+    0 3px 0 rgba(5, 7, 13, 0.72),
+    0 0 0 2px rgba(56, 226, 212, 0.22),
+    inset 0 0 0 2px rgba(56, 226, 212, 0.14);
 }
 
 .vm-joy-dir {
@@ -2472,36 +2587,37 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 1px;
+  gap: 2px;
   font-family: var(--vm-font-ui);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
-  color: rgba(244, 246, 255, 0.36);
-  text-shadow: 1px 1px 0 rgba(4, 5, 10, 0.8);
+  color: rgba(244, 247, 252, 0.52);
+  text-shadow: 1px 1px 0 rgba(5, 7, 13, 0.85);
   pointer-events: none;
+  transition: color 90ms ease;
 }
 
 .vm-joy-dir-up {
-  top: 5px;
+  top: 8px;
   left: 50%;
   transform: translateX(-50%);
 }
 
 .vm-joy-dir-down {
-  bottom: 5px;
+  bottom: 8px;
   left: 50%;
   transform: translateX(-50%);
 }
 
 .vm-joy-dir-left {
-  left: 6px;
+  left: 8px;
   top: 50%;
   transform: translateY(-50%);
 }
 
 .vm-joy-dir-right {
-  right: 6px;
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
 }
@@ -2530,7 +2646,7 @@ body {
 }
 
 .vm-joy-item-count {
-  font-size: 8px;
+  font-size: 9px;
   color: var(--vm-gold);
   font-variant-numeric: tabular-nums;
 }
@@ -2548,29 +2664,52 @@ body {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 36px;
-  height: 36px;
-  margin: -18px 0 0 -18px;
+  width: var(--vm-joy-knob);
+  height: var(--vm-joy-knob);
+  margin: calc(var(--vm-joy-knob) * -0.5) 0 0 calc(var(--vm-joy-knob) * -0.5);
   border-radius: 50%;
-  background: rgba(255, 209, 102, 0.26);
-  border: 2px solid rgba(255, 209, 102, 0.78);
-  box-shadow: 0 2px 0 rgba(4, 5, 10, 0.65);
+  background: radial-gradient(
+    circle at 38% 35%,
+    rgba(255, 224, 148, 0.52) 0%,
+    rgba(255, 190, 59, 0.34) 68%,
+    rgba(255, 140, 43, 0.24) 100%
+  );
+  border: 2px solid rgba(255, 190, 59, 0.88);
+  box-shadow:
+    0 3px 0 rgba(5, 7, 13, 0.72),
+    inset 0 0 0 4px rgba(10, 13, 21, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.36);
   pointer-events: none;
   will-change: transform;
 }
 
 .vm-joy-left.is-active .vm-joy-knob-left {
-  background: rgba(255, 209, 102, 0.48);
+  background: radial-gradient(
+    circle at 38% 35%,
+    rgba(255, 232, 166, 0.74) 0%,
+    rgba(255, 190, 59, 0.56) 68%,
+    rgba(255, 140, 43, 0.42) 100%
+  );
   border-color: var(--vm-gold);
 }
 
 .vm-joy-knob-right {
-  background: rgba(0, 245, 212, 0.24);
-  border-color: rgba(0, 245, 212, 0.78);
+  background: radial-gradient(
+    circle at 38% 35%,
+    rgba(166, 249, 241, 0.46) 0%,
+    rgba(56, 226, 212, 0.30) 68%,
+    rgba(28, 168, 170, 0.22) 100%
+  );
+  border-color: rgba(56, 226, 212, 0.86);
 }
 
 .vm-joy-right.is-active .vm-joy-knob-right {
-  background: rgba(0, 245, 212, 0.46);
+  background: radial-gradient(
+    circle at 38% 35%,
+    rgba(186, 252, 245, 0.70) 0%,
+    rgba(56, 226, 212, 0.52) 68%,
+    rgba(28, 168, 170, 0.38) 100%
+  );
   border-color: var(--vm-cyan);
 }
 
@@ -2616,10 +2755,14 @@ body {
     gap: 6px;
     height: 24px;
     padding: 0 6px;
-    background: rgba(11, 14, 24, 0.54);
-    border: 2px solid rgba(85, 100, 153, 0.72);
-    box-shadow: 2px 2px 0 rgba(4, 5, 10, 0.65);
+    background: rgba(14, 18, 28, 0.62);
+    border: 2px solid rgba(95, 116, 158, 0.72);
+    box-shadow: 2px 2px 0 rgba(5, 7, 13, 0.68);
     pointer-events: none;
+  }
+
+  .vm-weather-label {
+    display: none;
   }
 
   .vm-gauges {
@@ -2770,12 +2913,12 @@ body {
   .vm-top-left-col {
     top: max(8px, env(safe-area-inset-top));
     left: max(8px, env(safe-area-inset-left));
-    max-width: calc(100vw - 174px);
+    max-width: calc(100vw - 158px);
     gap: 4px;
   }
 
   .vm-top-left {
-    gap: 4px;
+    gap: 3px;
   }
 
   .vm-avatar-btn {
@@ -2820,21 +2963,32 @@ body {
 
   .vm-actions {
     gap: 2px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .vm-btn {
-    min-width: 22px;
-    padding: 0 4px;
-    font-size: 9px;
+    min-width: 21px;
+    padding: 0 3px;
+    font-size: 8px;
+  }
+
+  .vm-btn .vm-px-icon {
+    width: 12px;
+    height: 12px;
+  }
+
+  .vm-btn-cam {
+    padding: 0 3px;
+    gap: 2px;
   }
 
   .vm-btn-home,
+  .vm-btn-weather,
   .vm-btn-regroup,
   .vm-btn-gyro,
   .vm-btn-lang {
-    min-width: 22px;
-    padding: 0 4px;
+    min-width: 21px;
+    padding: 0 3px;
   }
 
   /* Position feed cleanly beneath upper-sky telemetry & item tray */
@@ -2860,7 +3014,7 @@ body {
   }
 
   .vm-standings {
-    width: 148px;
+    width: 142px;
     padding: 3px 4px;
     gap: 2px;
   }
@@ -2895,7 +3049,7 @@ body {
     height: 104px;
   }
 
-  /* Upper sky telemetry strip cleanly below standings (b <= 84) & clear of right radar */
+  /* Upper sky telemetry strip cleanly below standings (b <= 88) & clear of right radar */
   .vm-telemetry-cluster {
     top: max(92px, calc(env(safe-area-inset-top) + 84px));
     left: max(8px, env(safe-area-inset-left));
@@ -2940,48 +3094,58 @@ body {
     top: max(214px, calc(env(safe-area-inset-top) + 206px));
   }
 
-  /* Dual 86x86 portrait joysticks + 1 slim bottom-center [1][2][3] row */
-  .vm-joy {
-    width: 86px;
-    height: 86px;
+  /* Dual ergonomic portrait joysticks + 1 slim bottom-center [1][2][3] row */
+  .vm-hud-root {
+    --vm-joy-size: clamp(106px, 29vw, 128px);
+    --vm-joy-knob: clamp(42px, 11.4vw, 50px);
+  }
+
+  .vm-joy::before {
+    inset: -6px;
   }
 
   .vm-joy-left {
     left: max(10px, env(safe-area-inset-left));
-    bottom: max(10px, env(safe-area-inset-bottom));
+    bottom: max(18px, calc(env(safe-area-inset-bottom) + 12px));
   }
 
   .vm-joy-right {
     right: max(10px, env(safe-area-inset-right));
-    bottom: max(10px, env(safe-area-inset-bottom));
-  }
-
-  .vm-joy-knob {
-    width: 32px;
-    height: 32px;
-    margin: -16px 0 0 -16px;
+    bottom: max(18px, calc(env(safe-area-inset-bottom) + 12px));
   }
 
   .vm-weapons {
     position: absolute;
-    bottom: max(10px, env(safe-area-inset-bottom));
-    left: calc(max(10px, env(safe-area-inset-left)) + 98px);
-    right: calc(max(10px, env(safe-area-inset-right)) + 98px);
+    bottom: max(18px, calc(env(safe-area-inset-bottom) + 12px));
+    left: calc(max(10px, env(safe-area-inset-left)) + var(--vm-joy-size) + 6px);
+    right: calc(max(10px, env(safe-area-inset-right)) + var(--vm-joy-size) + 6px);
     height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 5px;
+    gap: 4px;
     z-index: 16;
     contain: layout style;
   }
 
   .vm-weapon-chip {
-    width: 38px;
+    width: 34px;
     height: 28px;
-    padding: 0 3px;
-    gap: 3px;
+    padding: 0 2px;
+    gap: 2px;
     justify-content: center;
+  }
+
+  @media (min-width: 400px) {
+    .vm-weapons {
+      gap: 5px;
+    }
+
+    .vm-weapon-chip {
+      width: 38px;
+      padding: 0 3px;
+      gap: 3px;
+    }
   }
 
   .vm-weapon-label {
@@ -3006,7 +3170,7 @@ body {
     top: max(6px, env(safe-area-inset-top));
     left: max(8px, env(safe-area-inset-left));
     gap: 4px;
-    max-width: 296px;
+    max-width: 328px;
   }
 
   .vm-top-left {
@@ -3065,6 +3229,7 @@ body {
   }
 
   .vm-btn-home,
+  .vm-btn-weather,
   .vm-btn-regroup,
   .vm-btn-gyro,
   .vm-btn-lang {
@@ -3092,8 +3257,8 @@ body {
 
   .vm-standings {
     width: auto;
-    min-width: 198px;
-    max-width: 240px;
+    min-width: 186px;
+    max-width: 222px;
     padding: 3px 5px;
     gap: 2px;
   }
@@ -3130,11 +3295,11 @@ body {
   }
 
   /* Wide landscape (>= 820px, e.g. 844x390, 915x412):
-     Sky telemetry centered cleanly between topLeft (<= 298) and expanded standings (<= 240) */
+     Sky telemetry centered cleanly between topLeft (<= 328) and standings (<= 222) */
   .vm-telemetry-cluster {
     top: max(6px, env(safe-area-inset-top));
-    left: calc(max(8px, env(safe-area-inset-left)) + 298px);
-    right: calc(max(6px, env(safe-area-inset-right)) + 248px);
+    left: calc(max(8px, env(safe-area-inset-left)) + 328px);
+    right: calc(max(6px, env(safe-area-inset-right)) + 228px);
     align-items: center;
   }
 
@@ -3158,33 +3323,31 @@ body {
     padding: 4px 10px;
   }
 
-  /* Dual 94x94 landscape joysticks + ONE slim bottom-center row (weapons + 1..4 items) */
-  .vm-joy {
-    width: 94px;
-    height: 94px;
+  /* Dual ergonomic landscape joysticks + ONE slim bottom-center row (weapons + 1..4 items) */
+  .vm-hud-root {
+    --vm-joy-size: clamp(114px, 29vmin, 136px);
+    --vm-joy-knob: clamp(44px, 11.2vmin, 52px);
+  }
+
+  .vm-joy::before {
+    inset: -10px;
   }
 
   .vm-joy-left {
-    left: max(12px, env(safe-area-inset-left));
-    bottom: max(10px, env(safe-area-inset-bottom));
+    left: max(14px, env(safe-area-inset-left));
+    bottom: max(14px, env(safe-area-inset-bottom));
   }
 
   .vm-joy-right {
-    right: max(12px, env(safe-area-inset-right));
-    bottom: max(10px, env(safe-area-inset-bottom));
-  }
-
-  .vm-joy-knob {
-    width: 36px;
-    height: 36px;
-    margin: -18px 0 0 -18px;
+    right: max(14px, env(safe-area-inset-right));
+    bottom: max(14px, env(safe-area-inset-bottom));
   }
 
   .vm-bottom-dock {
     position: absolute;
-    bottom: max(10px, env(safe-area-inset-bottom));
-    left: calc(max(12px, env(safe-area-inset-left)) + 108px);
-    right: calc(max(12px, env(safe-area-inset-right)) + 108px);
+    bottom: max(14px, env(safe-area-inset-bottom));
+    left: calc(max(14px, env(safe-area-inset-left)) + var(--vm-joy-size) + 12px);
+    right: calc(max(14px, env(safe-area-inset-right)) + var(--vm-joy-size) + 12px);
     height: 28px;
     display: flex;
     flex-direction: row;
@@ -3306,10 +3469,10 @@ body {
 @keyframes vm-nitro-flash {
   0%,
   100% {
-    background: #00f5d4;
+    background: #38e2d4;
   }
   50% {
-    background: #c8fff7;
+    background: #c8faf5;
   }
 }
 
