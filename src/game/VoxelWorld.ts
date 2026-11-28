@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import {
-  OPEN_WORLD_MAX_LATERAL,
   TRACK_LENGTH,
   openWorldGroundY,
   roadX,
@@ -68,9 +67,9 @@ export interface VoxelRaycastHit {
 }
 
 const MAX_INSTANCES_PER_TYPE = 1024;
-const RENDER_RANGE_S = 148;
-const MIN_GY = -24;
-const MAX_GY = 88;
+const RENDER_RANGE_S = 156;
+const MIN_GY = -64;
+const MAX_GY = 256;
 const STORAGE_PREFIX = 'vibemoto_voxels_v1_';
 
 export function wrapGridZ(gz: number): number {
@@ -364,8 +363,6 @@ export class VoxelWorld {
     const iz = wrapGridZ(gz);
 
     if (iy < MIN_GY || iy > MAX_GY) return false;
-    const roadCenter = roadX(iz + 0.5);
-    if (Math.abs(ix + 0.5 - roadCenter) > OPEN_WORLD_MAX_LATERAL + 8) return false;
 
     const key = makeKey(ix, iy, iz);
     const prev = this.blocks.get(key);
@@ -847,12 +844,14 @@ export class VoxelWorldVisual {
       for (const b of world.values()) {
         const ds = signedTrackDelta(b.gz + 0.5, wrappedOriginS);
         if (ds < -RENDER_RANGE_S || ds > RENDER_RANGE_S) continue;
+        const dx = b.gx + 0.5 - originX;
+        if (dx < -RENDER_RANGE_S || dx > RENDER_RANGE_S) continue;
 
         const c = this.counts.get(b.type) ?? 0;
         if (c >= MAX_INSTANCES_PER_TYPE) continue;
 
         const inst = this.meshes.get(b.type)!;
-        d.position.set(b.gx + 0.5 - originX, b.gy + 0.5 - originY, -ds);
+        d.position.set(dx, b.gy + 0.5 - originY, -ds);
         d.rotation.set(0, 0, 0);
         d.scale.set(1, 1, 1);
         d.updateMatrix();

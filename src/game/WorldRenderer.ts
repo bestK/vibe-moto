@@ -1,8 +1,6 @@
 import * as THREE from 'three';
 import {
   CURB_WIDTH,
-  OPEN_WORLD_TERRAIN_FAR,
-  OPEN_WORLD_TERRAIN_FLAT,
   ROAD_HALF_WIDTH,
   RoadFrame,
   SHOULDER_HALF_WIDTH,
@@ -49,6 +47,10 @@ const MAX_ANIMAL_RENDER = 16;
 const MAX_SIREN_RENDER = 12;
 const MAX_POPUPS = 14;
 const MAX_WEATHER_DROPS = 220;
+const INF_TERRAIN_N = 96; // 96x96 cells @ 7.5m = 720m x 720m (±360m radius, exceeds max fog!)
+const INF_TERRAIN_CELL = 7.5;
+const WILD_CELL = 36.0;
+const MAX_WILD_PROPS = 144;
 
 interface QualityProfile {
   dprDesktop: number;
@@ -244,11 +246,19 @@ export class WorldRenderer {
   private readonly roadMat: THREE.MeshLambertMaterial;
   private readonly curbLGeo: THREE.BufferGeometry;
   private readonly curbRGeo: THREE.BufferGeometry;
-  private readonly terrainLGeo: THREE.BufferGeometry;
-  private readonly terrainRGeo: THREE.BufferGeometry;
-  private readonly hillLGeo: THREE.BufferGeometry;
-  private readonly hillRGeo: THREE.BufferGeometry;
   private readonly terrainMat: THREE.MeshLambertMaterial;
+  private readonly infiniteTerrainGeo: THREE.BufferGeometry;
+  private readonly infiniteTerrainMesh: THREE.Mesh;
+  private lastTerrSnapX = Number.NaN;
+  private lastTerrSnapS = Number.NaN;
+
+  // Infinite procedural wilderness props (trees & boulders beyond the highway, snapped 36m grid)
+  private readonly wildGroup = new THREE.Group();
+  private readonly wildTrunkInst: THREE.InstancedMesh;
+  private readonly wildPineInst: THREE.InstancedMesh;
+  private readonly wildRockInst: THREE.InstancedMesh;
+  private lastWildSnapX = Number.NaN;
+  private lastWildSnapS = Number.NaN;
 
   // Open-World Voxel Building + On-Foot 3D Character + Parked Bike Beacon
   private readonly voxelVisual: VoxelWorldVisual;
@@ -339,8 +349,12 @@ export class WorldRenderer {
   private govLowStreak = 0;
   private govHighStreak = 0;
   private lastRoadBuiltS = Number.NaN;
+  private lastRoadBuiltX = Number.NaN;
+  private lastRoadBuiltY = Number.NaN;
   private lastRoadSlicesBuilt = -1;
   private lastPropsBuiltS = Number.NaN;
+  private lastPropsBuiltX = Number.NaN;
+  private lastPropsBuiltY = Number.NaN;
   private lastPropsLampBoost = false;
   private lastPropsRange = -1;
   private lastCssW = 0;
@@ -513,27 +527,12 @@ export class WorldRenderer {
     this.terrainMat = new THREE.MeshLambertMaterial({
       map: atlas.terrain,
       color: this.smoothTerrainTint,
+      vertexColors: true,
     });
-    this.terrainLGeo = this.createRibbonGeometry(ROAD_SLICES);
-    const terrL = new THREE.Mesh(this.terrainLGeo, this.terrainMat);
-    terrL.frustumCulled = false;
-    this.scene.add(terrL);
-
-    this.terrainRGeo = this.createRibbonGeometry(ROAD_SLICES);
-    const terrR = new THREE.Mesh(this.terrainRGeo, this.terrainMat);
-    terrR.frustumCulled = false;
-    this.scene.add(terrR);
-
-    // Outer distant scenic hills beyond the ±120m buildable open-world plains
-    this.hillLGeo = this.createRibbonGeometry(ROAD_SLICES);
-    const hillLMesh = new THREE.Mesh(this.hillLGeo, this.terrainMat);
-    hillLMesh.frustumCulled = false;
-    this.scene.add(hillLMesh);
-
-    this.hillRGeo = this.createRibbonGeometry(ROAD_SLICES);
-    const hillRMesh = new THREE.Mesh(this.hillRGeo, this.terrainMat);
-    hillRMesh.frustumCulled = false;
-    this.scene.add(hillRMesh);
+    this.infiniteTerrainGeo = this.createInfiniteTerrainGeometry(INF_TERRAIN_N, INF_TERRAIN_CELL);
+    this.infiniteTerrainMesh = new THREE.Mesh(this.infiniteTerrainGeo, this.terrainMat);
+    this.infiniteTerrainMesh.frustumCulled = false;
+    this.scene.add(this.infiniteTerrainMesh);
 
     // Minecraft-style Voxel World renderer + On-Foot 3D Character + Parked Bike Beacon
     this.voxelVisual = new VoxelWorldVisual();
@@ -555,11 +554,13 @@ export class WorldRenderer {
     // Instanced roadside props (single draw call per category!)
     const trunkGeo = new THREE.BoxGeometry(0.95, 5.2, 0.95);
     trunkGeo.translate(0, 2.6, 0);
-    this.trunkInst = this.makeInstanced(trunkGeo, new THREE.MeshLambertMaterial({ map: atlas.bark, flatShading: true }), MAX_PROPS_PER_POOL);
+    const barkMat = new THREE.MeshLambertMaterial({ map: atlas.bark, flatShading: true });
+    this.trunkInst = this.makeInstanced(trunkGeo, barkMat, MAX_PROPS_PER_POOL);
 
     const pineGeo = new THREE.ConeGeometry(3.2, 7.6, 6);
     pineGeo.translate(0, 7.0, 0);
-    this.pineInst = this.makeInstanced(pineGeo, new THREE.MeshLambertMaterial({ map: atlas.foliagePine, flatShading: true }), MAX_PROPS_PER_POOL);
+    const pineMat = new THREE.MeshLambertMaterial({ map: atlas.foliagePine, flatShading: true });
+    this.pineInst = this.makeInstanced(pineGeo, pineMat, MAX_PROPS_PER_POOL);
 
     const palmGeo = new THREE.BoxGeometry(5.6, 1.4, 5.6);
     palmGeo.translate(0, 6.2, 0);
@@ -567,7 +568,24 @@ export class WorldRenderer {
 
     const rockGeo = new THREE.BoxGeometry(6.8, 7.5, 6.4);
     rockGeo.translate(0, 3.4, 0);
-    this.rockInst = this.makeInstanced(rockGeo, new THREE.MeshLambertMaterial({ map: atlas.canyonRock, flatShading: true }), MAX_PROPS_PER_POOL);
+    const rockMat = new THREE.MeshLambertMaterial({ map: atlas.canyonRock, flatShading: true });
+    this.rockInst = this.makeInstanced(rockGeo, rockMat, MAX_PROPS_PER_POOL);
+
+    // Infinite wilderness trees & boulders (anchored in wildGroup so zero CPU between 36m crossings!)
+    this.wildTrunkInst = new THREE.InstancedMesh(trunkGeo, barkMat, MAX_WILD_PROPS);
+    this.wildTrunkInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.wildTrunkInst.frustumCulled = false;
+    this.wildTrunkInst.count = 0;
+    this.wildPineInst = new THREE.InstancedMesh(pineGeo, pineMat, MAX_WILD_PROPS);
+    this.wildPineInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.wildPineInst.frustumCulled = false;
+    this.wildPineInst.count = 0;
+    this.wildRockInst = new THREE.InstancedMesh(rockGeo, rockMat, MAX_WILD_PROPS);
+    this.wildRockInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.wildRockInst.frustumCulled = false;
+    this.wildRockInst.count = 0;
+    this.wildGroup.add(this.wildTrunkInst, this.wildPineInst, this.wildRockInst);
+    this.scene.add(this.wildGroup);
 
     const postGeo = new THREE.BoxGeometry(0.32, 1.25, 0.32);
     postGeo.translate(0, 0.62, 0);
@@ -957,10 +975,6 @@ export class WorldRenderer {
     this.roadGeo.setDrawRange(0, indexCount);
     this.curbLGeo.setDrawRange(0, indexCount);
     this.curbRGeo.setDrawRange(0, indexCount);
-    this.terrainLGeo.setDrawRange(0, indexCount);
-    this.terrainRGeo.setDrawRange(0, indexCount);
-    this.hillLGeo.setDrawRange(0, indexCount);
-    this.hillRGeo.setDrawRange(0, indexCount);
   }
 
   private setQualityTier(next: 0 | 1 | 2): void {
@@ -1166,6 +1180,257 @@ export class WorldRenderer {
     return geo;
   }
 
+  private createInfiniteTerrainGeometry(cells: number, cellSize: number): THREE.BufferGeometry {
+    const vertsPerSide = cells + 1;
+    const vertCount = vertsPerSide * vertsPerSide;
+    const positions = new Float32Array(vertCount * 3);
+    const normals = new Float32Array(vertCount * 3);
+    const colors = new Float32Array(vertCount * 3);
+    const uvs = new Float32Array(vertCount * 2);
+    const indices = new Uint32Array(cells * cells * 6);
+
+    const half = (cells * cellSize) * 0.5;
+    let vi = 0;
+    let ui = 0;
+    for (let iz = 0; iz <= cells; iz++) {
+      const lz = half - iz * cellSize; // iz increases along +ws => -Z in Three.js
+      for (let ix = 0; ix <= cells; ix++) {
+        const lx = ix * cellSize - half;
+        positions[vi] = lx;
+        positions[vi + 1] = 0;
+        positions[vi + 2] = lz;
+        normals[vi + 1] = 1;
+        colors[vi] = 1;
+        colors[vi + 1] = 1;
+        colors[vi + 2] = 1;
+        vi += 3;
+        uvs[ui] = ix * 0.75;
+        uvs[ui + 1] = iz * 0.75;
+        ui += 2;
+      }
+    }
+
+    let ii = 0;
+    for (let iz = 0; iz < cells; iz++) {
+      for (let ix = 0; ix < cells; ix++) {
+        const a = iz * vertsPerSide + ix;
+        const b = a + 1;
+        const c = a + vertsPerSide;
+        const d = c + 1;
+        // Upward (+Y) front-facing winding in right-handed XZ (lz decreases as iz grows)
+        indices[ii++] = a;
+        indices[ii++] = b;
+        indices[ii++] = c;
+        indices[ii++] = b;
+        indices[ii++] = d;
+        indices[ii++] = c;
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    const posAttr = new THREE.BufferAttribute(positions, 3);
+    posAttr.setUsage(THREE.DynamicDrawUsage);
+    const normAttr = new THREE.BufferAttribute(normals, 3);
+    normAttr.setUsage(THREE.DynamicDrawUsage);
+    const colAttr = new THREE.BufferAttribute(colors, 3);
+    colAttr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('position', posAttr);
+    geo.setAttribute('normal', normAttr);
+    geo.setAttribute('color', colAttr);
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    return geo;
+  }
+
+  private updateInfiniteTerrain(originS: number, originX: number, originY: number): void {
+    const snapX = Math.floor(originX / INF_TERRAIN_CELL) * INF_TERRAIN_CELL;
+    const snapS = Math.floor(originS / INF_TERRAIN_CELL) * INF_TERRAIN_CELL;
+
+    // Zero vertex work between 7.5m grid crossings — just translate mesh in floating-origin space!
+    this.infiniteTerrainMesh.position.set(
+      snapX - originX,
+      -originY,
+      -signedTrackDelta(snapS, originS)
+    );
+
+    if (snapX === this.lastTerrSnapX && snapS === this.lastTerrSnapS) {
+      return;
+    }
+    this.lastTerrSnapX = snapX;
+    this.lastTerrSnapS = snapS;
+
+    const posAttr = this.infiniteTerrainGeo.attributes.position as THREE.BufferAttribute;
+    const normAttr = this.infiniteTerrainGeo.attributes.normal as THREE.BufferAttribute;
+    const colAttr = this.infiniteTerrainGeo.attributes.color as THREE.BufferAttribute;
+    const uvAttr = this.infiniteTerrainGeo.attributes.uv as THREE.BufferAttribute;
+
+    const posArr = posAttr.array as Float32Array;
+    const normArr = normAttr.array as Float32Array;
+    const colArr = colAttr.array as Float32Array;
+    const uvArr = uvAttr.array as Float32Array;
+
+    const cells = INF_TERRAIN_N;
+    const side = cells + 1;
+    const half = (cells * INF_TERRAIN_CELL) * 0.5;
+    const roadClearOuter = ROAD_HALF_WIDTH + CURB_WIDTH + 3.0;
+
+    // 1. Sample exact heightfield + elevation vertex colors
+    let vi = 0;
+    let ui = 0;
+    for (let iz = 0; iz <= cells; iz++) {
+      const ws = snapS + iz * INF_TERRAIN_CELL - half;
+      const rX = roadX(ws);
+      const rY = roadY(ws);
+      const uvV = ws * 0.1;
+      for (let ix = 0; ix <= cells; ix++) {
+        const wx = snapX + ix * INF_TERRAIN_CELL - half;
+        let wy = openWorldGroundY(wx, ws);
+
+        // Tuck terrain slightly under highway asphalt & curbs to guarantee zero z-fighting
+        const absLat = Math.abs(wx - rX);
+        if (absLat < roadClearOuter) {
+          const dip = absLat < ROAD_HALF_WIDTH + CURB_WIDTH ? 1.0 : (roadClearOuter - absLat) / 3.0;
+          wy -= 0.28 * dip;
+        }
+
+        posArr[vi + 1] = wy;
+
+        // Elevation-based shading (meadow -> alpine slope -> rocky ridge -> sunlit summit)
+        const relH = wy - rY;
+        let cr = 1.0;
+        let cg = 1.0;
+        let cb = 1.0;
+        if (relH > 26) {
+          const t = Math.min(1, (relH - 26) / 10);
+          cr = 0.86 + 0.34 * t;
+          cg = 0.86 + 0.36 * t;
+          cb = 0.84 + 0.42 * t;
+        } else if (relH > 14) {
+          const t = (relH - 14) / 12;
+          cr = 0.94 - 0.08 * t;
+          cg = 0.96 - 0.10 * t;
+          cb = 0.90 - 0.06 * t;
+        } else if (relH < -4) {
+          const t = Math.min(1, (-4 - relH) / 12);
+          cr = 1.0 - 0.16 * t;
+          cg = 1.0 - 0.10 * t;
+          cb = 1.0 - 0.08 * t;
+        }
+        colArr[vi] = cr;
+        colArr[vi + 1] = cg;
+        colArr[vi + 2] = cb;
+
+        uvArr[ui] = wx * 0.1;
+        uvArr[ui + 1] = uvV;
+
+        vi += 3;
+        ui += 2;
+      }
+    }
+
+    // 2. Smooth finite-difference normals for sunlit mountain ridges & valleys
+    const twoCell = INF_TERRAIN_CELL * 2.0;
+    for (let iz = 0; iz <= cells; iz++) {
+      const izPrev = iz > 0 ? iz - 1 : 0;
+      const izNext = iz < cells ? iz + 1 : cells;
+      for (let ix = 0; ix <= cells; ix++) {
+        const ixPrev = ix > 0 ? ix - 1 : 0;
+        const ixNext = ix < cells ? ix + 1 : cells;
+
+        const hL = posArr[(iz * side + ixPrev) * 3 + 1];
+        const hR = posArr[(iz * side + ixNext) * 3 + 1];
+        const hB = posArr[(izPrev * side + ix) * 3 + 1]; // smaller ws => +Z
+        const hF = posArr[(izNext * side + ix) * 3 + 1]; // larger ws => -Z
+
+        const nx = hL - hR;
+        const ny = twoCell;
+        const nz = hF - hB;
+        const inv = 1.0 / Math.hypot(nx, ny, nz);
+        const idx = (iz * side + ix) * 3;
+        normArr[idx] = nx * inv;
+        normArr[idx + 1] = ny * inv;
+        normArr[idx + 2] = nz * inv;
+      }
+    }
+
+    posAttr.needsUpdate = true;
+    normAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
+    uvAttr.needsUpdate = true;
+  }
+
+  private updateWildernessProps(originS: number, originX: number, originY: number): void {
+    const snapX = Math.floor(originX / WILD_CELL) * WILD_CELL;
+    const snapS = Math.floor(originS / WILD_CELL) * WILD_CELL;
+
+    this.wildGroup.position.set(
+      snapX - originX,
+      -originY,
+      -signedTrackDelta(snapS, originS)
+    );
+
+    if (snapX === this.lastWildSnapX && snapS === this.lastWildSnapS) {
+      return;
+    }
+    this.lastWildSnapX = snapX;
+    this.lastWildSnapS = snapS;
+
+    const d = this._dummy;
+    const radiusCells = 5; // ±180m around player
+    let treeC = 0;
+    let rockC = 0;
+
+    for (let dz = -radiusCells; dz <= radiusCells; dz++) {
+      for (let dx = -radiusCells; dx <= radiusCells; dx++) {
+        const cellX = Math.round(snapX / WILD_CELL) + dx;
+        const cellS = Math.round(snapS / WILD_CELL) + dz;
+        const wrappedCellS = ((cellS % Math.round(TRACK_LENGTH / WILD_CELL)) + Math.round(TRACK_LENGTH / WILD_CELL)) % Math.round(TRACK_LENGTH / WILD_CELL);
+
+        const seed = Math.imul(cellX, 73856093) ^ Math.imul(wrappedCellS, 19349663);
+        const h1 = hash1(seed);
+        if (h1 > 0.56) continue;
+
+        const h2 = hash1(seed + 17);
+        const h3 = hash1(seed + 53);
+        const wx = (cellX + 0.15 + h2 * 0.7) * WILD_CELL;
+        const ws = (cellS + 0.15 + h3 * 0.7) * WILD_CELL;
+
+        // Keep clear of highway & roadside scenery strip (already populated by updateProps)
+        if (Math.abs(wx - roadX(ws)) < 56) continue;
+
+        const wy = openWorldGroundY(wx, ws);
+        const relH = wy - roadY(ws);
+        const lx = wx - snapX;
+        const lz = -(ws - snapS);
+
+        if ((relH > 20 || h1 > 0.42) && rockC < MAX_WILD_PROPS) {
+          const sc = 0.8 + h2 * 1.1;
+          d.position.set(lx, wy - 0.5, lz);
+          d.rotation.set(0, h3 * 6.28, 0);
+          d.scale.set(sc, sc * (0.7 + h1 * 1.2), sc);
+          d.updateMatrix();
+          this.wildRockInst.setMatrixAt(rockC++, d.matrix);
+        } else if (treeC < MAX_WILD_PROPS) {
+          const sc = 0.9 + h2 * 0.85;
+          d.position.set(lx, wy - 0.25, lz);
+          d.rotation.set(0, h3 * 6.28, 0);
+          d.scale.set(sc, sc, sc);
+          d.updateMatrix();
+          this.wildTrunkInst.setMatrixAt(treeC, d.matrix);
+          this.wildPineInst.setMatrixAt(treeC, d.matrix);
+          treeC++;
+        }
+      }
+    }
+
+    this.wildTrunkInst.count = treeC;
+    this.wildPineInst.count = treeC;
+    this.wildRockInst.count = rockC;
+    this.wildTrunkInst.instanceMatrix.needsUpdate = true;
+    this.wildPineInst.instanceMatrix.needsUpdate = true;
+    this.wildRockInst.instanceMatrix.needsUpdate = true;
+  }
+
   private getTargetDpr(): number {
     const profile = QUALITY_PROFILES[this.qualityTier];
     const cap = this.isCoarsePointer ? profile.dprMobile : profile.dprDesktop;
@@ -1307,9 +1572,21 @@ export class WorldRenderer {
       this.resize();
     }
 
-    const originS = onFoot?.active ? onFoot.ws : local.s;
-    const originX = roadX(originS);
-    const originY = roadY(originS);
+    const originS = onFoot?.active
+      ? onFoot.ws
+      : local.freeRoam && local.worldS !== undefined
+        ? local.worldS
+        : local.s;
+    const originX = onFoot?.active
+      ? onFoot.wx
+      : local.freeRoam && local.worldX !== undefined
+        ? local.worldX
+        : roadX(originS);
+    const originY = onFoot?.active
+      ? onFoot.wy
+      : local.freeRoam && local.worldY !== undefined
+        ? local.worldY
+        : roadY(originS);
 
     // Smooth biome + weather atmosphere blending
     const biome = getBiomeAt(originS);
@@ -1322,11 +1599,13 @@ export class WorldRenderer {
       this.terrainMat.color.copy(this.smoothTerrainTint);
     }
 
-    // 1. Update sliding road & open-world terrain ribbons
+    // 1. Update infinite procedural open-world terrain + sliding highway ribbons
+    this.updateInfiniteTerrain(originS, originX, originY);
     this.updateRoadRibbons(originS, originX, originY);
 
-    // 2. Update deterministic instanced roadside props + boost pads + Chinese landmarks
+    // 2. Update deterministic instanced roadside props + infinite wilderness props + landmarks
     this.updateProps(originS, originX, originY, timeSec);
+    this.updateWildernessProps(originS, originX, originY);
     this.updateRoadsideLandmarks(originS, originX, originY);
 
     // 2b. Update Minecraft-style voxel world blocks & aim highlight
@@ -1640,11 +1919,15 @@ export class WorldRenderer {
     const activeSlices = QUALITY_PROFILES[this.qualityTier].roadSlices;
     if (
       Math.abs(originS - this.lastRoadBuiltS) < 0.015 &&
+      Math.abs(originX - this.lastRoadBuiltX) < 0.015 &&
+      Math.abs(originY - this.lastRoadBuiltY) < 0.015 &&
       this.lastRoadSlicesBuilt === activeSlices
     ) {
       return;
     }
     this.lastRoadBuiltS = originS;
+    this.lastRoadBuiltX = originX;
+    this.lastRoadBuiltY = originY;
     this.lastRoadSlicesBuilt = activeSlices;
 
     const baseS = Math.floor(originS / ROAD_SLICE_SNAP) * ROAD_SLICE_SNAP;
@@ -1657,14 +1940,6 @@ export class WorldRenderer {
     const clUv = this.curbLGeo.attributes.uv as THREE.BufferAttribute;
     const crPos = this.curbRGeo.attributes.position as THREE.BufferAttribute;
     const crUv = this.curbRGeo.attributes.uv as THREE.BufferAttribute;
-    const tlPos = this.terrainLGeo.attributes.position as THREE.BufferAttribute;
-    const tlUv = this.terrainLGeo.attributes.uv as THREE.BufferAttribute;
-    const trPos = this.terrainRGeo.attributes.position as THREE.BufferAttribute;
-    const trUv = this.terrainRGeo.attributes.uv as THREE.BufferAttribute;
-    const hlPos = this.hillLGeo.attributes.position as THREE.BufferAttribute;
-    const hlUv = this.hillLGeo.attributes.uv as THREE.BufferAttribute;
-    const hrPos = this.hillRGeo.attributes.position as THREE.BufferAttribute;
-    const hrUv = this.hillRGeo.attributes.uv as THREE.BufferAttribute;
 
     const rArr = rPos.array as Float32Array;
     const rUvArr = rUv.array as Float32Array;
@@ -1672,19 +1947,9 @@ export class WorldRenderer {
     const clUvArr = clUv.array as Float32Array;
     const crArr = crPos.array as Float32Array;
     const crUvArr = crUv.array as Float32Array;
-    const tlArr = tlPos.array as Float32Array;
-    const tlUvArr = tlUv.array as Float32Array;
-    const trArr = trPos.array as Float32Array;
-    const trUvArr = trUv.array as Float32Array;
-    const hlArr = hlPos.array as Float32Array;
-    const hlUvArr = hlUv.array as Float32Array;
-    const hrArr = hrPos.array as Float32Array;
-    const hrUvArr = hrUv.array as Float32Array;
 
     const f = this._f;
     const curbOuter = ROAD_HALF_WIDTH + CURB_WIDTH;
-    const flatFar = OPEN_WORLD_TERRAIN_FLAT;
-    const hillFar = OPEN_WORLD_TERRAIN_FAR;
 
     for (let i = 0; i < activeSlices; i++) {
       const s = baseS + ROAD_SLICE_OFFSETS[i];
@@ -1697,7 +1962,6 @@ export class WorldRenderer {
       const ui = i * 4;
       const vRoad = (s - uvBaseRoad) / 12.0;
       const vCurb = (s - uvBaseCurb) / 4.0;
-      const vTerr = (s - uvBaseRoad) / 10.0;
 
       // Asphalt surface: [-ROAD_HALF_WIDTH, +ROAD_HALF_WIDTH]
       rArr[vi] = cx - f.rx * ROAD_HALF_WIDTH;
@@ -1728,56 +1992,6 @@ export class WorldRenderer {
       crArr[vi + 5] = cz + f.rz * curbOuter;
       crUvArr[ui + 1] = vCurb;
       crUvArr[ui + 3] = vCurb;
-
-      // Wide fold-free buildable open-world plains (±120m along Euclidean X) matching openWorldGroundY()
-      tlArr[vi] = cx - flatFar;
-      tlArr[vi + 1] = cy - 0.02;
-      tlArr[vi + 2] = cz;
-      tlArr[vi + 3] = cx - f.rx * curbOuter;
-      tlArr[vi + 4] = cy - f.ry * curbOuter - 0.02;
-      tlArr[vi + 5] = cz - f.rz * curbOuter;
-      tlUvArr[ui] = 0;
-      tlUvArr[ui + 1] = vTerr;
-      tlUvArr[ui + 2] = 12.0;
-      tlUvArr[ui + 3] = vTerr;
-
-      trArr[vi] = cx + f.rx * curbOuter;
-      trArr[vi + 1] = cy + f.ry * curbOuter - 0.02;
-      trArr[vi + 2] = cz + f.rz * curbOuter;
-      trArr[vi + 3] = cx + flatFar;
-      trArr[vi + 4] = cy - 0.02;
-      trArr[vi + 5] = cz;
-      trUvArr[ui] = 0;
-      trUvArr[ui + 1] = vTerr;
-      trUvArr[ui + 2] = 12.0;
-      trUvArr[ui + 3] = vTerr;
-
-      // Distant scenic hills beyond ±120m (strictly periodic over 2400m circuit)
-      const hillPhase = (s * Math.PI * 2) / TRACK_LENGTH;
-      const hillL = Math.sin(hillPhase * 6) * 5.0 + 4.0;
-      const hillR = Math.cos(hillPhase * 5) * 5.0 + 2.5;
-
-      hlArr[vi] = cx - hillFar;
-      hlArr[vi + 1] = cy - 0.02 + hillL;
-      hlArr[vi + 2] = cz;
-      hlArr[vi + 3] = cx - flatFar;
-      hlArr[vi + 4] = cy - 0.02;
-      hlArr[vi + 5] = cz;
-      hlUvArr[ui] = 0;
-      hlUvArr[ui + 1] = vTerr;
-      hlUvArr[ui + 2] = 8.0;
-      hlUvArr[ui + 3] = vTerr;
-
-      hrArr[vi] = cx + flatFar;
-      hrArr[vi + 1] = cy - 0.02;
-      hrArr[vi + 2] = cz;
-      hrArr[vi + 3] = cx + hillFar;
-      hrArr[vi + 4] = cy - 0.02 + hillR;
-      hrArr[vi + 5] = cz;
-      hrUvArr[ui] = 0;
-      hrUvArr[ui + 1] = vTerr;
-      hrUvArr[ui + 2] = 8.0;
-      hrUvArr[ui + 3] = vTerr;
     }
 
     rPos.needsUpdate = true;
@@ -1786,14 +2000,6 @@ export class WorldRenderer {
     clUv.needsUpdate = true;
     crPos.needsUpdate = true;
     crUv.needsUpdate = true;
-    tlPos.needsUpdate = true;
-    tlUv.needsUpdate = true;
-    trPos.needsUpdate = true;
-    trUv.needsUpdate = true;
-    hlPos.needsUpdate = true;
-    hlUv.needsUpdate = true;
-    hrPos.needsUpdate = true;
-    hrUv.needsUpdate = true;
   }
 
   private updateProps(originS: number, originX: number, originY: number, timeSec: number): void {
@@ -1804,11 +2010,15 @@ export class WorldRenderer {
 
     const propsDirty =
       Math.abs(originS - this.lastPropsBuiltS) >= 0.04 ||
+      Math.abs(originX - this.lastPropsBuiltX) >= 0.04 ||
+      Math.abs(originY - this.lastPropsBuiltY) >= 0.04 ||
       this.lastPropsLampBoost !== this.lastWeatherLampBoost ||
       this.lastPropsRange !== propRange;
 
     if (propsDirty) {
       this.lastPropsBuiltS = originS;
+      this.lastPropsBuiltX = originX;
+      this.lastPropsBuiltY = originY;
       this.lastPropsLampBoost = this.lastWeatherLampBoost;
       this.lastPropsRange = propRange;
 
@@ -1864,11 +2074,12 @@ export class WorldRenderer {
             }
           }
 
-          // Biome-specific trees & canyon mesas spread across the wide open-world meadow
+          // Biome-specific trees & canyon mesas anchored cleanly on exact openWorldGroundY
           if (!isCraftOutpostZone && h < 0.62) {
             const sc = 0.85 + h2 * 0.65;
             const wx = f.x + side * dist;
-            worldAbsToLocal(wx, f.y - 0.12, s, originS, originX, originY, pos);
+            const wy = openWorldGroundY(wx, s) - 0.15;
+            worldAbsToLocal(wx, wy, s, originS, originX, originY, pos);
             d.position.copy(pos);
             d.rotation.set(0, h * 6.28, 0);
             d.scale.set(sc, sc, sc);
@@ -1887,7 +2098,8 @@ export class WorldRenderer {
             }
           } else if (!isCraftOutpostZone && h > 0.84 && rockC < MAX_PROPS_PER_POOL) {
             const wx = f.x + side * (dist + 18);
-            worldAbsToLocal(wx, f.y - 0.12, s, originS, originX, originY, pos);
+            const wy = openWorldGroundY(wx, s) - 0.25;
+            worldAbsToLocal(wx, wy, s, originS, originX, originY, pos);
             d.position.copy(pos);
             d.rotation.set(0, h2 * 6.28, 0);
             d.scale.set(0.8 + h2, 0.7 + h2 * 1.3, 0.8 + h2);
@@ -2659,18 +2871,14 @@ export class WorldRenderer {
       const camH = this.cameraMode === 2 ? 1.48 : this.cameraMode === 1 ? 1.75 : 2.6;
       const camWx = local.worldX - fwdX * backDist;
       const camWs = local.worldS - fwdS * backDist;
-      const camWy = Math.max(openWorldGroundY(camWx, camWs) + 0.6, local.worldY + camH);
+      const camWy = Math.max(openWorldGroundY(camWx, camWs) + 0.9, local.worldY + camH);
+
+      const lookWx = local.worldX + fwdX * 14;
+      const lookWs = local.worldS + fwdS * 14;
+      const lookWy = Math.max(local.worldY + 1.15, openWorldGroundY(lookWx, lookWs) + 0.9);
 
       worldAbsToLocal(camWx, camWy, camWs, originS, originX, originY, this._v1);
-      worldAbsToLocal(
-        local.worldX + fwdX * 14,
-        local.worldY + 1.15,
-        local.worldS + fwdS * 14,
-        originS,
-        originX,
-        originY,
-        this._v2
-      );
+      worldAbsToLocal(lookWx, lookWy, lookWs, originS, originX, originY, this._v2);
 
       if (this.shakeTime > 0) {
         this.shakeTime -= dt;

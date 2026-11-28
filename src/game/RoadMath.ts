@@ -4,9 +4,8 @@ export const ROAD_HALF_WIDTH = 7.6;
 export const CURB_WIDTH = 0.65;
 export const SHOULDER_HALF_WIDTH = 11.2;
 export const MAX_LATERAL = 10.4;
-export const OPEN_WORLD_MAX_LATERAL = 112.0;
-export const OPEN_WORLD_TERRAIN_FLAT = 120.0;
-export const OPEN_WORLD_TERRAIN_FAR = 196.0;
+export const OPEN_WORLD_FLAT_BAND = 42.0;
+export const OPEN_WORLD_HILL_BLEND = 86.0;
 export const LANE_CENTERS = [-5.6, -1.9, 1.9, 5.6] as const;
 
 export const TRACK_LENGTH = 2400; // Seamless 2400m cyclic circuit (4 × 600m biomes)
@@ -333,9 +332,11 @@ export function worldAbsToLocal(
 }
 
 /**
- * Exact deterministic ground elevation in Euclidean world space at (wx, ws).
- * Matches the highway surface near the road, flat buildable plains out to ±120m,
- * and gentle scenic hills beyond ±120m.
+ * Exact deterministic ground elevation in infinite Euclidean world space at (wx, ws).
+ * - Matches highway surface near the road
+ * - Flat buildable meadow up to ±42m from road center (for gas stations, diners & craft yards)
+ * - Infinitely extending multi-octave rolling hills, valleys, and climbable mountains beyond ±42m!
+ * Strictly periodic in ws (period = TRACK_LENGTH) and unbounded in wx (-∞..+∞).
  */
 export function openWorldGroundY(wx: number, ws: number): number {
   sampleRoadFrame(ws, _tmpFrame);
@@ -354,17 +355,25 @@ export function openWorldGroundY(wx: number, ws: number): number {
     return curbY + (_tmpFrame.y - 0.02 - curbY) * t;
   }
 
-  if (absLat <= OPEN_WORLD_TERRAIN_FLAT) {
+  if (absLat <= OPEN_WORLD_FLAT_BAND) {
     return _tmpFrame.y - 0.02;
   }
 
-  const hillT = Math.min(
+  // Smoothstep blend from flat roadside meadow into infinite rolling hills & mountains
+  const rawT = Math.min(
     1,
-    (absLat - OPEN_WORLD_TERRAIN_FLAT) / (OPEN_WORLD_TERRAIN_FAR - OPEN_WORLD_TERRAIN_FLAT)
+    (absLat - OPEN_WORLD_FLAT_BAND) / (OPEN_WORLD_HILL_BLEND - OPEN_WORLD_FLAT_BAND)
   );
-  const hillPhase = (ws * Math.PI * 2) / TRACK_LENGTH;
-  const hill = lat < 0 ? Math.sin(hillPhase * 6) * 5.0 + 4.0 : Math.cos(hillPhase * 5) * 5.0 + 2.5;
-  return _tmpFrame.y - 0.02 + hill * hillT;
+  const blend = rawT * rawT * (3 - 2 * rawT);
+
+  const kS = (Math.PI * 2) / TRACK_LENGTH;
+  const ridge1 = Math.sin(wx * 0.011 + ws * kS * 5) * 13.5;
+  const ridge2 = Math.cos(wx * 0.024 - ws * kS * 11 + 1.1) * 6.8;
+  const ridge3 = Math.sin(wx * 0.049 + ws * kS * 19 + 0.4) * 2.2;
+  const peakWave = Math.sin(wx * 0.0052 + 0.7) * Math.cos(ws * kS * 3 - 0.35);
+  const mountain = peakWave > 0 ? peakWave * peakWave * 30.0 : peakWave * 5.0;
+
+  return _tmpFrame.y - 0.02 + (ridge1 + ridge2 + ridge3 + mountain + 6.0) * blend;
 }
 
 /**

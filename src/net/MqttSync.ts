@@ -2238,8 +2238,8 @@ export class MqttSync {
       spinOut = (itemBits & (1 << 6)) !== 0;
     }
 
-    const cx = clamp(x, -125, 125);
-    const cy = clamp(y, -16, 80);
+    const cx = clamp(x, -100000, 100000);
+    const cy = clamp(y, -64, 256);
     const cspeed = clamp(speed, -10, 120);
     const cvx = clamp(vx, -40, 40);
     const clean = clamp(lean, -1.5, 1.5);

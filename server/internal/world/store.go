@@ -12,8 +12,8 @@ import (
 
 const (
 	TrackLength = 2400
-	MinGY       = -24
-	MaxGY       = 88
+	MinGY       = -64
+	MaxGY       = 256
 )
 
 type BlockKey struct {
@@ -289,10 +289,6 @@ func (rw *RoomWorld) SetBlock(gx, gy, gz, blockType int) bool {
 		return false
 	}
 	wgz := WrapGZ(gz)
-	roadCenter := roadXApprox(float64(wgz) + 0.5)
-	if math.Abs(float64(gx)+0.5-roadCenter) > 125 {
-		return false
-	}
 	k := BlockKey{GX: gx, GY: gy, GZ: wgz}
 	rw.mu.Lock()
 	defer rw.mu.Unlock()

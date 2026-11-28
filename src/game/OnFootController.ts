@@ -1,7 +1,5 @@
 import {
-  OPEN_WORLD_MAX_LATERAL,
   openWorldGroundY,
-  roadX,
   signedTrackDelta,
 } from './RoadMath';
 import { BlockType, VoxelRaycastHit, VoxelWorld } from './VoxelWorld';
@@ -277,14 +275,7 @@ export class OnFootController {
       st.vs = 0;
     }
 
-    // Clamp to open-world lateral boundaries
-    const centerX = roadX(st.ws);
-    const lat = st.wx - centerX;
-    if (Math.abs(lat) > OPEN_WORLD_MAX_LATERAL) {
-      st.wx = centerX + Math.sign(lat) * OPEN_WORLD_MAX_LATERAL;
-      st.vx = 0;
-    }
-
+    // Infinite open world: zero lateral walls!
     // Vertical resolution (blocks + natural open-world ground)
     const prevWy = st.wy;
     let nextWy = st.wy + st.vy * step;

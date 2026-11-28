@@ -1,6 +1,5 @@
 import {
   MAX_LATERAL,
-  OPEN_WORLD_MAX_LATERAL,
   ROAD_HALF_WIDTH,
   RoadFrame,
   SHOULDER_HALF_WIDTH,
@@ -1105,23 +1104,31 @@ export class PlayerPhysics {
       }
     }
 
-    // Clamp to open-world lateral boundary
-    const centerX = roadX(nextWs);
-    const lat = nextWx - centerX;
-    if (Math.abs(lat) > OPEN_WORLD_MAX_LATERAL) {
-      nextWx = centerX + Math.sign(lat) * OPEN_WORLD_MAX_LATERAL;
-      st.speed *= 0.86;
-    }
-
+    // Infinite open world: zero lateral walls! Ride freely over hills, valleys & mountains
     this.freeWx = nextWx;
     this.freeWs = nextWs;
 
-    // Vertical gravity & landing
-    this.freeWy += this.vy * step;
-    this.vy -= GRAVITY * step;
+    // Vertical gravity & smooth terrain/block following (cresting hills launches cleanly!)
+    const prevGround = openWorldGroundY(this.freeWx - dx, this.freeWs - ds);
     const newGround = openWorldGroundY(this.freeWx, this.freeWs);
+    const slopeVy = (newGround - prevGround) / step;
+
+    if (grounded && this.vy <= 0) {
+      // Stick smoothly to climbing slopes; gently lift off when cresting steep hilltops at high speed
+      if (slopeVy < -6.5 && speedMag > 24) {
+        this.vy = Math.max(-2.0, slopeVy * 0.35);
+        this.freeWy += this.vy * step;
+      } else {
+        this.freeWy = newGround;
+        this.vy = 0;
+      }
+    } else {
+      this.freeWy += this.vy * step;
+      this.vy -= GRAVITY * step;
+    }
+
     const newSupport = voxels
-      ? Math.max(newGround, voxels.getSupportHeight(this.freeWx, this.freeWs, 0.48, 0.88, this.freeWy + 0.25))
+      ? Math.max(newGround, voxels.getSupportHeight(this.freeWx, this.freeWs, 0.48, 0.88, this.freeWy + 0.35))
       : newGround;
 
     if (this.freeWy <= newSupport) {
