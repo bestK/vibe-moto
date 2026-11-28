@@ -4,6 +4,9 @@ export const ROAD_HALF_WIDTH = 7.6;
 export const CURB_WIDTH = 0.65;
 export const SHOULDER_HALF_WIDTH = 11.2;
 export const MAX_LATERAL = 10.4;
+export const OPEN_WORLD_MAX_LATERAL = 112.0;
+export const OPEN_WORLD_TERRAIN_FLAT = 120.0;
+export const OPEN_WORLD_TERRAIN_FAR = 196.0;
 export const LANE_CENTERS = [-5.6, -1.9, 1.9, 5.6] as const;
 
 export const TRACK_LENGTH = 2400; // Seamless 2400m cyclic circuit (4 × 600m biomes)
@@ -288,6 +291,88 @@ export function roadToLocalWorld(
 ): THREE.Vector3 {
   sampleRoadFrame(s, _tmpFrame);
   return roadFrameToLocalWorld(_tmpFrame, s, lateralX, heightY, originS, originX, originY, out);
+}
+
+export interface WorldAbsPos {
+  wx: number;
+  wy: number;
+  ws: number;
+}
+
+/**
+ * Converts road-relative (s, lateralX, heightY) to periodic Euclidean world coordinates (wx, wy, ws),
+ * where ws preserves unwrapped lap distance and wraps mod TRACK_LENGTH for terrain/blocks.
+ */
+export function roadToWorldAbs(
+  s: number,
+  lateralX: number,
+  heightY: number,
+  out: WorldAbsPos
+): WorldAbsPos {
+  sampleRoadFrame(s, _tmpFrame);
+  out.wx = _tmpFrame.x + _tmpFrame.rx * lateralX + _tmpFrame.ux * heightY;
+  out.wy = _tmpFrame.y + _tmpFrame.ry * lateralX + _tmpFrame.uy * heightY;
+  out.ws = s - _tmpFrame.rz * lateralX - _tmpFrame.uz * heightY;
+  return out;
+}
+
+/**
+ * Converts periodic Euclidean world coordinates (wx, wy, ws) into floating-origin local space.
+ */
+export function worldAbsToLocal(
+  wx: number,
+  wy: number,
+  ws: number,
+  originS: number,
+  originX: number,
+  originY: number,
+  out: THREE.Vector3
+): THREE.Vector3 {
+  out.set(wx - originX, wy - originY, -signedTrackDelta(ws, originS));
+  return out;
+}
+
+/**
+ * Exact deterministic ground elevation in Euclidean world space at (wx, ws).
+ * Matches the highway surface near the road, flat buildable plains out to ±120m,
+ * and gentle scenic hills beyond ±120m.
+ */
+export function openWorldGroundY(wx: number, ws: number): number {
+  sampleRoadFrame(ws, _tmpFrame);
+  const lat = wx - _tmpFrame.x;
+  const absLat = Math.abs(lat);
+  const curbOuter = ROAD_HALF_WIDTH + CURB_WIDTH;
+
+  if (absLat <= curbOuter) {
+    return _tmpFrame.y + _tmpFrame.ry * lat;
+  }
+
+  const blendSpan = 3.2;
+  if (absLat < curbOuter + blendSpan) {
+    const t = (absLat - curbOuter) / blendSpan;
+    const curbY = _tmpFrame.y + _tmpFrame.ry * (Math.sign(lat) * curbOuter);
+    return curbY + (_tmpFrame.y - 0.02 - curbY) * t;
+  }
+
+  if (absLat <= OPEN_WORLD_TERRAIN_FLAT) {
+    return _tmpFrame.y - 0.02;
+  }
+
+  const hillT = Math.min(
+    1,
+    (absLat - OPEN_WORLD_TERRAIN_FLAT) / (OPEN_WORLD_TERRAIN_FAR - OPEN_WORLD_TERRAIN_FLAT)
+  );
+  const hillPhase = (ws * Math.PI * 2) / TRACK_LENGTH;
+  const hill = lat < 0 ? Math.sin(hillPhase * 6) * 5.0 + 4.0 : Math.cos(hillPhase * 5) * 5.0 + 2.5;
+  return _tmpFrame.y - 0.02 + hill * hillT;
+}
+
+/**
+ * Road forward yaw angle in Euclidean world XZ plane (0 = -Z forward, positive = left/CCW).
+ */
+export function roadForwardYaw(s: number): number {
+  sampleRoadFrame(s, _tmpFrame);
+  return Math.atan2(-_tmpFrame.tx, -_tmpFrame.tz);
 }
 
 /**

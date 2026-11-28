@@ -160,6 +160,23 @@ export interface RiderRenderState {
   deliveryRole?: 'meituan' | 'eleme' | null;
   enraged?: boolean;
   enragedTargetId?: string | null;
+  freeRoam?: boolean;
+  heading?: number; // world yaw in radians (0 = -Z, positive = left/CCW) when freeRoam or parked
+  onFoot?: boolean;
+  worldX?: number;
+  worldY?: number;
+  worldS?: number;
+}
+
+export interface VoxelNetEvent {
+  t: 'vox';
+  from: string;
+  op: 'set' | 'del';
+  gx: number;
+  gy: number;
+  gz: number;
+  b?: number;
+  ts: number;
 }
 
 export interface CombatHitEvent {

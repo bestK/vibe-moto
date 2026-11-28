@@ -7,6 +7,7 @@ import {
   getRiderAvatarDataUrl,
 } from '../game/PixelAvatars';
 import { getLapNumber, signedTrackDelta } from '../game/RoadMath';
+import { BLOCK_SPECS, BLOCK_SPEC_BY_ID, BlockType, getBlockSwatchUrl } from '../game/VoxelWorld';
 import {
   BIKE_PALETTES,
   BOT_PALETTE,
@@ -22,6 +23,7 @@ import {
 } from '../game/types';
 import {
   deliveryName,
+  getLang,
   itemName,
   onLangChange,
   t,
@@ -38,6 +40,7 @@ import {
 } from './PixelIcons';
 import type { WeatherId } from '../game/WeatherSystem';
 import type { LobbyRoomSummary } from '../net/MqttSync';
+import type { GameAccount, ServerConnStatus, ServerHealthInfo } from '../net/ServerClient';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline';
 export type ToastAccent = 'gold' | 'cyan' | 'red';
@@ -84,6 +87,24 @@ export interface HudCallbacks {
   onRenameRoom?(title: string): void;
   onRefreshLobbyRooms?(): void;
   onTouchInput?(patch: TouchInputPatch): void;
+  onToggleDismount?(): void;
+  onReturnToTrack?(): void;
+  onSelectBlock?(block: BlockType): void;
+  onBreakBlock?(): void;
+  onPlaceBlock?(): void;
+  onClearBlocks?(): void;
+  onFootTouchInput?(patch: { forward?: number; strafe?: number; jump?: boolean; sprint?: boolean }): void;
+  onServerModalToggle?(open: boolean): void;
+  onSaveServerUrl?(url: string): Promise<ServerHealthInfo>;
+  onResetServerUrl?(): Promise<ServerHealthInfo>;
+  onPingServer?(url?: string): Promise<ServerHealthInfo>;
+  onAccountLogin?(username: string, password: string): Promise<{ ok: boolean; error?: string }>;
+  onAccountRegister?(
+    username: string,
+    password: string,
+    displayName: string
+  ): Promise<{ ok: boolean; error?: string }>;
+  onAccountLogout?(): void;
 }
 
 const STANDINGS_SLOTS = 5;
@@ -248,6 +269,62 @@ export class Hud {
   private readonly langBtnEl: HTMLButtonElement;
   private readonly gyroBtnEl: HTMLButtonElement;
   private readonly regroupBtnEl: HTMLButtonElement;
+  private readonly dismountBtnEl: HTMLButtonElement;
+  private readonly dismountIconEl: HTMLSpanElement;
+  private readonly dismountLabelEl: HTMLSpanElement;
+  private readonly returnTrackBtnEl: HTMLButtonElement;
+  private readonly returnTrackLabelEl: HTMLSpanElement;
+  private readonly serverBtnEl: HTMLButtonElement;
+  private readonly serverDotEl: HTMLSpanElement;
+  private readonly serverBtnLabelEl: HTMLSpanElement;
+
+  // Server & Game Account Modal
+  private readonly serverOverlayEl: HTMLDivElement;
+  private readonly serverModalTitleEl: HTMLSpanElement;
+  private readonly serverUrlLabelEl: HTMLDivElement;
+  private readonly serverUrlInputEl: HTMLInputElement;
+  private readonly serverSaveBtnEl: HTMLButtonElement;
+  private readonly serverResetBtnEl: HTMLButtonElement;
+  private readonly serverStatusEl: HTMLDivElement;
+  private readonly accountTitleEl: HTMLDivElement;
+  private readonly accountTabsEl: HTMLDivElement;
+  private readonly accountLoginTabEl: HTMLButtonElement;
+  private readonly accountRegTabEl: HTMLButtonElement;
+  private readonly accountFormEl: HTMLFormElement;
+  private readonly accountUserInputEl: HTMLInputElement;
+  private readonly accountPassInputEl: HTMLInputElement;
+  private readonly accountNickInputEl: HTMLInputElement;
+  private readonly accountSubmitBtnEl: HTMLButtonElement;
+  private readonly accountErrorEl: HTMLDivElement;
+  private readonly accountProfileCardEl: HTMLDivElement;
+  private readonly accountProfileNameEl: HTMLDivElement;
+  private readonly accountProfileSubEl: HTMLDivElement;
+  private readonly accountStatsEl: HTMLDivElement;
+  private readonly accountLogoutBtnEl: HTMLButtonElement;
+  private serverModalOpen = false;
+  private accountMode: 'login' | 'register' = 'register';
+  private serverConnStatus: ServerConnStatus = 'disconnected';
+  private currentAccount: GameAccount | null = null;
+  private currentServerUrl = '';
+
+  // Open-world Minecraft-style building HUD
+  private readonly crosshairEl: HTMLDivElement;
+  private readonly buildDockEl: HTMLDivElement;
+  private readonly buildBlockLabelEl: HTMLDivElement;
+  private readonly buildHintEl: HTMLDivElement;
+  private readonly hotbarSlotEls: HTMLButtonElement[] = [];
+  private readonly hotbarClearBtnEl: HTMLButtonElement;
+  private readonly footTouchActionsEl: HTMLDivElement;
+  private readonly footPlaceLabelEl: HTMLSpanElement;
+  private readonly footBreakLabelEl: HTMLSpanElement;
+  private readonly footJumpLabelEl: HTMLSpanElement;
+  private isOnFoot = false;
+  private isFreeRoam = false;
+  private lastSelectedBlock: BlockType = 3;
+  private lastBikeFar = false;
+  private lastHasAimTarget = false;
+  private clearArmed = false;
+  private clearArmTimer: number | null = null;
 
   // Home / Room Lobby Modal
   private readonly homeOverlayEl: HTMLDivElement;
@@ -426,6 +503,12 @@ export class Hud {
   };
 
   private readonly onDocKeyDown = (e: KeyboardEvent): void => {
+    if (this.serverModalOpen && e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeServerModal();
+      return;
+    }
     if (this.homeModalOpen && e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -731,8 +814,65 @@ export class Hud {
       this.regroupBtnEl.blur();
     });
 
+    this.dismountBtnEl = document.createElement('button');
+    this.dismountBtnEl.type = 'button';
+    this.dismountBtnEl.className = 'vm-btn vm-btn-dismount';
+    this.dismountBtnEl.title = `${t('dismountBtn')} (G)`;
+    this.dismountIconEl = document.createElement('span');
+    this.dismountIconEl.className = 'vm-btn-icon';
+    this.dismountIconEl.innerHTML = getPixelIconSvg('walk', 'vm-icon-sm');
+    this.dismountLabelEl = document.createElement('span');
+    this.dismountLabelEl.textContent = t('dismountBtn');
+    const dismountKey = document.createElement('span');
+    dismountKey.className = 'vm-btn-key-tag';
+    dismountKey.textContent = 'G';
+    this.dismountBtnEl.append(this.dismountIconEl, this.dismountLabelEl, dismountKey);
+    this.dismountBtnEl.addEventListener('click', () => {
+      this.callbacks.onToggleDismount?.();
+      this.dismountBtnEl.blur();
+    });
+
+    this.returnTrackBtnEl = document.createElement('button');
+    this.returnTrackBtnEl.type = 'button';
+    this.returnTrackBtnEl.className = 'vm-btn vm-btn-track is-hidden';
+    this.returnTrackBtnEl.title = `${t('backToTrackBtn')} (H)`;
+    const trackIcon = document.createElement('span');
+    trackIcon.className = 'vm-btn-icon';
+    trackIcon.innerHTML = getPixelIconSvg('road', 'vm-icon-sm');
+    this.returnTrackLabelEl = document.createElement('span');
+    this.returnTrackLabelEl.textContent = t('backToTrackBtn');
+    const trackKey = document.createElement('span');
+    trackKey.className = 'vm-btn-key-tag';
+    trackKey.textContent = 'H';
+    this.returnTrackBtnEl.append(trackIcon, this.returnTrackLabelEl, trackKey);
+    this.returnTrackBtnEl.addEventListener('click', () => {
+      this.callbacks.onReturnToTrack?.();
+      this.returnTrackBtnEl.blur();
+    });
+
+    this.serverBtnEl = document.createElement('button');
+    this.serverBtnEl.type = 'button';
+    this.serverBtnEl.className = 'vm-btn vm-btn-server';
+    this.serverBtnEl.title = t('serverModalTitle');
+    this.serverDotEl = document.createElement('span');
+    this.serverDotEl.className = 'vm-srv-dot';
+    this.serverDotEl.dataset.status = 'disconnected';
+    const srvIcon = document.createElement('span');
+    srvIcon.className = 'vm-btn-icon';
+    srvIcon.innerHTML = getPixelIconSvg('server', 'vm-icon-sm');
+    this.serverBtnLabelEl = document.createElement('span');
+    this.serverBtnLabelEl.textContent = t('serverAccountBtn');
+    this.serverBtnEl.append(this.serverDotEl, srvIcon, this.serverBtnLabelEl);
+    this.serverBtnEl.addEventListener('click', () => {
+      this.openServerModal();
+      this.serverBtnEl.blur();
+    });
+
     actions.append(
       this.homeBtnEl,
+      this.serverBtnEl,
+      this.dismountBtnEl,
+      this.returnTrackBtnEl,
       this.muteBtnEl,
       this.pxBtnEl,
       camBtnEl,
@@ -1513,6 +1653,334 @@ export class Hud {
     homeCard.append(homeHead, this.homeRenameRowEl, this.homeLobbyWrapEl, homeForm);
     this.homeOverlayEl.appendChild(homeCard);
 
+    // -----------------------------------------------------------------------
+    // 5b. OPEN-WORLD MINECRAFT CROSSHAIR, 9-SLOT BLOCK HOTBAR & TOUCH BUILD UI
+    // -----------------------------------------------------------------------
+    this.crosshairEl = document.createElement('div');
+    this.crosshairEl.className = 'vm-crosshair is-hidden';
+
+    this.buildDockEl = document.createElement('div');
+    this.buildDockEl.className = 'vm-build-dock is-hidden';
+
+    this.buildBlockLabelEl = document.createElement('div');
+    this.buildBlockLabelEl.className = 'vm-build-block-label';
+    this.buildBlockLabelEl.textContent =
+      getLang() === 'zh' ? BLOCK_SPEC_BY_ID[3].zhName : BLOCK_SPEC_BY_ID[3].enName;
+
+    const hotbar = document.createElement('div');
+    hotbar.className = 'vm-hotbar';
+    for (let i = 0; i < BLOCK_SPECS.length; i++) {
+      const spec = BLOCK_SPECS[i];
+      const slotBtn = document.createElement('button');
+      slotBtn.type = 'button';
+      slotBtn.className = spec.id === 3 ? 'vm-hotbar-slot is-active' : 'vm-hotbar-slot';
+      slotBtn.title = `${spec.id}: ${spec.zhName}`;
+
+      const keyTag = document.createElement('span');
+      keyTag.className = 'vm-hotbar-key';
+      keyTag.textContent = String(spec.id);
+
+      const swatch = document.createElement('img');
+      swatch.className = 'vm-hotbar-swatch';
+      swatch.src = getBlockSwatchUrl(spec.id);
+      swatch.alt = spec.enName;
+      swatch.draggable = false;
+
+      slotBtn.append(keyTag, swatch);
+      slotBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+      slotBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.callbacks.onSelectBlock?.(spec.id);
+        slotBtn.blur();
+      });
+      this.hotbarSlotEls.push(slotBtn);
+      hotbar.appendChild(slotBtn);
+    }
+
+    this.hotbarClearBtnEl = document.createElement('button');
+    this.hotbarClearBtnEl.type = 'button';
+    this.hotbarClearBtnEl.className = 'vm-hotbar-slot vm-hotbar-clear';
+    this.hotbarClearBtnEl.textContent = t('clearBuildBtn');
+    this.hotbarClearBtnEl.title = t('clearBuildTitle');
+    this.hotbarClearBtnEl.addEventListener('pointerdown', (e) => e.stopPropagation());
+    this.hotbarClearBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!this.clearArmed) {
+        this.clearArmed = true;
+        this.hotbarClearBtnEl.classList.add('is-armed');
+        this.showToast(t('clearBuildTitle'), 'gold', 'warning');
+        if (this.clearArmTimer !== null) window.clearTimeout(this.clearArmTimer);
+        this.clearArmTimer = window.setTimeout(() => {
+          this.clearArmed = false;
+          this.clearArmTimer = null;
+          this.hotbarClearBtnEl.classList.remove('is-armed');
+        }, 3000);
+      } else {
+        this.clearArmed = false;
+        if (this.clearArmTimer !== null) {
+          window.clearTimeout(this.clearArmTimer);
+          this.clearArmTimer = null;
+        }
+        this.hotbarClearBtnEl.classList.remove('is-armed');
+        this.callbacks.onClearBlocks?.();
+      }
+      this.hotbarClearBtnEl.blur();
+    });
+    hotbar.appendChild(this.hotbarClearBtnEl);
+
+    this.buildHintEl = document.createElement('div');
+    this.buildHintEl.className = 'vm-build-hint';
+    this.buildHintEl.textContent = t('buildHint');
+
+    this.buildDockEl.append(this.buildBlockLabelEl, hotbar, this.buildHintEl);
+
+    // Mobile On-Foot Action Buttons (Place / Break / Jump)
+    this.footTouchActionsEl = document.createElement('div');
+    this.footTouchActionsEl.className = 'vm-foot-touch-actions';
+
+    const footJumpBtn = document.createElement('button');
+    footJumpBtn.type = 'button';
+    footJumpBtn.className = 'vm-foot-act-btn vm-foot-act-jump';
+    this.footJumpLabelEl = document.createElement('span');
+    this.footJumpLabelEl.textContent = t('jumpBtn');
+    footJumpBtn.appendChild(this.footJumpLabelEl);
+    footJumpBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.callbacks.onFootTouchInput?.({ jump: true });
+    });
+    const endJump = (e: PointerEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.callbacks.onFootTouchInput?.({ jump: false });
+    };
+    footJumpBtn.addEventListener('pointerup', endJump);
+    footJumpBtn.addEventListener('pointercancel', endJump);
+
+    const footActionRow = document.createElement('div');
+    footActionRow.className = 'vm-foot-touch-row';
+
+    const footBreakBtn = document.createElement('button');
+    footBreakBtn.type = 'button';
+    footBreakBtn.className = 'vm-foot-act-btn vm-foot-act-break';
+    footBreakBtn.innerHTML = getPixelIconSvg('pickaxe', 'vm-icon-sm');
+    this.footBreakLabelEl = document.createElement('span');
+    this.footBreakLabelEl.textContent = t('breakBtn');
+    footBreakBtn.appendChild(this.footBreakLabelEl);
+    footBreakBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.callbacks.onBreakBlock?.();
+    });
+
+    const footPlaceBtn = document.createElement('button');
+    footPlaceBtn.type = 'button';
+    footPlaceBtn.className = 'vm-foot-act-btn vm-foot-act-place';
+    footPlaceBtn.innerHTML = getPixelIconSvg('cube', 'vm-icon-sm');
+    this.footPlaceLabelEl = document.createElement('span');
+    this.footPlaceLabelEl.textContent = t('placeBtn');
+    footPlaceBtn.appendChild(this.footPlaceLabelEl);
+    footPlaceBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.callbacks.onPlaceBlock?.();
+    });
+
+    footActionRow.append(footBreakBtn, footPlaceBtn);
+    this.footTouchActionsEl.append(footJumpBtn, footActionRow);
+
+    // -----------------------------------------------------------------------
+    // 7. SERVER CONFIG & GAME ACCOUNT MODAL (Go + Minecraft Protocol Server)
+    // -----------------------------------------------------------------------
+    this.serverOverlayEl = document.createElement('div');
+    this.serverOverlayEl.className = 'vm-home-overlay vm-srv-overlay';
+    this.serverOverlayEl.setAttribute('role', 'dialog');
+    this.serverOverlayEl.setAttribute('aria-modal', 'true');
+    this.serverOverlayEl.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.target === this.serverOverlayEl) {
+        this.closeServerModal();
+      }
+    });
+
+    const srvCard = document.createElement('div');
+    srvCard.className = 'vm-slab vm-home-card vm-srv-card';
+    srvCard.addEventListener('pointerdown', (e: PointerEvent) => e.stopPropagation());
+
+    const srvHead = document.createElement('div');
+    srvHead.className = 'vm-home-head';
+    const srvTitleWrap = document.createElement('div');
+    srvTitleWrap.className = 'vm-home-title';
+    const srvTitleIcon = document.createElement('span');
+    srvTitleIcon.className = 'vm-btn-icon';
+    srvTitleIcon.innerHTML = getPixelIconSvg('server');
+    this.serverModalTitleEl = document.createElement('span');
+    this.serverModalTitleEl.textContent = t('serverModalTitle');
+    srvTitleWrap.append(srvTitleIcon, this.serverModalTitleEl);
+
+    const srvCloseBtn = document.createElement('button');
+    srvCloseBtn.type = 'button';
+    srvCloseBtn.className = 'vm-home-icon-btn';
+    srvCloseBtn.textContent = '×';
+    srvCloseBtn.addEventListener('click', () => this.closeServerModal());
+    srvHead.append(srvTitleWrap, srvCloseBtn);
+
+    const stopSrvInputKeys = (e: KeyboardEvent): void => {
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.closeServerModal();
+      }
+    };
+
+    // Section 1: Server Address Config
+    const srvSection = document.createElement('div');
+    srvSection.className = 'vm-srv-section';
+    this.serverUrlLabelEl = document.createElement('div');
+    this.serverUrlLabelEl.className = 'vm-srv-label';
+    this.serverUrlLabelEl.textContent = t('serverUrlLabel');
+
+    const srvUrlRow = document.createElement('div');
+    srvUrlRow.className = 'vm-srv-row';
+    this.serverUrlInputEl = document.createElement('input');
+    this.serverUrlInputEl.type = 'text';
+    this.serverUrlInputEl.className = 'vm-home-input';
+    this.serverUrlInputEl.spellcheck = false;
+    this.serverUrlInputEl.placeholder = t('serverUrlPlaceholder');
+    this.serverUrlInputEl.addEventListener('keydown', stopSrvInputKeys);
+    this.serverUrlInputEl.addEventListener('keyup', (e) => e.stopPropagation());
+
+    this.serverSaveBtnEl = document.createElement('button');
+    this.serverSaveBtnEl.type = 'button';
+    this.serverSaveBtnEl.className = 'vm-home-btn vm-home-btn-primary vm-srv-btn-sm';
+    this.serverSaveBtnEl.textContent = t('serverSaveConnect');
+    this.serverSaveBtnEl.addEventListener('click', () => {
+      void this.handleSaveServer();
+    });
+
+    this.serverResetBtnEl = document.createElement('button');
+    this.serverResetBtnEl.type = 'button';
+    this.serverResetBtnEl.className = 'vm-home-btn vm-home-btn-resume vm-srv-btn-sm';
+    this.serverResetBtnEl.textContent = t('serverResetDefault');
+    this.serverResetBtnEl.addEventListener('click', () => {
+      void this.handleResetServer();
+    });
+
+    srvUrlRow.append(this.serverUrlInputEl, this.serverSaveBtnEl, this.serverResetBtnEl);
+
+    this.serverStatusEl = document.createElement('div');
+    this.serverStatusEl.className = 'vm-srv-status';
+    this.serverStatusEl.textContent = t('serverChecking');
+
+    srvSection.append(this.serverUrlLabelEl, srvUrlRow, this.serverStatusEl);
+
+    // Section 2: Game Account (Register / Login / Profile)
+    const accSection = document.createElement('div');
+    accSection.className = 'vm-srv-section';
+
+    this.accountTitleEl = document.createElement('div');
+    this.accountTitleEl.className = 'vm-srv-label';
+    this.accountTitleEl.textContent = t('accountSectionTitle');
+
+    this.accountTabsEl = document.createElement('div');
+    this.accountTabsEl.className = 'vm-srv-tabs';
+
+    this.accountRegTabEl = document.createElement('button');
+    this.accountRegTabEl.type = 'button';
+    this.accountRegTabEl.className = 'vm-srv-tab is-active';
+    this.accountRegTabEl.textContent = t('accountTabRegister');
+    this.accountRegTabEl.addEventListener('click', () => this.setAccountMode('register'));
+
+    this.accountLoginTabEl = document.createElement('button');
+    this.accountLoginTabEl.type = 'button';
+    this.accountLoginTabEl.className = 'vm-srv-tab';
+    this.accountLoginTabEl.textContent = t('accountTabLogin');
+    this.accountLoginTabEl.addEventListener('click', () => this.setAccountMode('login'));
+
+    this.accountTabsEl.append(this.accountRegTabEl, this.accountLoginTabEl);
+
+    this.accountFormEl = document.createElement('form');
+    this.accountFormEl.className = 'vm-srv-form';
+    this.accountFormEl.addEventListener('submit', (e: SubmitEvent) => {
+      e.preventDefault();
+      void this.handleAccountSubmit();
+    });
+
+    this.accountUserInputEl = document.createElement('input');
+    this.accountUserInputEl.type = 'text';
+    this.accountUserInputEl.maxLength = 20;
+    this.accountUserInputEl.autocomplete = 'username';
+    this.accountUserInputEl.className = 'vm-home-input';
+    this.accountUserInputEl.placeholder = t('accountUserPlaceholder');
+    this.accountUserInputEl.addEventListener('keydown', stopSrvInputKeys);
+    this.accountUserInputEl.addEventListener('keyup', (e) => e.stopPropagation());
+
+    this.accountPassInputEl = document.createElement('input');
+    this.accountPassInputEl.type = 'password';
+    this.accountPassInputEl.maxLength = 64;
+    this.accountPassInputEl.autocomplete = 'current-password';
+    this.accountPassInputEl.className = 'vm-home-input';
+    this.accountPassInputEl.placeholder = t('accountPassPlaceholder');
+    this.accountPassInputEl.addEventListener('keydown', stopSrvInputKeys);
+    this.accountPassInputEl.addEventListener('keyup', (e) => e.stopPropagation());
+
+    this.accountNickInputEl = document.createElement('input');
+    this.accountNickInputEl.type = 'text';
+    this.accountNickInputEl.maxLength = 14;
+    this.accountNickInputEl.className = 'vm-home-input';
+    this.accountNickInputEl.placeholder = t('accountNickPlaceholder');
+    this.accountNickInputEl.addEventListener('keydown', stopSrvInputKeys);
+    this.accountNickInputEl.addEventListener('keyup', (e) => e.stopPropagation());
+
+    this.accountErrorEl = document.createElement('div');
+    this.accountErrorEl.className = 'vm-home-error is-hidden';
+
+    this.accountSubmitBtnEl = document.createElement('button');
+    this.accountSubmitBtnEl.type = 'submit';
+    this.accountSubmitBtnEl.className = 'vm-home-btn vm-home-btn-primary';
+    this.accountSubmitBtnEl.textContent = t('accountRegisterBtn');
+
+    this.accountFormEl.append(
+      this.accountUserInputEl,
+      this.accountPassInputEl,
+      this.accountNickInputEl,
+      this.accountErrorEl,
+      this.accountSubmitBtnEl
+    );
+
+    // Logged-in Profile Card
+    this.accountProfileCardEl = document.createElement('div');
+    this.accountProfileCardEl.className = 'vm-srv-profile is-hidden';
+
+    const profInfo = document.createElement('div');
+    profInfo.className = 'vm-srv-profile-info';
+    this.accountProfileNameEl = document.createElement('div');
+    this.accountProfileNameEl.className = 'vm-srv-profile-name';
+    this.accountProfileSubEl = document.createElement('div');
+    this.accountProfileSubEl.className = 'vm-srv-profile-sub';
+    this.accountStatsEl = document.createElement('div');
+    this.accountStatsEl.className = 'vm-srv-profile-stats';
+    profInfo.append(this.accountProfileNameEl, this.accountProfileSubEl, this.accountStatsEl);
+
+    this.accountLogoutBtnEl = document.createElement('button');
+    this.accountLogoutBtnEl.type = 'button';
+    this.accountLogoutBtnEl.className = 'vm-home-btn vm-home-btn-resume';
+    this.accountLogoutBtnEl.textContent = t('accountLogoutBtn');
+    this.accountLogoutBtnEl.addEventListener('click', () => {
+      this.callbacks.onAccountLogout?.();
+    });
+
+    this.accountProfileCardEl.append(profInfo, this.accountLogoutBtnEl);
+
+    accSection.append(
+      this.accountTitleEl,
+      this.accountTabsEl,
+      this.accountFormEl,
+      this.accountProfileCardEl
+    );
+
+    srvCard.append(srvHead, srvSection, accSection);
+    this.serverOverlayEl.appendChild(srvCard);
+
     this.root.append(
       this.weatherFxEl,
       this.tapFlashLeftEl,
@@ -1526,7 +1994,11 @@ export class Hud {
       bottomRight,
       this.keycapsEl,
       touchLayer,
-      this.homeOverlayEl
+      this.crosshairEl,
+      this.buildDockEl,
+      this.footTouchActionsEl,
+      this.homeOverlayEl,
+      this.serverOverlayEl
     );
 
     container.textContent = '';
@@ -1992,6 +2464,199 @@ export class Hud {
     else this.tapFlashRightTimer = timer;
   }
 
+  setOpenWorldMode(
+    freeRoam: boolean,
+    onFoot: boolean,
+    selectedBlock: BlockType,
+    distToBike: number,
+    hasAimTarget: boolean
+  ): void {
+    const bikeFar = onFoot && distToBike > 6.0;
+
+    if (onFoot !== this.isOnFoot || bikeFar !== this.lastBikeFar) {
+      this.isOnFoot = onFoot;
+      this.lastBikeFar = bikeFar;
+      this.root.classList.toggle('is-on-foot', onFoot);
+      this.crosshairEl.classList.toggle('is-hidden', !onFoot);
+      this.buildDockEl.classList.toggle('is-hidden', !onFoot);
+      this.dismountBtnEl.classList.toggle('is-active', onFoot);
+      this.dismountIconEl.innerHTML = getPixelIconSvg(onFoot ? 'bike' : 'walk', 'vm-icon-sm');
+      this.dismountLabelEl.textContent = onFoot
+        ? bikeFar
+          ? t('summonBikeBtn')
+          : t('mountBtn')
+        : t('dismountBtn');
+    }
+
+    if (freeRoam !== this.isFreeRoam) {
+      this.isFreeRoam = freeRoam;
+      this.returnTrackBtnEl.classList.toggle('is-hidden', !freeRoam);
+    }
+
+    if (selectedBlock !== this.lastSelectedBlock) {
+      this.lastSelectedBlock = selectedBlock;
+      for (let i = 0; i < this.hotbarSlotEls.length; i++) {
+        this.hotbarSlotEls[i].classList.toggle('is-active', i + 1 === selectedBlock);
+      }
+      const spec = BLOCK_SPEC_BY_ID[selectedBlock];
+      this.buildBlockLabelEl.textContent = getLang() === 'zh' ? spec.zhName : spec.enName;
+    }
+
+    if (hasAimTarget !== this.lastHasAimTarget) {
+      this.lastHasAimTarget = hasAimTarget;
+      this.crosshairEl.classList.toggle('has-target', hasAimTarget);
+    }
+  }
+
+  isServerModalOpen(): boolean {
+    return this.serverModalOpen;
+  }
+
+  openServerModal(): void {
+    if (this.serverModalOpen) return;
+    if (this.avatarPopoverOpen) this.setAvatarPopoverOpen(false);
+    if (this.homeModalOpen) this.closeHomeModal();
+    this.serverModalOpen = true;
+    this.serverOverlayEl.classList.add('is-open');
+    this.serverUrlInputEl.value = this.currentServerUrl;
+    this.accountErrorEl.classList.add('is-hidden');
+    document.addEventListener('keydown', this.onDocKeyDown, true);
+    this.callbacks.onServerModalToggle?.(true);
+    void this.refreshServerPing();
+  }
+
+  closeServerModal(): void {
+    if (!this.serverModalOpen) return;
+    this.serverModalOpen = false;
+    this.serverOverlayEl.classList.remove('is-open');
+    if (!this.avatarPopoverOpen && !this.homeModalOpen) {
+      document.removeEventListener('keydown', this.onDocKeyDown, true);
+    }
+    this.callbacks.onServerModalToggle?.(false);
+  }
+
+  setServerState(status: ServerConnStatus, url: string): void {
+    this.serverConnStatus = status;
+    this.currentServerUrl = url;
+    this.serverDotEl.dataset.status = status;
+    if (!this.serverModalOpen) {
+      this.serverUrlInputEl.value = url;
+    }
+  }
+
+  setAccountState(account: GameAccount | null): void {
+    this.currentAccount = account;
+    if (account) {
+      this.serverBtnLabelEl.textContent = account.displayName || account.username;
+      this.accountTabsEl.classList.add('is-hidden');
+      this.accountFormEl.classList.add('is-hidden');
+      this.accountProfileCardEl.classList.remove('is-hidden');
+      this.accountProfileNameEl.textContent = account.displayName || account.username;
+      this.accountProfileSubEl.textContent = `@${account.username}`;
+      this.accountStatsEl.textContent = t('accountStatsText', {
+        placed: account.blocksPlaced,
+        broken: account.blocksBroken,
+      });
+    } else {
+      this.serverBtnLabelEl.textContent = t('serverAccountBtn');
+      this.accountTabsEl.classList.remove('is-hidden');
+      this.accountFormEl.classList.remove('is-hidden');
+      this.accountProfileCardEl.classList.add('is-hidden');
+    }
+  }
+
+  applyExternalName(name: string): void {
+    this.currentName = name;
+    this.nameTextEl.textContent = name;
+    this.nameInputEl.value = name;
+  }
+
+  private setAccountMode(mode: 'login' | 'register'): void {
+    this.accountMode = mode;
+    this.accountRegTabEl.classList.toggle('is-active', mode === 'register');
+    this.accountLoginTabEl.classList.toggle('is-active', mode === 'login');
+    this.accountNickInputEl.classList.toggle('is-hidden', mode !== 'register');
+    this.accountSubmitBtnEl.textContent =
+      mode === 'register' ? t('accountRegisterBtn') : t('accountLoginBtn');
+    this.accountErrorEl.classList.add('is-hidden');
+  }
+
+  private renderHealthStatus(info: ServerHealthInfo): void {
+    if (info.ok) {
+      this.serverStatusEl.classList.remove('is-offline');
+      this.serverStatusEl.classList.add('is-online');
+      this.serverStatusEl.textContent = t('serverOnlineMeta', {
+        ms: info.latencyMs,
+        online: info.online,
+        blocks: info.totalBlocks,
+        port: info.mcPort,
+      });
+    } else {
+      this.serverStatusEl.classList.remove('is-online');
+      this.serverStatusEl.classList.add('is-offline');
+      this.serverStatusEl.textContent = t('serverOfflineMeta');
+    }
+  }
+
+  private async refreshServerPing(): Promise<void> {
+    this.serverStatusEl.classList.remove('is-online', 'is-offline');
+    this.serverStatusEl.textContent = t('serverChecking');
+    const fn = this.callbacks.onPingServer;
+    if (!fn) return;
+    const info = await fn();
+    this.renderHealthStatus(info);
+  }
+
+  private async handleSaveServer(): Promise<void> {
+    const fn = this.callbacks.onSaveServerUrl;
+    if (!fn) return;
+    this.serverSaveBtnEl.disabled = true;
+    this.serverStatusEl.textContent = t('serverChecking');
+    try {
+      const info = await fn(this.serverUrlInputEl.value);
+      this.renderHealthStatus(info);
+    } finally {
+      this.serverSaveBtnEl.disabled = false;
+    }
+  }
+
+  private async handleResetServer(): Promise<void> {
+    const fn = this.callbacks.onResetServerUrl;
+    if (!fn) return;
+    this.serverResetBtnEl.disabled = true;
+    this.serverStatusEl.textContent = t('serverChecking');
+    try {
+      const info = await fn();
+      this.serverUrlInputEl.value = this.currentServerUrl;
+      this.renderHealthStatus(info);
+    } finally {
+      this.serverResetBtnEl.disabled = false;
+    }
+  }
+
+  private async handleAccountSubmit(): Promise<void> {
+    const username = this.accountUserInputEl.value.trim();
+    const password = this.accountPassInputEl.value;
+    const displayName = this.accountNickInputEl.value.trim();
+
+    this.accountErrorEl.classList.add('is-hidden');
+    this.accountSubmitBtnEl.disabled = true;
+    try {
+      const res =
+        this.accountMode === 'register'
+          ? await this.callbacks.onAccountRegister?.(username, password, displayName)
+          : await this.callbacks.onAccountLogin?.(username, password);
+      if (!res || !res.ok) {
+        this.accountErrorEl.textContent = res?.error || '操作失败';
+        this.accountErrorEl.classList.remove('is-hidden');
+        return;
+      }
+      this.accountPassInputEl.value = '';
+    } finally {
+      this.accountSubmitBtnEl.disabled = false;
+    }
+  }
+
   // -------------------------------------------------------------------------
   // PRIVATE LOCALE SYNC & GYRO CONTROLS
   // -------------------------------------------------------------------------
@@ -2071,6 +2736,38 @@ export class Hud {
     for (let i = 0; i < this.standingRows.length; i++) {
       this.standingRows[i].lastName = '';
     }
+
+    // Open-world & build UI locale refresh
+    this.dismountLabelEl.textContent = this.isOnFoot
+      ? this.lastBikeFar
+        ? t('summonBikeBtn')
+        : t('mountBtn')
+      : t('dismountBtn');
+    this.returnTrackLabelEl.textContent = t('backToTrackBtn');
+    this.buildHintEl.textContent = t('buildHint');
+    this.hotbarClearBtnEl.textContent = t('clearBuildBtn');
+    this.hotbarClearBtnEl.title = t('clearBuildTitle');
+    this.footBreakLabelEl.textContent = t('breakBtn');
+    this.footPlaceLabelEl.textContent = t('placeBtn');
+    this.footJumpLabelEl.textContent = t('jumpBtn');
+    const spec = BLOCK_SPEC_BY_ID[this.lastSelectedBlock];
+    this.buildBlockLabelEl.textContent = getLang() === 'zh' ? spec.zhName : spec.enName;
+
+    // Server & Account modal locale refresh
+    this.serverModalTitleEl.textContent = t('serverModalTitle');
+    this.serverUrlLabelEl.textContent = t('serverUrlLabel');
+    this.serverUrlInputEl.placeholder = t('serverUrlPlaceholder');
+    this.serverSaveBtnEl.textContent = t('serverSaveConnect');
+    this.serverResetBtnEl.textContent = t('serverResetDefault');
+    this.accountTitleEl.textContent = t('accountSectionTitle');
+    this.accountRegTabEl.textContent = t('accountTabRegister');
+    this.accountLoginTabEl.textContent = t('accountTabLogin');
+    this.accountUserInputEl.placeholder = t('accountUserPlaceholder');
+    this.accountPassInputEl.placeholder = t('accountPassPlaceholder');
+    this.accountNickInputEl.placeholder = t('accountNickPlaceholder');
+    this.accountLogoutBtnEl.textContent = t('accountLogoutBtn');
+    this.setAccountMode(this.accountMode);
+    this.setAccountState(this.currentAccount);
   }
 
   private submitHomeForm(): void {
@@ -2722,6 +3419,17 @@ export class Hud {
         lRight.classList.toggle('is-lit', dir > 0);
       }
 
+      if (this.isOnFoot) {
+        const fwd = Math.abs(ny) > 0.14 ? -ny : 0;
+        const strafe = Math.abs(nx) > 0.14 ? nx : 0;
+        this.callbacks.onFootTouchInput?.({
+          forward: fwd,
+          strafe,
+          sprint: Math.hypot(nx, ny) > 0.85,
+        });
+        return;
+      }
+
       this.callbacks.onTouchInput?.({ analogSteer: steer, nitro, brake });
     };
 
@@ -2741,6 +3449,9 @@ export class Hud {
         lastLeftDir = 0;
         lLeft.classList.remove('is-lit');
         lRight.classList.remove('is-lit');
+      }
+      if (this.isOnFoot) {
+        this.callbacks.onFootTouchInput?.({ forward: 0, strafe: 0, sprint: false });
       }
       this.callbacks.onTouchInput?.({ analogSteer: null, nitro: false, brake: false });
     };

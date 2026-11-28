@@ -1,14 +1,22 @@
 import {
   MAX_LATERAL,
+  OPEN_WORLD_MAX_LATERAL,
   ROAD_HALF_WIDTH,
   RoadFrame,
+  SHOULDER_HALF_WIDTH,
   getBoostPadInSlot,
+  openWorldGroundY,
+  roadForwardYaw,
+  roadToWorldAbs,
+  roadX,
+  roadY,
   sampleRoadFrame,
   signedTrackDelta,
 } from './RoadMath';
 import { AVATAR_COUNT } from './PixelAvatars';
 import { FallenCargo, RiderRenderState, TrafficCar, WEAPONS, WeaponType } from './types';
 import type { WeatherPhysicsMod } from './WeatherSystem';
+import type { VoxelWorld } from './VoxelWorld';
 
 export interface InputState {
   throttle: boolean;
@@ -48,6 +56,8 @@ export interface PlayerCallbacks {
   onBoostPad(): void;
   onNearMiss(): void;
   onCrash(): void;
+  onLeaveTrack?(): void;
+  onReturnTrack?(): void;
   onParticles(
     kind: ParticleKind,
     s: number,
@@ -124,6 +134,14 @@ export class PlayerPhysics {
   private particleTimer = 0;
   private railSparkTimer = 0;
 
+  // Open-world free-roam Euclidean pose
+  private freeWx = 0;
+  private freeWy = 0;
+  private freeWs = 20;
+  private freeYaw = 0;
+  private freeRejoinCooldown = 0;
+  private readonly _tmpAbs = { wx: 0, wy: 0, ws: 0 };
+
   constructor(id: string, name: string, colorIdx: number, avatarIdx = 0) {
     this.state = {
       id,
@@ -158,6 +176,9 @@ export class PlayerPhysics {
       turboShieldTimer: 0,
       spinOutTimer: 0,
       incomingLockName: null,
+      freeRoam: false,
+      heading: 0,
+      onFoot: false,
     };
   }
 
@@ -207,6 +228,12 @@ export class PlayerPhysics {
     st.wheelieCharge = 0;
     st.spinOutTimer = 0;
     st.braking = false;
+    st.freeRoam = false;
+    st.heading = 0;
+    st.onFoot = false;
+    st.worldX = undefined;
+    st.worldY = undefined;
+    st.worldS = undefined;
 
     this.vy = 0;
     this.hopCooldown = 0;
@@ -216,7 +243,101 @@ export class PlayerPhysics {
     this.pendingSwingSide = 0;
     this.boostPadTimer = 0;
     this.lastBoostSlot = -999;
+    this.freeRejoinCooldown = 0;
     this.hitIdsThisSwing.clear();
+  }
+
+  getWorldPose(): { wx: number; wy: number; ws: number; yaw: number } {
+    const st = this.state;
+    if (st.freeRoam || st.onFoot) {
+      return { wx: this.freeWx, wy: this.freeWy, ws: this.freeWs, yaw: this.freeYaw };
+    }
+    const abs = roadToWorldAbs(st.s, st.x, st.y, this._tmpAbs);
+    const yaw = roadForwardYaw(st.s);
+    return { wx: abs.wx, wy: abs.wy, ws: abs.ws, yaw };
+  }
+
+  parkForDismount(): { wx: number; wy: number; ws: number; yaw: number } {
+    const st = this.state;
+    const pose = this.getWorldPose();
+    this.freeWx = pose.wx;
+    this.freeWy = Math.max(openWorldGroundY(pose.wx, pose.ws), pose.wy);
+    this.freeWs = pose.ws;
+    this.freeYaw = pose.yaw;
+
+    st.onFoot = true;
+    st.freeRoam = true;
+    st.speed = 0;
+    st.vx = 0;
+    st.lean = 0.18; // parked kickstand lean
+    st.nitroActive = false;
+    st.braking = false;
+    st.wheelie = 0;
+    st.wheelieCharge = 0;
+    st.attackSide = 0;
+    st.attackPhase = 0;
+    st.crashed = false;
+    st.heading = this.freeYaw;
+    st.worldX = this.freeWx;
+    st.worldY = this.freeWy;
+    st.worldS = this.freeWs;
+    st.s = this.freeWs;
+    st.x = this.freeWx - roadX(this.freeWs);
+    st.y = Math.max(0, this.freeWy - openWorldGroundY(this.freeWx, this.freeWs));
+    this.vy = 0;
+    return { wx: this.freeWx, wy: this.freeWy, ws: this.freeWs, yaw: this.freeYaw };
+  }
+
+  remountAt(wx: number, wy: number, ws: number, yaw: number): void {
+    const st = this.state;
+    this.freeWx = wx;
+    this.freeWy = wy;
+    this.freeWs = ws;
+    this.freeYaw = yaw;
+    this.freeRejoinCooldown = 0.35;
+
+    st.onFoot = false;
+    st.freeRoam = true;
+    st.speed = 0;
+    st.vx = 0;
+    st.lean = 0;
+    st.crashed = false;
+    st.heading = yaw;
+    st.worldX = wx;
+    st.worldY = wy;
+    st.worldS = ws;
+    st.s = ws;
+    st.x = wx - roadX(ws);
+    st.y = Math.max(0, wy - openWorldGroundY(wx, ws));
+    this.vy = 0;
+  }
+
+  returnToTrack(): void {
+    const st = this.state;
+    const targetS = Math.max(0, st.freeRoam ? this.freeWs : st.s);
+    this.spawnAt(targetS, 1.9, 18);
+  }
+
+  private enterFreeRoam(cb: PlayerCallbacks): void {
+    const st = this.state;
+    const abs = roadToWorldAbs(st.s, st.x, st.y, this._tmpAbs);
+    const roadYaw = roadForwardYaw(st.s);
+    const slipYaw = Math.atan2(-st.vx, Math.max(10, st.speed));
+    this.freeWx = abs.wx;
+    this.freeWy = abs.wy;
+    this.freeWs = abs.ws;
+    this.freeYaw = roadYaw + clamp(slipYaw, -0.75, 0.75);
+    this.freeRejoinCooldown = 0.85;
+
+    st.freeRoam = true;
+    st.heading = this.freeYaw;
+    st.worldX = this.freeWx;
+    st.worldY = this.freeWy;
+    st.worldS = this.freeWs;
+    st.s = this.freeWs;
+    st.x = this.freeWx - roadX(this.freeWs);
+    st.y = Math.max(0, this.freeWy - openWorldGroundY(this.freeWx, this.freeWs));
+    cb.onLeaveTrack?.();
   }
 
   activateTurboShield(duration = 3.5): void {
@@ -231,7 +352,7 @@ export class PlayerPhysics {
 
   applySpinOut(duration = 1.3, dmg = 22): boolean {
     const st = this.state;
-    if (st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
+    if (st.onFoot || st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
     st.spinOutTimer = Math.max(st.spinOutTimer, duration);
     st.wheelieCharge = 0;
     st.wheelie = 0;
@@ -299,7 +420,7 @@ export class PlayerPhysics {
 
   applyExternalHit(dmg: number, knockX: number, forceKo: boolean): boolean {
     const st = this.state;
-    if (st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
+    if (st.onFoot || st.crashed || st.invulnTimer > 0 || st.turboShieldTimer > 0) return false;
 
     st.hp = Math.max(0, st.hp - dmg);
     st.vx = clamp(st.vx + knockX, -24, 24);
@@ -339,11 +460,21 @@ export class PlayerPhysics {
     traffic: TrafficCar[],
     cb: PlayerCallbacks,
     fallenCargo?: readonly FallenCargo[],
-    weatherMod?: WeatherPhysicsMod
+    weatherMod?: WeatherPhysicsMod,
+    voxels?: VoxelWorld
   ): void {
     const step = dt > 0.05 ? 0.05 : dt < 0.0001 ? 0.0001 : dt;
     const st = this.state;
     const inp = this.input;
+
+    if (st.onFoot) {
+      return;
+    }
+
+    if (st.freeRoam) {
+      this.updateFreeRoam(step, cb, weatherMod, voxels);
+      return;
+    }
 
     if (st.invulnTimer > 0) {
       st.invulnTimer = Math.max(0, st.invulnTimer - step);
@@ -609,27 +740,21 @@ export class PlayerPhysics {
     st.x += st.vx * step;
     st.wheelAngle = (st.wheelAngle + (st.speed / WHEEL_RADIUS) * step) % (Math.PI * 2);
 
-    // Hard outer rail bounce with sparks
-    if (Math.abs(st.x) > MAX_LATERAL) {
-      const sideSign = st.x > 0 ? 1 : -1;
-      const impactVx = Math.abs(st.vx);
-      st.x = sideSign * MAX_LATERAL;
-      st.vx = -sideSign * Math.max(4.5, impactVx * 0.62);
-      st.speed *= 0.88;
+    // Leave track seamlessly into 360° Open-World Free-Roam when riding past the shoulder!
+    if (Math.abs(st.x) > SHOULDER_HALF_WIDTH) {
+      this.enterFreeRoam(cb);
+      return;
+    }
 
-      if (this.railSparkTimer <= 0) {
-        this.railSparkTimer = 0.08;
-        cb.onParticles('spark', st.s, st.x, 0.5, st.speed * 0.45);
-      }
-
-      if (impactVx > 14.5 && st.invulnTimer <= 0) {
-        st.hp = Math.max(0, st.hp - 8);
-        if (st.hp <= 0) {
-          this.startCrash(-sideSign * 7.5);
-          cb.onCrash();
-          cb.onParticles('crash', st.s, st.x, 0.7, st.speed * 0.35);
-          return;
-        }
+    // Check voxel blocks built directly on the highway (ramps / bridges!)
+    if (voxels && voxels.getBlockCount() > 0) {
+      const abs = roadToWorldAbs(st.s, st.x, st.y, this._tmpAbs);
+      const roadBase = roadY(abs.ws);
+      const support = voxels.getSupportHeight(abs.wx, abs.ws, 0.45, 0.85, abs.wy + 1.05);
+      const blockRelY = Math.max(0, support - roadBase);
+      if (blockRelY > st.y + 0.01 && blockRelY <= st.y + 1.1) {
+        st.y = blockRelY;
+        if (this.vy < 0) this.vy = 0;
       }
     }
 
@@ -861,6 +986,196 @@ export class PlayerPhysics {
       } else if (weatherMod && weatherMod.sprayKind !== 'none' && st.speed > 18 && st.y < 0.1) {
         this.particleTimer = 0;
         cb.onParticles(weatherMod.sprayKind, st.s - 1.05, st.x, 0.14, st.speed * 0.3);
+      }
+    }
+  }
+
+  /**
+   * Full 360° Open-World Off-Road Motorcycle Physics!
+   * Supports arbitrary heading, reversing, voxel ramp climbing, wall collisions,
+   * and seamless auto-rejoin onto the highway when steering back onto asphalt facing forward.
+   */
+  private updateFreeRoam(
+    step: number,
+    cb: PlayerCallbacks,
+    weatherMod?: WeatherPhysicsMod,
+    voxels?: VoxelWorld
+  ): void {
+    const st = this.state;
+    const inp = this.input;
+
+    if (st.invulnTimer > 0) st.invulnTimer = Math.max(0, st.invulnTimer - step);
+    if (st.magnetTimer > 0) st.magnetTimer = Math.max(0, st.magnetTimer - step);
+    if (st.turboShieldTimer > 0) {
+      st.turboShieldTimer = Math.max(0, st.turboShieldTimer - step);
+      st.nitro = 100;
+    }
+    if (st.spinOutTimer > 0) st.spinOutTimer = Math.max(0, st.spinOutTimer - step);
+    if (this.hopCooldown > 0) this.hopCooldown = Math.max(0, this.hopCooldown - step);
+    if (this.freeRejoinCooldown > 0) this.freeRejoinCooldown = Math.max(0, this.freeRejoinCooldown - step);
+
+    // Nitro
+    if (st.nitro <= 0.1) this.nitroDepleted = true;
+    else if (st.nitro >= 8) this.nitroDepleted = false;
+
+    const wantsNitro = inp.nitro && !inp.brake && !this.nitroDepleted && st.nitro > 0.5;
+    st.nitroActive = wantsNitro;
+    if (st.nitroActive) {
+      st.nitro = Math.max(0, st.nitro - 22.0 * step);
+    } else if (Math.abs(st.speed) > 12) {
+      st.nitro = Math.min(100, st.nitro + 3.0 * step);
+    }
+
+    // Acceleration, braking & slow reverse gear
+    const topOffroad = st.turboShieldTimer > 0 ? 74.0 : st.nitroActive ? 58.0 : 42.0;
+    const weatherBrake = weatherMod ? weatherMod.brakeMul : 1.0;
+    st.braking = inp.brake && st.speed > 0.6;
+
+    if (inp.throttle || st.nitroActive || st.turboShieldTimer > 0) {
+      if (st.speed < 0) {
+        st.speed = Math.min(0, st.speed + 32.0 * step);
+      } else {
+        const accel = (st.nitroActive ? 42.0 : 24.0) * (1.05 - 0.55 * clamp(st.speed / topOffroad, 0, 1));
+        st.speed = Math.min(topOffroad, st.speed + accel * step);
+      }
+    } else if (inp.brake) {
+      if (st.speed > 0.4) {
+        st.speed = Math.max(0, st.speed - 38.0 * weatherBrake * step);
+      } else {
+        // Gentle reverse gear so players can back out of buildings / garages
+        st.speed = Math.max(-9.5, st.speed - 14.0 * step);
+      }
+    } else {
+      const drag = Math.abs(st.speed) > 10 ? 11.0 : 8.5;
+      if (st.speed > 0) st.speed = Math.max(0, st.speed - drag * step);
+      else if (st.speed < 0) st.speed = Math.min(0, st.speed + drag * step);
+    }
+
+    // 360° Free steering (positive yaw turns left, negative turns right)
+    const digitalSteer = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    const steer = digitalSteer !== 0 ? digitalSteer : clamp(inp.analogSteer ?? 0, -1, 1);
+    const dirSign = st.speed >= -0.05 ? 1 : -1;
+    const speedMag = Math.abs(st.speed);
+    const turnAuthority = speedMag < 0.35 ? 0.55 : clamp(0.45 + speedMag / 14.0, 0.45, 1.35);
+    const highSpeedTighten = 1.0 / (1.0 + speedMag * 0.014);
+    const turnRate = -steer * dirSign * 2.55 * turnAuthority * highSpeedTighten;
+    this.freeYaw += turnRate * step;
+
+    const targetLean = clamp(steer * 0.45, -0.5, 0.5) * clamp(speedMag / 8.0, 0, 1);
+    st.lean += (targetLean - st.lean) * Math.min(1, step * 10.0);
+
+    // Jump / hop in open world
+    const groundY = openWorldGroundY(this.freeWx, this.freeWs);
+    const supportY = voxels
+      ? Math.max(groundY, voxels.getSupportHeight(this.freeWx, this.freeWs, 0.48, 0.88, this.freeWy + 0.35))
+      : groundY;
+    const grounded = this.freeWy <= supportY + 0.08 && this.vy <= 0;
+
+    if (inp.wheelie && grounded && this.hopCooldown <= 0) {
+      this.vy = HOP_VELOCITY * 1.08;
+      this.hopCooldown = 0.24;
+    }
+
+    // Integrate horizontal world position along heading
+    const fwdX = -Math.sin(this.freeYaw);
+    const fwdS = Math.cos(this.freeYaw);
+    const dx = fwdX * st.speed * step;
+    const ds = fwdS * st.speed * step;
+
+    let nextWx = this.freeWx + dx;
+    let nextWs = this.freeWs + ds;
+
+    // Voxel collision: allow climbing 1-block stepped ramps, bounce gently off taller walls!
+    if (voxels && voxels.getBlockCount() > 0) {
+      const stepSupport = voxels.getSupportHeight(nextWx, nextWs, 0.48, 0.88, this.freeWy + 1.08);
+      if (stepSupport > this.freeWy && stepSupport <= this.freeWy + 1.08 && !voxels.overlapsBox(nextWx, stepSupport + 0.05, nextWs, 0.42, 1.4, 0.42)) {
+        this.freeWy = stepSupport;
+        if (this.vy < 0) this.vy = 0;
+      } else if (voxels.overlapsBox(nextWx, this.freeWy + 0.25, nextWs, 0.45, 1.35, 0.45)) {
+        // Axis-separated slide or gentle bounce
+        const blockX = voxels.overlapsBox(nextWx, this.freeWy + 0.25, this.freeWs, 0.45, 1.35, 0.45);
+        const blockS = voxels.overlapsBox(this.freeWx, this.freeWy + 0.25, nextWs, 0.45, 1.35, 0.45);
+        if (blockX) nextWx = this.freeWx;
+        if (blockS) nextWs = this.freeWs;
+        if (blockX && blockS) {
+          st.speed *= -0.25;
+        } else {
+          st.speed *= 0.82;
+        }
+      }
+    }
+
+    // Clamp to open-world lateral boundary
+    const centerX = roadX(nextWs);
+    const lat = nextWx - centerX;
+    if (Math.abs(lat) > OPEN_WORLD_MAX_LATERAL) {
+      nextWx = centerX + Math.sign(lat) * OPEN_WORLD_MAX_LATERAL;
+      st.speed *= 0.86;
+    }
+
+    this.freeWx = nextWx;
+    this.freeWs = nextWs;
+
+    // Vertical gravity & landing
+    this.freeWy += this.vy * step;
+    this.vy -= GRAVITY * step;
+    const newGround = openWorldGroundY(this.freeWx, this.freeWs);
+    const newSupport = voxels
+      ? Math.max(newGround, voxels.getSupportHeight(this.freeWx, this.freeWs, 0.48, 0.88, this.freeWy + 0.25))
+      : newGround;
+
+    if (this.freeWy <= newSupport) {
+      this.freeWy = newSupport;
+      this.vy = 0;
+    }
+
+    const relAirY = Math.max(0, this.freeWy - newSupport);
+    st.wheelie += ((relAirY > 0.15 ? 0.55 : 0) - st.wheelie) * Math.min(1, step * 12);
+    st.wheelAngle = (st.wheelAngle + (st.speed / WHEEL_RADIUS) * step) % (Math.PI * 2);
+
+    // Sync RiderRenderState fields
+    const curLat = this.freeWx - roadX(this.freeWs);
+    st.s = this.freeWs;
+    st.x = curLat;
+    st.y = Math.max(0, this.freeWy - newGround);
+    st.vx = fwdX * st.speed;
+    st.heading = this.freeYaw;
+    st.worldX = this.freeWx;
+    st.worldY = this.freeWy;
+    st.worldS = this.freeWs;
+
+    // Off-road dust / nitro particles
+    this.particleTimer += step;
+    if (this.particleTimer >= 0.055 && speedMag > 6 && relAirY < 0.2) {
+      this.particleTimer = 0;
+      cb.onParticles(
+        st.nitroActive ? 'nitro' : 'dust',
+        st.s - fwdS * 0.9,
+        st.x - fwdX * 0.9,
+        st.y + 0.15,
+        0
+      );
+    }
+
+    // Seamless auto-rejoin highway racing when riding back onto asphalt facing forward!
+    if (
+      this.freeRejoinCooldown <= 0 &&
+      Math.abs(curLat) < ROAD_HALF_WIDTH - 0.3 &&
+      st.speed > 10.0 &&
+      Math.abs(this.freeWy - roadY(this.freeWs)) < 1.2
+    ) {
+      const roadYaw = roadForwardYaw(this.freeWs);
+      let angleDiff = (this.freeYaw - roadYaw) % (Math.PI * 2);
+      if (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+      if (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+      if (Math.abs(angleDiff) < 0.52) {
+        st.freeRoam = false;
+        st.heading = 0;
+        st.worldX = undefined;
+        st.worldY = undefined;
+        st.worldS = undefined;
+        st.vx = clamp(-Math.sin(angleDiff) * st.speed, -14, 14);
+        cb.onReturnTrack?.();
       }
     }
   }

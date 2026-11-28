@@ -3671,6 +3671,455 @@ body {
 }
 
 /* ==========================================================================
+   OPEN WORLD & MINECRAFT-STYLE VOXEL BUILDING HUD
+   ========================================================================== */
+.vm-btn-dismount,
+.vm-btn-track {
+  width: auto;
+  padding: 0 8px;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.vm-btn-dismount {
+  border-color: var(--vm-cyan);
+  color: var(--vm-cyan);
+}
+
+.vm-btn-dismount.is-active {
+  background: rgba(20, 26, 42, 0.94);
+  border-color: var(--vm-gold);
+  color: var(--vm-gold);
+}
+
+.vm-btn-track {
+  border-color: var(--vm-gold);
+  color: var(--vm-gold);
+}
+
+.vm-btn-track.is-hidden {
+  display: none;
+}
+
+.vm-btn-key-tag {
+  font-size: 9px;
+  padding: 1px 3px;
+  background: rgba(16, 19, 28, 0.72);
+  border: 1px solid currentColor;
+  opacity: 0.85;
+}
+
+/* Hide bike-only widgets cleanly when on foot */
+.vm-hud-root.is-on-foot .vm-bottom-right,
+.vm-hud-root.is-on-foot .vm-keycaps,
+.vm-hud-root.is-on-foot .vm-joy-right {
+  display: none !important;
+}
+
+/* Always show left joystick on touch/mobile when on foot */
+.vm-hud-root.is-on-foot .vm-joy-left .vm-joy-dir-nitro,
+.vm-hud-root.is-on-foot .vm-joy-dir-brake {
+  opacity: 0.65;
+}
+
+/* Minecraft Crosshair */
+.vm-crosshair {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 22px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 25;
+}
+
+.vm-crosshair.is-hidden {
+  display: none;
+}
+
+.vm-crosshair::before,
+.vm-crosshair::after {
+  content: '';
+  position: absolute;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 0 1px rgba(10, 12, 18, 0.85);
+}
+
+.vm-crosshair::before {
+  top: 50%;
+  left: 2px;
+  right: 2px;
+  height: 2px;
+  transform: translateY(-50%);
+}
+
+.vm-crosshair::after {
+  left: 50%;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  transform: translateX(-50%);
+}
+
+.vm-crosshair.has-target::before,
+.vm-crosshair.has-target::after {
+  background: var(--vm-cyan);
+}
+
+/* Minecraft 9-Slot Block Hotbar */
+.vm-build-dock {
+  position: fixed;
+  left: 50%;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 30;
+  max-width: calc(100vw - 16px);
+}
+
+.vm-build-dock.is-hidden {
+  display: none;
+}
+
+.vm-build-block-label {
+  padding: 3px 10px;
+  background: rgba(12, 15, 24, 0.86);
+  border: 2px solid var(--vm-steel-hi);
+  color: var(--vm-gold);
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-shadow: 1px 1px 0 #090b12;
+}
+
+.vm-hotbar {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  background: rgba(14, 18, 30, 0.92);
+  border: 2px solid var(--vm-steel-hi);
+  box-shadow: var(--vm-shadow);
+  overflow-x: auto;
+  max-width: calc(100vw - 16px);
+}
+
+.vm-hotbar-slot {
+  position: relative;
+  appearance: none;
+  width: 42px;
+  height: 42px;
+  padding: 4px;
+  background: var(--vm-bg-deep);
+  border: 2px solid var(--vm-steel);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  outline: none;
+}
+
+.vm-hotbar-slot:hover {
+  border-color: var(--vm-cyan);
+}
+
+.vm-hotbar-slot.is-active {
+  border-color: var(--vm-gold);
+  background: rgba(255, 190, 59, 0.18);
+  box-shadow: 0 0 0 2px rgba(255, 190, 59, 0.45);
+  transform: translateY(-2px);
+}
+
+.vm-hotbar-swatch {
+  width: 28px;
+  height: 28px;
+  image-rendering: pixelated;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+
+.vm-hotbar-key {
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  font-family: var(--vm-font-pixel), monospace;
+  font-size: 8px;
+  color: #fff;
+  text-shadow: 1px 1px 0 #000;
+  pointer-events: none;
+}
+
+.vm-hotbar-clear {
+  width: 34px;
+  height: 42px;
+  border-color: rgba(239, 62, 86, 0.55);
+  color: #ff6b81;
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.vm-hotbar-clear.is-armed {
+  background: rgba(239, 62, 86, 0.28);
+  border-color: var(--vm-crimson);
+  color: #fff;
+}
+
+.vm-build-hint {
+  padding: 3px 8px;
+  background: rgba(10, 13, 22, 0.72);
+  border: 1px solid rgba(110, 128, 168, 0.42);
+  color: #cfd8ea;
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 10px;
+  white-space: nowrap;
+  max-width: calc(100vw - 24px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Mobile On-Foot Action Cluster (Right Side: Place / Break / Jump) */
+.vm-foot-touch-actions {
+  position: fixed;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(92px, calc(env(safe-area-inset-bottom) + 84px));
+  display: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  z-index: 32;
+  pointer-events: none;
+}
+
+.vm-hud-root.is-on-foot .vm-foot-touch-actions {
+  display: flex;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .vm-foot-touch-actions {
+    display: none !important;
+  }
+}
+
+.vm-foot-touch-row {
+  display: flex;
+  gap: 10px;
+}
+
+.vm-foot-act-btn {
+  pointer-events: auto;
+  appearance: none;
+  min-width: 58px;
+  height: 52px;
+  padding: 0 10px;
+  border: 2px solid var(--vm-steel-hi);
+  background: rgba(14, 18, 30, 0.88);
+  box-shadow: var(--vm-shadow-sm);
+  color: #fff;
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  touch-action: none;
+}
+
+.vm-foot-act-btn:active {
+  transform: scale(0.94);
+}
+
+.vm-foot-act-place {
+  border-color: var(--vm-cyan);
+  color: var(--vm-cyan);
+}
+
+.vm-foot-act-break {
+  border-color: var(--vm-crimson);
+  color: #ff6b81;
+}
+
+.vm-foot-act-jump {
+  border-color: var(--vm-gold);
+  color: var(--vm-gold);
+}
+
+@media (max-width: 680px) {
+  .vm-hotbar-slot {
+    width: 34px;
+    height: 34px;
+    padding: 3px;
+  }
+  .vm-hotbar-swatch {
+    width: 22px;
+    height: 22px;
+  }
+  .vm-hotbar-clear {
+    width: 30px;
+    height: 34px;
+  }
+  .vm-build-hint {
+    display: none;
+  }
+  .vm-btn-key-tag {
+    display: none;
+  }
+}
+
+/* Server & Game Account Button + Modal */
+.vm-btn-server {
+  width: auto;
+  padding: 0 8px;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.vm-srv-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 0;
+  background: #64748b;
+  flex-shrink: 0;
+}
+
+.vm-srv-dot[data-status='connected'] {
+  background: #46d97c;
+  box-shadow: 0 0 6px rgba(70, 217, 124, 0.8);
+}
+
+.vm-srv-dot[data-status='connecting'] {
+  background: var(--vm-gold);
+}
+
+.vm-srv-card {
+  gap: 12px;
+}
+
+.vm-srv-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 8px;
+  border-top: 1px solid #26304f;
+}
+
+.vm-srv-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--vm-gold);
+}
+
+.vm-srv-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.vm-srv-btn-sm {
+  flex-shrink: 0;
+  padding: 0 10px;
+}
+
+.vm-srv-status {
+  font-size: 11px;
+  padding: 5px 8px;
+  background: rgba(10, 14, 24, 0.85);
+  border: 1px solid var(--vm-steel);
+  color: #cbd5e1;
+}
+
+.vm-srv-status.is-online {
+  border-color: rgba(70, 217, 124, 0.7);
+  color: #7df2a8;
+}
+
+.vm-srv-status.is-offline {
+  border-color: rgba(255, 190, 59, 0.65);
+  color: var(--vm-gold);
+}
+
+.vm-srv-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.vm-srv-tabs.is-hidden,
+.vm-srv-form.is-hidden,
+.vm-srv-profile.is-hidden,
+.vm-home-input.is-hidden {
+  display: none;
+}
+
+.vm-srv-tab {
+  flex: 1;
+  height: 30px;
+  background: var(--vm-bg-deep);
+  border: 2px solid var(--vm-steel);
+  color: var(--vm-dim);
+  font-family: var(--vm-font-ui), 'Microsoft YaHei', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.vm-srv-tab.is-active {
+  border-color: var(--vm-cyan);
+  color: var(--vm-cyan);
+  background: rgba(56, 226, 212, 0.14);
+}
+
+.vm-srv-form {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.vm-srv-profile {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  background: var(--vm-bg-deep);
+  border: 2px solid var(--vm-cyan);
+}
+
+.vm-srv-profile-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vm-srv-profile-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.vm-srv-profile-sub {
+  font-size: 11px;
+  color: var(--vm-cyan);
+}
+
+.vm-srv-profile-stats {
+  font-size: 10px;
+  color: var(--vm-dim);
+}
+
+/* ==========================================================================
    KEYFRAMES (Stepped Retro Arcade Motion)
    ========================================================================== */
 @keyframes vm-pulse-online {

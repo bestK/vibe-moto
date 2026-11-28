@@ -51,7 +51,13 @@ export type PixelIconId =
   | 'animal_goose'
   | 'weapon_fist'
   | 'weapon_bat'
-  | 'weapon_chain';
+  | 'weapon_chain'
+  | 'walk'
+  | 'cube'
+  | 'pickaxe'
+  | 'road'
+  | 'server'
+  | 'user';
 
 /**
  * Handcrafted 16x16 pixel-art SVG primitives (`shape-rendering="crispEdges"`).
@@ -544,6 +550,53 @@ const ICON_BODIES: Readonly<Record<PixelIconId, string>> = {
     '<rect x="4" y="9" width="3" height="3" fill="#10141f"/>' +
     '<rect x="1" y="11" width="4" height="4" fill="#cbd5e1"/>' +
     '<rect x="2" y="12" width="2" height="2" fill="#10141f"/>',
+
+  walk:
+    '<g fill="currentColor">' +
+    '<rect x="6" y="1" width="4" height="3"/>' +
+    '<rect x="5" y="5" width="6" height="4"/>' +
+    '<rect x="3" y="6" width="2" height="3"/><rect x="11" y="6" width="2" height="3"/>' +
+    '<rect x="5" y="9" width="2" height="4"/><rect x="9" y="9" width="2" height="4"/>' +
+    '<rect x="4" y="13" width="2" height="2"/><rect x="10" y="13" width="2" height="2"/>' +
+    '</g>',
+
+  cube:
+    '<rect x="4" y="1" width="8" height="2" fill="#72d160"/>' +
+    '<rect x="2" y="3" width="12" height="3" fill="#52b046"/>' +
+    '<rect x="2" y="6" width="6" height="7" fill="#c59052"/>' +
+    '<rect x="8" y="6" width="6" height="7" fill="#8b6240"/>' +
+    '<rect x="4" y="13" width="8" height="2" fill="#69462b"/>',
+
+  pickaxe:
+    '<rect x="4" y="1" width="8" height="2" fill="#38e2d4"/>' +
+    '<rect x="2" y="3" width="4" height="2" fill="#38e2d4"/>' +
+    '<rect x="10" y="3" width="4" height="2" fill="#38e2d4"/>' +
+    '<rect x="7" y="3" width="2" height="3" fill="#c59052"/>' +
+    '<rect x="6" y="6" width="2" height="3" fill="#9c6e3d"/>' +
+    '<rect x="5" y="9" width="2" height="3" fill="#c59052"/>' +
+    '<rect x="4" y="12" width="2" height="3" fill="#69462b"/>',
+
+  road:
+    '<g fill="currentColor">' +
+    '<rect x="4" y="1" width="2" height="14"/><rect x="10" y="1" width="2" height="14"/>' +
+    '<rect x="7" y="2" width="2" height="3"/><rect x="7" y="7" width="2" height="3"/>' +
+    '<rect x="7" y="12" width="2" height="3"/>' +
+    '</g>',
+
+  server:
+    '<g fill="currentColor">' +
+    '<rect x="2" y="2" width="12" height="4"/>' +
+    '<rect x="2" y="7" width="12" height="4"/>' +
+    '<rect x="4" y="12" width="8" height="2"/>' +
+    '<rect x="10" y="3" width="2" height="2" fill="#10141f"/>' +
+    '<rect x="10" y="8" width="2" height="2" fill="#10141f"/>' +
+    '</g>',
+
+  user:
+    '<g fill="currentColor">' +
+    '<rect x="5" y="2" width="6" height="5"/>' +
+    '<rect x="3" y="8" width="10" height="6"/>' +
+    '</g>',
 };
 
 export const ITEM_ICON_MAP: Readonly<Record<ItemType, PixelIconId>> = {

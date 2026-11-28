@@ -681,9 +681,10 @@ export class BikeVisual {
 
     // Shadow flattens & shrinks with air height
     if (this.shadowEnabled) {
-      const airScale = Math.max(0.45, 1.0 - state.y * 0.12);
+      const airY = state.freeRoam ? 0 : state.y;
+      const airScale = Math.max(0.45, 1.0 - airY * 0.12);
       this.shadowMesh.scale.set(airScale, 1, airScale);
-      this.shadowMesh.position.y = Math.max(0.03, 0.04 - state.y);
+      this.shadowMesh.position.y = Math.max(0.03, 0.04 - airY);
     }
 
     // Wheels spin forward
@@ -691,26 +692,26 @@ export class BikeVisual {
     this.rearWheel.rotation.x = -state.wheelAngle;
 
     // Front steering matches lean gently
-    this.frontForkGroup.rotation.y = -state.lean * 0.35;
+    this.frontForkGroup.rotation.y = state.onFoot ? 0.34 : -state.lean * 0.35;
 
     // Brake light glow mesh only draws when actively braking
-    this.brakeGlowMesh.visible = state.braking;
+    this.brakeGlowMesh.visible = !state.onFoot && state.braking;
 
     // Powerup & enraged aura ring (rage crimson > turbo gold > magnet cyan)
-    if (!state.crashed && (enraged || state.turboShieldTimer > 0 || state.magnetTimer > 0)) {
+    if (!state.onFoot && !state.crashed && (enraged || state.turboShieldTimer > 0 || state.magnetTimer > 0)) {
       this.auraMesh.visible = true;
       const isTurbo = state.turboShieldTimer > 0;
       this.auraMat.color.setHex(enraged ? 0xff2a54 : isTurbo ? 0xffd166 : 0x00f5d4);
       const pulse = 1.0 + 0.16 * Math.sin(timeSec * (enraged ? 28 : isTurbo ? 24 : 16));
       this.auraMesh.scale.set(pulse, 1, pulse);
       this.auraMesh.rotation.y = timeSec * (enraged ? 10 : isTurbo ? 8 : 5);
-      this.auraMesh.position.y = 0.12 + state.y;
+      this.auraMesh.position.y = 0.12 + (state.freeRoam ? 0 : state.y);
     } else {
       this.auraMesh.visible = false;
     }
 
     // Dual nitro / enraged exhaust flames (single merged mesh!)
-    const showFlames = (enraged || state.nitroActive || state.turboShieldTimer > 0) && !state.crashed;
+    const showFlames = !state.onFoot && (enraged || state.nitroActive || state.turboShieldTimer > 0) && !state.crashed;
     this.nitroFlameMesh.visible = showFlames;
     if (showFlames) {
       const geos = getSharedGeos();
@@ -723,7 +724,13 @@ export class BikeVisual {
       this.nitroFlameMesh.scale.set(1, 1, flicker);
     }
 
-    if (state.crashed) {
+    if (state.onFoot) {
+      // Parked empty motorcycle resting gently on kickstand!
+      this.riderGroup.visible = false;
+      this.bikePivot.position.set(0, 0, 0);
+      this.bikePivot.rotation.set(0, 0, -0.18);
+    } else if (state.crashed) {
+      this.riderGroup.visible = true;
       const t = Math.min(1, state.crashTimer / 1.5);
       this.bikePivot.position.y = Math.max(0, Math.sin(t * Math.PI * 2.2) * (1 - t) * 1.1);
       this.bikePivot.rotation.z =
@@ -737,14 +744,15 @@ export class BikeVisual {
       );
       this.riderGroup.rotation.set(-t * 1.8, 0, t * 2.4);
     } else {
-      this.bikePivot.position.set(0, state.y, 0);
+      this.riderGroup.visible = true;
+      this.bikePivot.position.set(0, state.freeRoam ? 0 : state.y, 0);
       this.bikePivot.rotation.y =
         state.spinOutTimer > 0 ? state.spinOutTimer * Math.PI * 3.8 : 0;
       this.bikePivot.rotation.z = -state.lean;
       const wheeliePitch = Math.max(state.wheelie * 0.42, state.wheelieCharge * 0.92);
       this.bikePivot.rotation.x = wheeliePitch;
 
-      const speedTuck = Math.min(1, state.speed / 58);
+      const speedTuck = Math.min(1, Math.abs(state.speed) / 58);
       this.riderGroup.position.set(state.lean * 0.24, 0.84 - speedTuck * 0.06, 0.26);
       this.riderGroup.rotation.set(0, 0, -state.lean * 0.25);
       this.torsoGroup.rotation.x = -speedTuck * 0.22;

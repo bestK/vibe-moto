@@ -11,8 +11,10 @@ import {
   setCustomAvatar,
 } from './game/PixelAvatars';
 import { InputState, ParticleKind, PlayerCallbacks, PlayerPhysics } from './game/PlayerPhysics';
-import { getLapNumber, signedTrackDelta } from './game/RoadMath';
+import { OnFootController, OnFootInput } from './game/OnFootController';
+import { getLapNumber, openWorldGroundY, roadX, signedTrackDelta } from './game/RoadMath';
 import { CarItemEffectKind, TrafficSystem } from './game/TrafficSystem';
+import { BLOCK_SPEC_BY_ID, BlockType, VoxelWorld } from './game/VoxelWorld';
 import {
   BIKE_PALETTES,
   CombatHitEvent,
@@ -20,12 +22,14 @@ import {
   ItemType,
   RiderRenderState,
   TrafficCar,
+  VoxelNetEvent,
   WeaponType,
 } from './game/types';
 import { CameraMode, WorldRenderer } from './game/WorldRenderer';
 import { WeatherCallbacks, WeatherId, WeatherSystem } from './game/WeatherSystem';
 import { t, weatherName } from './i18n';
 import { ConnectionStatus, LobbyRoomSummary, MqttSync, PackSpawnTarget, RoomInfoSnapshot } from './net/MqttSync';
+import { GameAccount, ServerClient } from './net/ServerClient';
 import { Hud, TouchInputPatch } from './ui/Hud';
 import { ANIMAL_ICON_MAP, WEATHER_ICON_MAP, type PixelIconId } from './ui/PixelIcons';
 
@@ -120,6 +124,31 @@ const ai = new AiRivals();
 const items = new ItemSystem();
 const animals = new AnimalSystem();
 const weather = new WeatherSystem('clear');
+const voxels = new VoxelWorld('global');
+const onFoot = new OnFootController();
+
+const footTouchState = {
+  forward: 0,
+  strafe: 0,
+  jump: false,
+  sprint: false,
+};
+let pendingLookYaw = 0;
+let pendingLookPitch = 0;
+let dragLookPointerId: number | null = null;
+let dragLookLastX = 0;
+let dragLookLastY = 0;
+let dragLookMoved = 0;
+let dragLookDownMs = 0;
+let dragLookButton = -1;
+const footInputBuf: OnFootInput = {
+  forward: 0,
+  strafe: 0,
+  jump: false,
+  sprint: false,
+  lookYawDelta: 0,
+  lookPitchDelta: 0,
+};
 
 const GAS_STATION_STOPS = [420, 1620] as const;
 let gasRefillCooldown = 0;
@@ -179,8 +208,13 @@ let lastConnStatus: ConnectionStatus = 'connecting';
 let player!: PlayerPhysics;
 let hud!: Hud;
 let itemCallbacks!: ItemCallbacks;
+let serverClient!: ServerClient;
 
 function spawnPackWarpFx(target: PackSpawnTarget): void {
+  if (onFoot.state.active) {
+    exitPointerLockSafe();
+    onFoot.mountBike();
+  }
   player.spawnAt(target.s, target.x, target.speed);
   lastLap = getLapNumber(player.state.s);
   audio.playSpawnChime();
@@ -250,6 +284,13 @@ const mqtt = new MqttSync(
     onItemEvent(ev: ItemNetEvent) {
       items.handleNetEvent(ev, player.state, itemCallbacks);
     },
+    onVoxelEvent(ev: VoxelNetEvent) {
+      if (ev.op === 'set' && ev.b && ev.b >= 1 && ev.b <= 9) {
+        voxels.setBlock(ev.gx, ev.gy, ev.gz, ev.b as BlockType);
+      } else if (ev.op === 'del') {
+        voxels.removeBlock(ev.gx, ev.gy, ev.gz);
+      }
+    },
     onRemoteCustomAvatar(peerId: string, dataUrl: string | null) {
       setCustomAvatar(peerId, dataUrl);
     },
@@ -297,7 +338,7 @@ if (initialCustomAvatar) {
 player = new PlayerPhysics(mqtt.clientId, initialName, colorIdx, initialAvatar);
 
 function isUiBlockingGameplay(): boolean {
-  return hud.isEditingName() || hud.isHomeModalOpen();
+  return hud.isEditingName() || hud.isHomeModalOpen() || hud.isServerModalOpen();
 }
 
 function updateRoomUrlParam(roomSlug: string): void {
@@ -354,6 +395,13 @@ function clearHeldInputs(): void {
   touchState.attackRight = false;
   touchState.attackAuto = false;
   touchState.analogSteer = null;
+  footTouchState.forward = 0;
+  footTouchState.strafe = 0;
+  footTouchState.jump = false;
+  footTouchState.sprint = false;
+  dragLookPointerId = null;
+  pendingLookYaw = 0;
+  pendingLookPitch = 0;
   inputState.throttle = false;
   inputState.brake = false;
   inputState.left = false;
@@ -382,9 +430,117 @@ function togglePixelScale(): number {
 }
 
 function cycleCamera(): number {
+  if (onFoot.state.active) {
+    const isFp = onFoot.togglePerspective();
+    hud.showToast(isFp ? t('fpCamToast') : t('tpCamToast'), 'cyan');
+    return isFp ? 2 : 0;
+  }
   world.cameraMode = ((world.cameraMode + 1) % 3) as CameraMode;
   hud.setCameraMode(world.cameraMode);
   return world.cameraMode;
+}
+
+function exitPointerLockSafe(): void {
+  try {
+    if (document.pointerLockElement) {
+      document.exitPointerLock?.();
+    }
+  } catch {
+    // Ignore restricted pointer lock contexts
+  }
+}
+
+function toggleDismount(): void {
+  audio.unlock();
+  if (isUiBlockingGameplay()) return;
+  if (!onFoot.state.active) {
+    const bikePose = player.parkForDismount();
+    onFoot.dismountFromBike(bikePose.wx, bikePose.wy, bikePose.ws, bikePose.yaw, voxels);
+    footTouchState.forward = 0;
+    footTouchState.strafe = 0;
+    footTouchState.jump = false;
+    footTouchState.sprint = false;
+    audio.playDismount(true);
+    hud.showToast(t('dismountToast'), 'cyan', 'cube');
+  } else {
+    exitPointerLockSafe();
+    const far = onFoot.state.distToBike > 6.0;
+    const pose = far ? onFoot.summonBikeNearPlayer(voxels) : onFoot.mountBike();
+    if (far) {
+      onFoot.mountBike();
+    }
+    player.remountAt(pose.wx, pose.wy, pose.ws, pose.yaw);
+    audio.playDismount(false);
+    hud.showToast(far ? t('summonBikeToast') : t('mountToast'), 'gold', 'bike');
+  }
+}
+
+function returnToTrack(): void {
+  audio.unlock();
+  if (onFoot.state.active) {
+    exitPointerLockSafe();
+    onFoot.mountBike();
+  }
+  player.returnToTrack();
+  audio.playSpawnChime();
+  hud.showToast(t('backToTrackToast'), 'cyan', 'road');
+}
+
+function breakAimedBlock(): boolean {
+  if (!onFoot.state.active) return false;
+  const hit = onFoot.state.aimHit;
+  onFoot.triggerSwing();
+  if (!hit || hit.hitType !== 'block') return false;
+  const removed = voxels.removeBlock(hit.gx, hit.gy, hit.gz);
+  if (!removed) return false;
+
+  audio.playBlockBreak();
+  const spec = BLOCK_SPEC_BY_ID[removed];
+  const blockS = hit.gz + 0.5;
+  const blockLat = hit.gx + 0.5 - roadX(blockS);
+  const blockRelY = Math.max(0.2, hit.gy + 0.5 - openWorldGroundY(hit.gx + 0.5, blockS));
+  world.spawnParticles(blockS, blockLat, blockRelY, 10, spec.particleHex, 5.2, 0.16, 0.38, 16, 0);
+  mqtt.publishVoxelEvent({ op: 'del', gx: hit.gx, gy: hit.gy, gz: hit.gz });
+  serverClient?.sendVoxel('del', hit.gx, hit.gy, hit.gz);
+  return true;
+}
+
+function placeAimedBlock(): boolean {
+  if (!onFoot.state.active) return false;
+  const hit = onFoot.state.aimHit;
+  onFoot.triggerSwing();
+  if (!hit) return false;
+  if (onFoot.wouldIntersectPlayer(hit.placeX, hit.placeY, hit.placeZ)) {
+    return false;
+  }
+  const blockType = onFoot.state.selectedBlock;
+  const ok = voxels.setBlock(hit.placeX, hit.placeY, hit.placeZ, blockType);
+  if (!ok) return false;
+
+  audio.playBlockPlace();
+  const spec = BLOCK_SPEC_BY_ID[blockType];
+  const blockS = hit.placeZ + 0.5;
+  const blockLat = hit.placeX + 0.5 - roadX(blockS);
+  const blockRelY = Math.max(0.2, hit.placeY + 0.5 - openWorldGroundY(hit.placeX + 0.5, blockS));
+  world.spawnParticles(blockS, blockLat, blockRelY, 5, spec.particleHex, 3.0, 0.12, 0.25, 10, 0);
+  mqtt.publishVoxelEvent({
+    op: 'set',
+    gx: hit.placeX,
+    gy: hit.placeY,
+    gz: hit.placeZ,
+    b: blockType,
+  });
+  serverClient?.sendVoxel('set', hit.placeX, hit.placeY, hit.placeZ, blockType);
+  return true;
+}
+
+function pickAimedBlock(): boolean {
+  if (!onFoot.state.active) return false;
+  const hit = onFoot.state.aimHit;
+  if (!hit || hit.hitType !== 'block' || !hit.blockType) return false;
+  onFoot.selectBlock(hit.blockType);
+  audio.playPickup();
+  return true;
 }
 
 function spawnParticlePreset(kind: ParticleKind, s: number, x: number, y: number, vs = 0): void {
@@ -436,6 +592,8 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     writeStorage(STORAGE_NAME_KEY, name);
     player.state.name = name;
     mqtt.setName(name);
+    serverClient?.setPlayerName(name);
+    void serverClient?.syncProfile({ displayName: name });
   },
   onAvatarChange(avatarIdx: number) {
     const safeIdx = ((Math.trunc(avatarIdx) % AVATAR_COUNT) + AVATAR_COUNT) % AVATAR_COUNT;
@@ -445,6 +603,7 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     mqtt.setCustomAvatar(null);
     player.state.avatarIdx = safeIdx;
     mqtt.setAvatar(safeIdx);
+    void serverClient?.syncProfile({ avatarIdx: safeIdx });
     hud.refreshLocalAvatar();
     const meta = PIXEL_AVATARS[safeIdx];
     if (meta) {
@@ -556,6 +715,8 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
       items.resetActiveEffects();
       player.state.incomingLockName = null;
       animals.reset();
+      voxels.loadRoom(res.room);
+      serverClient?.connectRoom(res.room);
       audio.playSpawnChime();
       const displayLabel = res.room === 'global' ? t('publicHall') : roomInfo.title || res.room;
       hud.showToast(
@@ -617,9 +778,140 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
       touchState.attackAuto = false;
     }
   },
+  onToggleDismount() {
+    toggleDismount();
+  },
+  onReturnToTrack() {
+    returnToTrack();
+  },
+  onSelectBlock(block: BlockType) {
+    audio.unlock();
+    onFoot.selectBlock(block);
+  },
+  onBreakBlock() {
+    audio.unlock();
+    breakAimedBlock();
+  },
+  onPlaceBlock() {
+    audio.unlock();
+    placeAimedBlock();
+  },
+  onClearBlocks() {
+    audio.unlock();
+    voxels.clearAll();
+    serverClient?.sendVoxel('clear');
+    audio.playBlockBreak();
+    hud.showToast(t('buildCleared'), 'gold', 'cube');
+  },
+  onFootTouchInput(patch) {
+    audio.unlock();
+    touchModeActive = true;
+    if (patch.forward !== undefined) footTouchState.forward = patch.forward;
+    if (patch.strafe !== undefined) footTouchState.strafe = patch.strafe;
+    if (patch.jump !== undefined) footTouchState.jump = patch.jump;
+    if (patch.sprint !== undefined) footTouchState.sprint = patch.sprint;
+  },
+  onServerModalToggle(open: boolean) {
+    if (open) {
+      exitPointerLockSafe();
+      clearHeldInputs();
+    }
+  },
+  async onSaveServerUrl(url: string) {
+    const saved = serverClient.setServerUrl(url);
+    hud.showToast(t('serverSavedToast', { url: saved }), 'cyan', 'server');
+    return serverClient.pingServer(saved);
+  },
+  async onResetServerUrl() {
+    const saved = serverClient.resetDefaultServerUrl();
+    hud.showToast(t('serverSavedToast', { url: saved }), 'cyan', 'server');
+    return serverClient.pingServer(saved);
+  },
+  async onPingServer(url?: string) {
+    return serverClient.pingServer(url);
+  },
+  async onAccountLogin(username: string, password: string) {
+    const res = await serverClient.login(username, password);
+    if (res.ok && res.account) {
+      applyLoggedInAccount(res.account);
+      hud.showToast(
+        t('accountLoggedInToast', { name: res.account.displayName || res.account.username }),
+        'cyan',
+        'user'
+      );
+    }
+    return { ok: res.ok, error: res.error };
+  },
+  async onAccountRegister(username: string, password: string, displayName: string) {
+    const res = await serverClient.register(
+      username,
+      password,
+      displayName,
+      player.state.colorIdx,
+      player.state.avatarIdx
+    );
+    if (res.ok && res.account) {
+      applyLoggedInAccount(res.account);
+      hud.showToast(
+        t('accountCreatedToast', { name: res.account.displayName || res.account.username }),
+        'gold',
+        'user'
+      );
+    }
+    return { ok: res.ok, error: res.error };
+  },
+  onAccountLogout() {
+    serverClient.logout();
+    hud.showToast(t('accountLoggedOutToast'), 'gold', 'user');
+  },
 });
 
+function applyLoggedInAccount(acc: GameAccount): void {
+  const dn = (acc.displayName || acc.username).slice(0, 14);
+  writeStorage(STORAGE_NAME_KEY, dn);
+  player.state.name = dn;
+  mqtt.setName(dn);
+  hud.applyExternalName(dn);
+  if (Number.isFinite(acc.avatarIdx)) {
+    const safeAv = ((Math.trunc(acc.avatarIdx) % AVATAR_COUNT) + AVATAR_COUNT) % AVATAR_COUNT;
+    player.state.avatarIdx = safeAv;
+    mqtt.setAvatar(safeAv);
+    writeStorage(STORAGE_AVATAR_KEY, String(safeAv));
+    hud.refreshLocalAvatar();
+  }
+}
+
 const initialRoomInfo = mqtt.getRoomInfo();
+voxels.loadRoom(initialRoomInfo.room);
+
+serverClient = new ServerClient(mqtt.clientId, initialName, {
+  onStatusChange(status, url) {
+    hud.setServerState(status, url);
+  },
+  onAccountChange(account) {
+    hud.setAccountState(account);
+  },
+  onWorldSnapshot(_room, blocks) {
+    voxels.replaceFromServer(blocks);
+  },
+  onVoxelUpdate(ev) {
+    if (ev.op === 'set' && ev.b && ev.b >= 1 && ev.b <= 9) {
+      voxels.setBlock(ev.gx ?? 0, ev.gy ?? 0, ev.gz ?? 0, ev.b as BlockType);
+    } else if (ev.op === 'del') {
+      voxels.removeBlock(ev.gx ?? 0, ev.gy ?? 0, ev.gz ?? 0);
+    } else if (ev.op === 'clear') {
+      voxels.clearAll();
+    }
+  },
+});
+hud.setServerState(serverClient.getStatus(), serverClient.getServerUrl());
+hud.setAccountState(serverClient.getAccount());
+serverClient.connectRoom(initialRoomInfo.room);
+void serverClient.verifySession().then((acc) => {
+  if (acc) {
+    hud.setAccountState(acc);
+  }
+});
 hud.setRoomInfo(
   initialRoomInfo.room,
   initialRoomInfo.locked,
@@ -883,6 +1175,12 @@ const playerCallbacks: PlayerCallbacks = {
     world.triggerShake(0.66, 0.4);
     hud.showToast(t('wipeout'), 'red', 'warning');
   },
+  onLeaveTrack() {
+    hud.showToast(t('freeRoamEnter'), 'cyan', 'cube');
+  },
+  onReturnTrack() {
+    hud.showToast(t('backToTrackToast'), 'gold', 'road');
+  },
   onParticles: spawnParticlePreset,
 };
 
@@ -992,6 +1290,62 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
   }
 
   switch (e.code) {
+    case 'KeyG':
+      toggleDismount();
+      return;
+    case 'KeyH':
+      if (player.state.freeRoam || onFoot.state.active) {
+        returnToTrack();
+      }
+      return;
+    case 'KeyC': {
+      const mode = cycleCamera();
+      if (!onFoot.state.active) {
+        const labels = [t('camChase'), t('camLow'), t('camHood')];
+        hud.showToast(labels[mode], 'gold');
+      }
+      return;
+    }
+    case 'KeyM': {
+      const muted = toggleMute();
+      hud.showToast(muted ? 'OFF' : 'ON', 'gold', muted ? 'soundOff' : 'soundOn');
+      return;
+    }
+    case 'KeyP': {
+      const scale = togglePixelScale();
+      hud.showToast(scale === 2 ? t('pixelMode') : t('hdMode'), 'gold');
+      return;
+    }
+    case 'KeyV': {
+      audio.unlock();
+      weather.cycleWeather(weatherCallbacks);
+      return;
+    }
+  }
+
+  // On-Foot Minecraft building shortcuts (1-9 hotbar, J break, K/E place, Q eyedropper)
+  if (onFoot.state.active) {
+    if (e.code >= 'Digit1' && e.code <= 'Digit9') {
+      const blockId = Number.parseInt(e.code.slice(5), 10) as BlockType;
+      onFoot.selectBlock(blockId);
+      return;
+    }
+    if (e.code === 'KeyJ') {
+      breakAimedBlock();
+      return;
+    }
+    if (e.code === 'KeyK' || e.code === 'KeyE') {
+      placeAimedBlock();
+      return;
+    }
+    if (e.code === 'KeyQ') {
+      pickAimedBlock();
+      return;
+    }
+    return;
+  }
+
+  switch (e.code) {
     case 'KeyR':
     case 'KeyX':
       items.useHeldItem(player.state, combatTargets, itemCallbacks, 0);
@@ -1008,27 +1362,6 @@ window.addEventListener('keydown', (e: KeyboardEvent) => {
     case 'Tab':
       player.cycleWeapon();
       break;
-    case 'KeyC': {
-      const mode = cycleCamera();
-      const labels = [t('camChase'), t('camLow'), t('camHood')];
-      hud.showToast(labels[mode], 'gold');
-      break;
-    }
-    case 'KeyM': {
-      const muted = toggleMute();
-      hud.showToast(muted ? 'OFF' : 'ON', 'gold', muted ? 'soundOff' : 'soundOn');
-      break;
-    }
-    case 'KeyP': {
-      const scale = togglePixelScale();
-      hud.showToast(scale === 2 ? t('pixelMode') : t('hdMode'), 'gold');
-      break;
-    }
-    case 'KeyV': {
-      audio.unlock();
-      weather.cycleWeather(weatherCallbacks);
-      break;
-    }
   }
 });
 
@@ -1048,6 +1381,65 @@ canvas.addEventListener('contextmenu', (e: MouseEvent) => {
 canvas.addEventListener('pointerdown', (e: PointerEvent) => {
   if (e.target !== canvas || isUiBlockingGameplay()) return;
   audio.unlock();
+
+  // On-Foot Minecraft-style look + build/break controls
+  if (onFoot.state.active) {
+    if (e.pointerType === 'touch') {
+      touchModeActive = true;
+      if (dragLookPointerId === null) {
+        dragLookPointerId = e.pointerId;
+        dragLookLastX = e.clientX;
+        dragLookLastY = e.clientY;
+        dragLookMoved = 0;
+        dragLookDownMs = performance.now();
+        dragLookButton = 0;
+        try {
+          canvas.setPointerCapture(e.pointerId);
+        } catch {
+          // Ignore synthetic events
+        }
+      }
+      return;
+    }
+
+    if (document.pointerLockElement === canvas) {
+      if (e.button === 0) {
+        breakAimedBlock();
+      } else if (e.button === 2) {
+        placeAimedBlock();
+      } else if (e.button === 1) {
+        e.preventDefault();
+        pickAimedBlock();
+      }
+      return;
+    }
+
+    // Unlocked desktop: right-click places immediately; middle-click picks; left-click requests Pointer Lock + drag-look fallback
+    if (e.button === 2) {
+      placeAimedBlock();
+      return;
+    }
+    if (e.button === 1) {
+      e.preventDefault();
+      pickAimedBlock();
+      return;
+    }
+    if (e.button === 0) {
+      dragLookPointerId = e.pointerId;
+      dragLookLastX = e.clientX;
+      dragLookLastY = e.clientY;
+      dragLookMoved = 0;
+      dragLookDownMs = performance.now();
+      dragLookButton = 0;
+      try {
+        canvas.requestPointerLock?.();
+      } catch {
+        // Fallback to drag-to-look
+      }
+    }
+    return;
+  }
+
   if (e.pointerType === 'touch') {
     touchModeActive = true;
     const fracX = e.clientX / Math.max(1, window.innerWidth);
@@ -1072,6 +1464,56 @@ canvas.addEventListener('pointerdown', (e: PointerEvent) => {
     hud.flashTapAttack('right');
   }
 });
+
+window.addEventListener('mousemove', (e: MouseEvent) => {
+  if (!onFoot.state.active || isUiBlockingGameplay()) return;
+  if (document.pointerLockElement === canvas) {
+    pendingLookYaw -= e.movementX * 0.0024;
+    pendingLookPitch -= e.movementY * 0.0024;
+  }
+});
+
+window.addEventListener('pointermove', (e: PointerEvent) => {
+  if (!onFoot.state.active || dragLookPointerId === null || e.pointerId !== dragLookPointerId) return;
+  if (document.pointerLockElement === canvas) return;
+  const dx = e.clientX - dragLookLastX;
+  const dy = e.clientY - dragLookLastY;
+  dragLookLastX = e.clientX;
+  dragLookLastY = e.clientY;
+  dragLookMoved += Math.hypot(dx, dy);
+  const sens = e.pointerType === 'touch' ? 0.0052 : 0.0036;
+  pendingLookYaw -= dx * sens;
+  pendingLookPitch -= dy * sens;
+});
+
+function endDragLook(e: PointerEvent): void {
+  if (dragLookPointerId === null || e.pointerId !== dragLookPointerId) return;
+  const wasQuickLeftTap =
+    onFoot.state.active &&
+    e.pointerType !== 'touch' &&
+    dragLookButton === 0 &&
+    dragLookMoved < 6 &&
+    performance.now() - dragLookDownMs < 240 &&
+    document.pointerLockElement !== canvas;
+  dragLookPointerId = null;
+  dragLookButton = -1;
+  if (wasQuickLeftTap) {
+    breakAimedBlock();
+  }
+}
+
+window.addEventListener('pointerup', endDragLook);
+window.addEventListener('pointercancel', endDragLook);
+
+window.addEventListener(
+  'wheel',
+  (e: WheelEvent) => {
+    if (!onFoot.state.active || isUiBlockingGameplay()) return;
+    if (Math.abs(e.deltaY) < 2) return;
+    onFoot.cycleBlock(e.deltaY > 0 ? 1 : -1);
+  },
+  { passive: true }
+);
 
 let orientResizeTimer: number | null = null;
 function handleViewportResize(): void {
@@ -1209,6 +1651,39 @@ const perfSnapshot: PerfSnapshot = {
     return safe;
   },
 };
+(
+  window as unknown as {
+    __VMOTO_OPENWORLD__?: {
+      dismount: () => void;
+      returnToTrack: () => void;
+      selectBlock: (b: BlockType) => void;
+      placeBlock: () => boolean;
+      breakBlock: () => boolean;
+      getState: () => {
+        freeRoam: boolean;
+        onFoot: boolean;
+        blockCount: number;
+        selectedBlock: BlockType;
+        x: number;
+        s: number;
+      };
+    };
+  }
+).__VMOTO_OPENWORLD__ = {
+  dismount: () => toggleDismount(),
+  returnToTrack: () => returnToTrack(),
+  selectBlock: (b: BlockType) => onFoot.selectBlock(b),
+  placeBlock: () => placeAimedBlock(),
+  breakBlock: () => breakAimedBlock(),
+  getState: () => ({
+    freeRoam: Boolean(player.state.freeRoam),
+    onFoot: onFoot.state.active,
+    blockCount: voxels.getBlockCount(),
+    selectedBlock: onFoot.state.selectedBlock,
+    x: player.state.x,
+    s: player.state.s,
+  }),
+};
 
 function syncPerfViewportMetrics(): void {
   const m = world.getViewportMetrics();
@@ -1335,17 +1810,59 @@ function frame(nowPerfMs: number): void {
       currentTraffic,
       playerCallbacks,
       traffic.getFallenCargo(),
-      weather.physics
+      weather.physics,
+      voxels
     );
 
-    // Crossing village animals on the Chinese National Highway
+    // Step Minecraft-style On-Foot movement & raycasting when dismounted
+    if (onFoot.state.active) {
+      const blocked = isUiBlockingGameplay();
+      const keyFwd =
+        (pressedKeys.has('KeyW') ? 1 : 0) - (pressedKeys.has('KeyS') ? 1 : 0);
+      const keyStrafe =
+        (pressedKeys.has('KeyD') ? 1 : 0) - (pressedKeys.has('KeyA') ? 1 : 0);
+      const keyTurnYaw =
+        ((pressedKeys.has('ArrowLeft') ? 1 : 0) - (pressedKeys.has('ArrowRight') ? 1 : 0)) *
+        2.15 *
+        dt;
+      const keyTurnPitch =
+        ((pressedKeys.has('ArrowUp') ? 1 : 0) - (pressedKeys.has('ArrowDown') ? 1 : 0)) *
+        1.65 *
+        dt;
+
+      footInputBuf.forward = blocked
+        ? 0
+        : keyFwd !== 0
+          ? keyFwd
+          : footTouchState.forward;
+      footInputBuf.strafe = blocked
+        ? 0
+        : keyStrafe !== 0
+          ? keyStrafe
+          : footTouchState.strafe;
+      footInputBuf.jump = !blocked && (pressedKeys.has('Space') || footTouchState.jump);
+      footInputBuf.sprint =
+        !blocked &&
+        (pressedKeys.has('ShiftLeft') || pressedKeys.has('ShiftRight') || footTouchState.sprint);
+      footInputBuf.lookYawDelta = blocked ? 0 : pendingLookYaw + keyTurnYaw;
+      footInputBuf.lookPitchDelta = blocked ? 0 : pendingLookPitch + keyTurnPitch;
+      pendingLookYaw = 0;
+      pendingLookPitch = 0;
+
+      onFoot.update(dt, footInputBuf, voxels, () => audio.playFootstep());
+    } else {
+      pendingLookYaw = 0;
+      pendingLookPitch = 0;
+    }
+
+    // Crossing village animals on the Chinese National Highway (only hit when riding on road)
     currentAnimals = animals.update(
       dt,
       player.state.s,
       player.state.x,
       player.state.y,
       player.state.speed,
-      player.state.crashed,
+      player.state.crashed || Boolean(player.state.freeRoam) || onFoot.state.active,
       player.state.invulnTimer > 0,
       player.state.turboShieldTimer > 0,
       animalCallbacks
@@ -1396,9 +1913,9 @@ function frame(nowPerfMs: number): void {
 
   // 5. Engine + weather audio, 3D HD-pixel frame, weather FX & throttled HUD refresh
   audio.updateEngine(
-    player.state.speed,
-    player.state.nitroActive || player.state.turboShieldTimer > 0,
-    player.state.crashed,
+    onFoot.state.active ? 0 : Math.abs(player.state.speed),
+    !onFoot.state.active && (player.state.nitroActive || player.state.turboShieldTimer > 0),
+    player.state.crashed || onFoot.state.active,
     dt
   );
   audio.updateWeatherAmbience(weather.render.ambienceMode, weather.render.ambienceLevel, dt);
@@ -1411,11 +1928,20 @@ function frame(nowPerfMs: number): void {
     items.visuals,
     traffic.getFallenCargo(),
     currentAnimals,
-    weather.render
+    weather.render,
+    voxels,
+    onFoot.state
   );
   hud.setWeather(weather.render.current, weather.render.lightningFlash);
   hud.setEnragedWarning(ai.isAnyDeliveryEnraged());
   hud.setSniperState(items.getSniperHudState(), items.getSniperCandidates());
+  hud.setOpenWorldMode(
+    Boolean(player.state.freeRoam || onFoot.state.active),
+    onFoot.state.active,
+    onFoot.state.selectedBlock,
+    onFoot.state.distToBike,
+    Boolean(onFoot.state.aimHit)
+  );
   hud.update(player.state, allRiders, pressedKeys, dt);
 
   // 6. Lightweight 1Hz read-only perf snapshot for diagnostics

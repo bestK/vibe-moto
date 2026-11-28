@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import {
   CURB_WIDTH,
+  OPEN_WORLD_TERRAIN_FAR,
+  OPEN_WORLD_TERRAIN_FLAT,
   ROAD_HALF_WIDTH,
   RoadFrame,
   SHOULDER_HALF_WIDTH,
@@ -8,31 +10,36 @@ import {
   getBiomeAt,
   getBoostPadInSlot,
   hash1,
+  openWorldGroundY,
   roadFrameToLocalWorld,
   roadToLocalWorld,
   roadX,
   roadY,
   sampleRoadFrame,
   signedTrackDelta,
+  worldAbsToLocal,
 } from './RoadMath';
 import { getPixelAtlas } from './PixelTextures';
 import { getChinaAtlas } from './ChinaTextures';
 import { CrossingAnimal } from './AnimalSystem';
 import { BikeVisual } from './BikeModel';
 import { ItemVisuals } from './ItemSystem';
+import { OnFootState } from './OnFootController';
+import { PlayerCharacterVisual } from './PlayerCharacterVisual';
 import { BIKE_PALETTES, FallenCargo, RiderRenderState, TrafficCar } from './types';
+import { VoxelWorld, VoxelWorldVisual } from './VoxelWorld';
 import type { WeatherId, WeatherRenderSnapshot } from './WeatherSystem';
 
-// Progressive road LOD slices: 3m near camera (-24m..+108m), 6m far (+114m..+324m)
-// Snapping baseS to 6m (LCM of 3 & 6) eliminates vertex shimmer while cutting ~30% road verts & trig calls.
-const ROAD_SLICE_SNAP = 6.0;
+// Progressive road LOD slices: 12m rear (-144m..-36m) for 360° open-world turning, 3m near (-24m..+108m), 6m far (+114m..+324m)
+const ROAD_SLICE_SNAP = 12.0;
 const ROAD_SLICE_OFFSETS: Float32Array = (() => {
   const offs: number[] = [];
+  for (let d = -144; d <= -36; d += 12) offs.push(d);
   for (let d = -24; d <= 108; d += 3) offs.push(d);
   for (let d = 114; d <= 324; d += 6) offs.push(d);
   return new Float32Array(offs);
 })();
-const ROAD_SLICES = ROAD_SLICE_OFFSETS.length; // 81 slices (down from 116)
+const ROAD_SLICES = ROAD_SLICE_OFFSETS.length; // 91 slices (full 360° open-world visibility!)
 const MAX_PARTICLES = 120;
 const MAX_PROPS_PER_POOL = 96;
 const MAX_TRAFFIC_RENDER = 26;
@@ -58,7 +65,7 @@ const QUALITY_PROFILES: readonly QualityProfile[] = [
   {
     dprDesktop: 0.78,
     dprMobile: 0.7,
-    roadSlices: 62, // 216m road horizon
+    roadSlices: 72, // 216m ahead + 144m behind
     propRange: 196,
     maxFogFar: 210,
     maxWeatherDrops: 64,
@@ -68,7 +75,7 @@ const QUALITY_PROFILES: readonly QualityProfile[] = [
   {
     dprDesktop: 0.96,
     dprMobile: 0.85,
-    roadSlices: 70, // 264m road horizon
+    roadSlices: 80, // 264m ahead + 144m behind
     propRange: 242,
     maxFogFar: 258,
     maxWeatherDrops: 120,
@@ -78,7 +85,7 @@ const QUALITY_PROFILES: readonly QualityProfile[] = [
   {
     dprDesktop: 1.25,
     dprMobile: 1.0,
-    roadSlices: ROAD_SLICES, // 324m road horizon
+    roadSlices: ROAD_SLICES, // 324m ahead + 144m behind
     propRange: 285,
     maxFogFar: 345,
     maxWeatherDrops: MAX_WEATHER_DROPS,
@@ -239,7 +246,16 @@ export class WorldRenderer {
   private readonly curbRGeo: THREE.BufferGeometry;
   private readonly terrainLGeo: THREE.BufferGeometry;
   private readonly terrainRGeo: THREE.BufferGeometry;
+  private readonly hillLGeo: THREE.BufferGeometry;
+  private readonly hillRGeo: THREE.BufferGeometry;
   private readonly terrainMat: THREE.MeshLambertMaterial;
+
+  // Open-World Voxel Building + On-Foot 3D Character + Parked Bike Beacon
+  private readonly voxelVisual: VoxelWorldVisual;
+  private readonly charVisual: PlayerCharacterVisual;
+  private readonly bikeBeaconMesh: THREE.Mesh;
+  private freeCamYaw = 0;
+  private freeCamYawInit = false;
 
   // Instanced roadside scenery pools
   private readonly trunkInst: THREE.InstancedMesh;
@@ -395,7 +411,8 @@ export class WorldRenderer {
     this.fog = new THREE.Fog('#9cd3f0', 112, QUALITY_PROFILES[this.qualityTier].maxFogFar);
     this.scene.fog = this.fog;
 
-    this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.25, 620);
+    this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.15, 620);
+    this.scene.add(this.camera);
 
     const atlas = getPixelAtlas();
 
@@ -506,6 +523,34 @@ export class WorldRenderer {
     const terrR = new THREE.Mesh(this.terrainRGeo, this.terrainMat);
     terrR.frustumCulled = false;
     this.scene.add(terrR);
+
+    // Outer distant scenic hills beyond the ±120m buildable open-world plains
+    this.hillLGeo = this.createRibbonGeometry(ROAD_SLICES);
+    const hillLMesh = new THREE.Mesh(this.hillLGeo, this.terrainMat);
+    hillLMesh.frustumCulled = false;
+    this.scene.add(hillLMesh);
+
+    this.hillRGeo = this.createRibbonGeometry(ROAD_SLICES);
+    const hillRMesh = new THREE.Mesh(this.hillRGeo, this.terrainMat);
+    hillRMesh.frustumCulled = false;
+    this.scene.add(hillRMesh);
+
+    // Minecraft-style Voxel World renderer + On-Foot 3D Character + Parked Bike Beacon
+    this.voxelVisual = new VoxelWorldVisual();
+    this.scene.add(this.voxelVisual.group);
+
+    this.charVisual = new PlayerCharacterVisual();
+    this.charVisual.root.visible = false;
+    this.scene.add(this.charVisual.root);
+    this.camera.add(this.charVisual.fpHandGroup);
+
+    const beaconGeo = new THREE.OctahedronGeometry(0.42, 0);
+    this.bikeBeaconMesh = new THREE.Mesh(
+      beaconGeo,
+      new THREE.MeshBasicMaterial({ color: 0x00f5d4 })
+    );
+    this.bikeBeaconMesh.visible = false;
+    this.scene.add(this.bikeBeaconMesh);
 
     // Instanced roadside props (single draw call per category!)
     const trunkGeo = new THREE.BoxGeometry(0.95, 5.2, 0.95);
@@ -914,6 +959,8 @@ export class WorldRenderer {
     this.curbRGeo.setDrawRange(0, indexCount);
     this.terrainLGeo.setDrawRange(0, indexCount);
     this.terrainRGeo.setDrawRange(0, indexCount);
+    this.hillLGeo.setDrawRange(0, indexCount);
+    this.hillRGeo.setDrawRange(0, indexCount);
   }
 
   private setQualityTier(next: 0 | 1 | 2): void {
@@ -1237,7 +1284,9 @@ export class WorldRenderer {
     itemVisuals?: ItemVisuals,
     fallenCargo?: readonly FallenCargo[],
     animals?: readonly CrossingAnimal[],
-    weather?: WeatherRenderSnapshot
+    weather?: WeatherRenderSnapshot,
+    voxels?: VoxelWorld,
+    onFoot?: OnFootState
   ): void {
     // Adaptive performance governor (auto-tunes DPR, horizon & particle caps for smooth FPS on ordinary machines)
     this.updatePerfGovernor();
@@ -1258,7 +1307,7 @@ export class WorldRenderer {
       this.resize();
     }
 
-    const originS = local.s;
+    const originS = onFoot?.active ? onFoot.ws : local.s;
     const originX = roadX(originS);
     const originY = roadY(originS);
 
@@ -1273,12 +1322,25 @@ export class WorldRenderer {
       this.terrainMat.color.copy(this.smoothTerrainTint);
     }
 
-    // 1. Update sliding road & terrain ribbons
+    // 1. Update sliding road & open-world terrain ribbons
     this.updateRoadRibbons(originS, originX, originY);
 
     // 2. Update deterministic instanced roadside props + boost pads + Chinese landmarks
     this.updateProps(originS, originX, originY, timeSec);
     this.updateRoadsideLandmarks(originS, originX, originY);
+
+    // 2b. Update Minecraft-style voxel world blocks & aim highlight
+    if (voxels) {
+      this.voxelVisual.update(
+        voxels,
+        originS,
+        originX,
+        originY,
+        onFoot?.aimHit ?? null,
+        onFoot?.selectedBlock ?? 3,
+        Boolean(onFoot?.active)
+      );
+    }
 
     // 3. Update traffic car meshes (sedans/police + Chinese overloaded cargo trucks)
     this.updateTrafficVisuals(traffic, originS, originX, originY, timeSec);
@@ -1297,17 +1359,60 @@ export class WorldRenderer {
     // 5. Sync & update all motorcycle visuals (local + remote players + bots + delivery riders)
     this.updateRiders(allRiders, originS, originX, originY, timeSec);
 
+    // 5b. Sync on-foot 3D character visual & parked bike beacon
+    if (onFoot?.active) {
+      this.charVisual.setAvatar(local.avatarIdx);
+      this.charVisual.setHeldBlock(onFoot.selectedBlock);
+      this.charVisual.updateAnimation(
+        onFoot.walkPhase,
+        onFoot.moveSpeed,
+        onFoot.swingTimer,
+        timeSec,
+        onFoot.firstPerson
+      );
+      if (onFoot.firstPerson) {
+        this.charVisual.root.visible = false;
+      } else {
+        this.charVisual.root.visible = true;
+        worldAbsToLocal(onFoot.wx, onFoot.wy, onFoot.ws, originS, originX, originY, this._v1);
+        this.charVisual.root.position.copy(this._v1);
+        this.charVisual.root.rotation.set(0, onFoot.yaw, 0);
+      }
+
+      if (onFoot.distToBike > 5.0) {
+        this.bikeBeaconMesh.visible = true;
+        const bobY = 2.6 + Math.sin(timeSec * 4.5) * 0.3;
+        worldAbsToLocal(
+          onFoot.parkedBike.wx,
+          onFoot.parkedBike.wy + bobY,
+          onFoot.parkedBike.ws,
+          originS,
+          originX,
+          originY,
+          this._v1
+        );
+        this.bikeBeaconMesh.position.copy(this._v1);
+        this.bikeBeaconMesh.rotation.y = timeSec * 2.5;
+      } else {
+        this.bikeBeaconMesh.visible = false;
+      }
+    } else {
+      this.charVisual.root.visible = false;
+      this.charVisual.fpHandGroup.visible = false;
+      this.bikeBeaconMesh.visible = false;
+    }
+
     // 6. Update particles & 3D hit popups
     this.updateParticles(dt, originS, originX, originY);
     this.updatePopups(dt, originS, originX, originY);
 
-    // 7. Update arcade camera
-    this.updateCamera(local, originS, originX, originY, dt);
+    // 7. Update arcade / open-world / on-foot camera
+    this.updateCamera(local, originS, originX, originY, dt, onFoot);
 
     // 8. Update local bike headlight beam & 3D weather precipitation
     if (weather) {
       this.updateHeadlightBeam(local, originS, originX, originY, weather);
-      this.updateWeatherPrecipitation(weather, local.speed, dt, timeSec);
+      this.updateWeatherPrecipitation(weather, onFoot?.active ? onFoot.moveSpeed : local.speed, dt, timeSec);
     }
 
     // Keep sky domes centered on camera
@@ -1391,7 +1496,7 @@ export class WorldRenderer {
     originY: number,
     w: WeatherRenderSnapshot
   ): void {
-    const op = local.crashed ? 0 : w.headlightOpacity * 0.62;
+    const op = local.crashed || local.onFoot ? 0 : w.headlightOpacity * 0.62;
     if (op <= 0.015) {
       if (this.headlightBeam.visible) {
         this.headlightBeam.visible = false;
@@ -1400,6 +1505,13 @@ export class WorldRenderer {
     }
     this.headlightBeam.visible = true;
     this.headlightBeamMat.opacity = op;
+    if (local.freeRoam && local.worldX !== undefined && local.worldY !== undefined && local.worldS !== undefined) {
+      worldAbsToLocal(local.worldX, local.worldY + 0.14, local.worldS, originS, originX, originY, this._v1);
+      this.headlightBeam.position.copy(this._v1);
+      this._euler.set(0, local.heading ?? 0, 0);
+      this.headlightBeam.quaternion.setFromEuler(this._euler);
+      return;
+    }
     sampleRoadFrame(local.s, this._f);
     roadFrameToLocalWorld(this._f, local.s, local.x, 0.14 + local.y * 0.25, originS, originX, originY, this._v1);
     this.headlightBeam.position.copy(this._v1);
@@ -1549,6 +1661,10 @@ export class WorldRenderer {
     const tlUv = this.terrainLGeo.attributes.uv as THREE.BufferAttribute;
     const trPos = this.terrainRGeo.attributes.position as THREE.BufferAttribute;
     const trUv = this.terrainRGeo.attributes.uv as THREE.BufferAttribute;
+    const hlPos = this.hillLGeo.attributes.position as THREE.BufferAttribute;
+    const hlUv = this.hillLGeo.attributes.uv as THREE.BufferAttribute;
+    const hrPos = this.hillRGeo.attributes.position as THREE.BufferAttribute;
+    const hrUv = this.hillRGeo.attributes.uv as THREE.BufferAttribute;
 
     const rArr = rPos.array as Float32Array;
     const rUvArr = rUv.array as Float32Array;
@@ -1560,10 +1676,15 @@ export class WorldRenderer {
     const tlUvArr = tlUv.array as Float32Array;
     const trArr = trPos.array as Float32Array;
     const trUvArr = trUv.array as Float32Array;
+    const hlArr = hlPos.array as Float32Array;
+    const hlUvArr = hlUv.array as Float32Array;
+    const hrArr = hrPos.array as Float32Array;
+    const hrUvArr = hrUv.array as Float32Array;
 
     const f = this._f;
     const curbOuter = ROAD_HALF_WIDTH + CURB_WIDTH;
-    const terrainFar = 92.0;
+    const flatFar = OPEN_WORLD_TERRAIN_FLAT;
+    const hillFar = OPEN_WORLD_TERRAIN_FAR;
 
     for (let i = 0; i < activeSlices; i++) {
       const s = baseS + ROAD_SLICE_OFFSETS[i];
@@ -1608,32 +1729,55 @@ export class WorldRenderer {
       crUvArr[ui + 1] = vCurb;
       crUvArr[ui + 3] = vCurb;
 
-      // Scenic terrain skirts (strictly periodic over 2400m circuit for seamless lap transitions)
-      const hillPhase = (s * Math.PI * 2) / TRACK_LENGTH;
-      const hillL = Math.sin(hillPhase * 6) * 5.0 + 3.0;
-      const hillR = Math.cos(hillPhase * 5) * 5.0 - 1.5;
-
-      tlArr[vi] = cx - f.rx * terrainFar;
-      tlArr[vi + 1] = cy - f.ry * terrainFar + hillL;
-      tlArr[vi + 2] = cz - f.rz * terrainFar;
+      // Wide fold-free buildable open-world plains (±120m along Euclidean X) matching openWorldGroundY()
+      tlArr[vi] = cx - flatFar;
+      tlArr[vi + 1] = cy - 0.02;
+      tlArr[vi + 2] = cz;
       tlArr[vi + 3] = cx - f.rx * curbOuter;
       tlArr[vi + 4] = cy - f.ry * curbOuter - 0.02;
       tlArr[vi + 5] = cz - f.rz * curbOuter;
       tlUvArr[ui] = 0;
       tlUvArr[ui + 1] = vTerr;
-      tlUvArr[ui + 2] = 6.0;
+      tlUvArr[ui + 2] = 12.0;
       tlUvArr[ui + 3] = vTerr;
 
       trArr[vi] = cx + f.rx * curbOuter;
       trArr[vi + 1] = cy + f.ry * curbOuter - 0.02;
       trArr[vi + 2] = cz + f.rz * curbOuter;
-      trArr[vi + 3] = cx + f.rx * terrainFar;
-      trArr[vi + 4] = cy + f.ry * terrainFar + hillR;
-      trArr[vi + 5] = cz + f.rz * terrainFar;
+      trArr[vi + 3] = cx + flatFar;
+      trArr[vi + 4] = cy - 0.02;
+      trArr[vi + 5] = cz;
       trUvArr[ui] = 0;
       trUvArr[ui + 1] = vTerr;
-      trUvArr[ui + 2] = 6.0;
+      trUvArr[ui + 2] = 12.0;
       trUvArr[ui + 3] = vTerr;
+
+      // Distant scenic hills beyond ±120m (strictly periodic over 2400m circuit)
+      const hillPhase = (s * Math.PI * 2) / TRACK_LENGTH;
+      const hillL = Math.sin(hillPhase * 6) * 5.0 + 4.0;
+      const hillR = Math.cos(hillPhase * 5) * 5.0 + 2.5;
+
+      hlArr[vi] = cx - hillFar;
+      hlArr[vi + 1] = cy - 0.02 + hillL;
+      hlArr[vi + 2] = cz;
+      hlArr[vi + 3] = cx - flatFar;
+      hlArr[vi + 4] = cy - 0.02;
+      hlArr[vi + 5] = cz;
+      hlUvArr[ui] = 0;
+      hlUvArr[ui + 1] = vTerr;
+      hlUvArr[ui + 2] = 8.0;
+      hlUvArr[ui + 3] = vTerr;
+
+      hrArr[vi] = cx + flatFar;
+      hrArr[vi + 1] = cy - 0.02;
+      hrArr[vi + 2] = cz;
+      hrArr[vi + 3] = cx + hillFar;
+      hrArr[vi + 4] = cy - 0.02 + hillR;
+      hrArr[vi + 5] = cz;
+      hrUvArr[ui] = 0;
+      hrUvArr[ui + 1] = vTerr;
+      hrUvArr[ui + 2] = 8.0;
+      hrUvArr[ui + 3] = vTerr;
     }
 
     rPos.needsUpdate = true;
@@ -1646,6 +1790,10 @@ export class WorldRenderer {
     tlUv.needsUpdate = true;
     trPos.needsUpdate = true;
     trUv.needsUpdate = true;
+    hlPos.needsUpdate = true;
+    hlUv.needsUpdate = true;
+    hrPos.needsUpdate = true;
+    hrUv.needsUpdate = true;
   }
 
   private updateProps(originS: number, originX: number, originY: number, timeSec: number): void {
@@ -1665,7 +1813,7 @@ export class WorldRenderer {
       this.lastPropsRange = propRange;
 
       const slotStep = 12.0;
-      const minSlot = Math.floor((originS - 18) / slotStep);
+      const minSlot = Math.floor((originS - 96) / slotStep);
       const maxSlot = Math.floor((originS + propRange) / slotStep);
 
       let trunkC = 0;
@@ -1683,9 +1831,10 @@ export class WorldRenderer {
         sampleRoadFrame(s, f);
         const yaw = Math.atan2(-f.tx, -f.tz);
 
-        // Guard posts every slot along outer shoulder
+        // Open roadside shoulder posts (wider gaps so players can ride off-road anywhere!)
         for (let side = -1; side <= 1; side += 2) {
-          if (postC < MAX_PROPS_PER_POOL * 2 && wSlot % 2 === 0) {
+          const isCraftOutpostZone = side > 0 && wSlot >= 2 && wSlot <= 6;
+          if (!isCraftOutpostZone && postC < MAX_PROPS_PER_POOL * 2 && wSlot % 4 === 0) {
             roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH - 0.4), 0, originS, originX, originY, pos);
             d.position.copy(pos);
             d.rotation.set(0, yaw, 0);
@@ -1696,7 +1845,7 @@ export class WorldRenderer {
 
           const h = hash1(wSlot * 37 + (side > 0 ? 101 : 211));
           const h2 = hash1(wSlot * 71 + (side > 0 ? 19 : 83));
-          const dist = SHOULDER_HALF_WIDTH + 3.2 + h2 * 18.0;
+          const dist = SHOULDER_HALF_WIDTH + 6.5 + h2 * 44.0;
 
           // Street lamps in twilight biome, low-visibility weather, or periodic highway lamps
           if (
@@ -1715,10 +1864,11 @@ export class WorldRenderer {
             }
           }
 
-          // Biome-specific trees & canyon mesas
-          if (h < 0.62) {
+          // Biome-specific trees & canyon mesas spread across the wide open-world meadow
+          if (!isCraftOutpostZone && h < 0.62) {
             const sc = 0.85 + h2 * 0.65;
-            roadFrameToLocalWorld(f, s, side * dist, -0.3, originS, originX, originY, pos);
+            const wx = f.x + side * dist;
+            worldAbsToLocal(wx, f.y - 0.12, s, originS, originX, originY, pos);
             d.position.copy(pos);
             d.rotation.set(0, h * 6.28, 0);
             d.scale.set(sc, sc, sc);
@@ -1735,8 +1885,9 @@ export class WorldRenderer {
               this.trunkInst.setMatrixAt(trunkC++, d.matrix);
               this.pineInst.setMatrixAt(pineC++, d.matrix);
             }
-          } else if (h > 0.84 && rockC < MAX_PROPS_PER_POOL) {
-            roadFrameToLocalWorld(f, s, side * (dist + 6), -0.4, originS, originX, originY, pos);
+          } else if (!isCraftOutpostZone && h > 0.84 && rockC < MAX_PROPS_PER_POOL) {
+            const wx = f.x + side * (dist + 18);
+            worldAbsToLocal(wx, f.y - 0.12, s, originS, originX, originY, pos);
             d.position.copy(pos);
             d.rotation.set(0, h2 * 6.28, 0);
             d.scale.set(0.8 + h2, 0.7 + h2 * 1.3, 0.8 + h2);
@@ -2321,16 +2472,23 @@ export class WorldRenderer {
       }
 
       const ds = signedTrackDelta(r.s, originS);
-      if (ds < -45 || ds > 320) {
+      if (ds < -140 || ds > 320) {
         vis.root.visible = false;
         continue;
       }
       vis.root.visible = true;
       vis.setDistanceLod(Math.abs(ds));
-      sampleRoadFrame(r.s, f);
-      roadFrameToLocalWorld(f, r.s, r.x, 0, originS, originX, originY, pos);
-      vis.root.position.copy(pos);
-      this.setRoadBasisQuaternion(f, vis.root.quaternion);
+      if (r.freeRoam && r.worldX !== undefined && r.worldY !== undefined && r.worldS !== undefined) {
+        worldAbsToLocal(r.worldX, r.worldY, r.worldS, originS, originX, originY, pos);
+        vis.root.position.copy(pos);
+        this._euler.set(0, r.heading ?? 0, 0);
+        vis.root.quaternion.setFromEuler(this._euler);
+      } else {
+        sampleRoadFrame(r.s, f);
+        roadFrameToLocalWorld(f, r.s, r.x, 0, originS, originX, originY, pos);
+        vis.root.position.copy(pos);
+        this.setRoadBasisQuaternion(f, vis.root.quaternion);
+      }
       vis.updateVisuals(r, timeSec);
     }
 
@@ -2413,11 +2571,125 @@ export class WorldRenderer {
     originS: number,
     originX: number,
     originY: number,
-    dt: number
+    dt: number,
+    onFoot?: OnFootState
   ): void {
-    const speedNorm = Math.min(1, local.speed / 64);
-    // Gently widen vertical FOV on narrow portrait phones so the 4-lane highway stays comfortable without stretching
     const portraitBoost = this.camera.aspect < 0.85 ? Math.min(18, (0.85 - this.camera.aspect) * 42) : 0;
+
+    // MODE A: On-Foot Minecraft-Style 1st / 3rd Person Camera
+    if (onFoot?.active) {
+      this.freeCamYawInit = false;
+      const targetFov = (onFoot.firstPerson ? 74 : 70) + portraitBoost;
+      this.currentFov += (targetFov - this.currentFov) * Math.min(1, dt * 10);
+      if (Math.abs(this.camera.fov - this.currentFov) > 0.05) {
+        this.camera.fov = this.currentFov;
+        this.camera.updateProjectionMatrix();
+      }
+      this.currentCamRoll += (0 - this.currentCamRoll) * Math.min(1, dt * 12);
+
+      const cp = Math.cos(onFoot.pitch);
+      const lookX = -Math.sin(onFoot.yaw) * cp;
+      const lookY = Math.sin(onFoot.pitch);
+      const lookS = Math.cos(onFoot.yaw) * cp;
+      const eyeWy = onFoot.wy + 1.54;
+
+      if (onFoot.firstPerson) {
+        worldAbsToLocal(onFoot.wx, eyeWy, onFoot.ws, originS, originX, originY, this._v1);
+        this._v2.set(this._v1.x + lookX * 10, this._v1.y + lookY * 10, this._v1.z - lookS * 10);
+      } else {
+        const backDist = 4.3;
+        const camWx = onFoot.wx - lookX * backDist;
+        const camWs = onFoot.ws - lookS * backDist;
+        const groundAtCam = openWorldGroundY(camWx, camWs);
+        const camWy = Math.max(groundAtCam + 0.55, eyeWy - lookY * backDist + 0.65);
+        worldAbsToLocal(camWx, camWy, camWs, originS, originX, originY, this._v1);
+        worldAbsToLocal(
+          onFoot.wx + lookX * 10,
+          eyeWy + lookY * 10,
+          onFoot.ws + lookS * 10,
+          originS,
+          originX,
+          originY,
+          this._v2
+        );
+      }
+
+      if (this.shakeTime > 0) {
+        this.shakeTime -= dt;
+        const mag = this.shakeIntensity * Math.max(0, this.shakeTime / 0.24);
+        this._v1.x += (Math.random() - 0.5) * mag * 0.6;
+        this._v1.y += (Math.random() - 0.5) * mag * 0.6;
+      }
+
+      this.camera.position.copy(this._v1);
+      this.camera.lookAt(this._v2);
+      return;
+    }
+
+    // MODE B: Open-World 360° Free-Roam Motorcycle Camera
+    if (local.freeRoam && local.worldX !== undefined && local.worldY !== undefined && local.worldS !== undefined) {
+      const heading = local.heading ?? 0;
+      if (!this.freeCamYawInit) {
+        this.freeCamYaw = heading;
+        this.freeCamYawInit = true;
+      } else {
+        let diff = (heading - this.freeCamYaw) % (Math.PI * 2);
+        if (diff > Math.PI) diff -= Math.PI * 2;
+        if (diff < -Math.PI) diff += Math.PI * 2;
+        this.freeCamYaw += diff * Math.min(1, dt * 6.5);
+      }
+
+      const speedNorm = Math.min(1, Math.abs(local.speed) / 56);
+      const targetFov =
+        (this.cameraMode === 2 ? 78 : 69) +
+        portraitBoost +
+        speedNorm * 11 +
+        (local.nitroActive ? 8 : 0);
+      this.currentFov += (targetFov - this.currentFov) * Math.min(1, dt * 8);
+      if (Math.abs(this.camera.fov - this.currentFov) > 0.05) {
+        this.camera.fov = this.currentFov;
+        this.camera.updateProjectionMatrix();
+      }
+
+      const camYaw = this.cameraMode === 2 ? heading : this.freeCamYaw;
+      const fwdX = -Math.sin(camYaw);
+      const fwdS = Math.cos(camYaw);
+
+      const backDist = this.cameraMode === 2 ? -0.3 : this.cameraMode === 1 ? 4.2 : 5.6;
+      const camH = this.cameraMode === 2 ? 1.48 : this.cameraMode === 1 ? 1.75 : 2.6;
+      const camWx = local.worldX - fwdX * backDist;
+      const camWs = local.worldS - fwdS * backDist;
+      const camWy = Math.max(openWorldGroundY(camWx, camWs) + 0.6, local.worldY + camH);
+
+      worldAbsToLocal(camWx, camWy, camWs, originS, originX, originY, this._v1);
+      worldAbsToLocal(
+        local.worldX + fwdX * 14,
+        local.worldY + 1.15,
+        local.worldS + fwdS * 14,
+        originS,
+        originX,
+        originY,
+        this._v2
+      );
+
+      if (this.shakeTime > 0) {
+        this.shakeTime -= dt;
+        const mag = this.shakeIntensity * Math.max(0, this.shakeTime / 0.24);
+        this._v1.x += (Math.random() - 0.5) * mag;
+        this._v1.y += (Math.random() - 0.5) * mag * 0.8;
+      }
+
+      this.camera.position.copy(this._v1);
+      this.camera.lookAt(this._v2);
+      const targetRoll = -local.lean * (this.cameraMode === 2 ? 0.3 : 0.12);
+      this.currentCamRoll += (targetRoll - this.currentCamRoll) * Math.min(1, dt * 10);
+      this.camera.rotateZ(this.currentCamRoll);
+      return;
+    }
+
+    // MODE C: Classic Highway Arcade Camera
+    this.freeCamYawInit = false;
+    const speedNorm = Math.min(1, local.speed / 64);
     const targetFov =
       (this.cameraMode === 2 ? 78 : 68) +
       portraitBoost +

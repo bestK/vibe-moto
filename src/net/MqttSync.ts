@@ -6,6 +6,7 @@ import {
   type ItemNetEvent,
   type ItemType,
   type RiderRenderState,
+  type VoxelNetEvent,
   type WeaponType,
 } from '../game/types';
 import { ROAD_HALF_WIDTH, dsForMeters } from '../game/RoadMath';
@@ -51,6 +52,7 @@ export interface MqttCallbacks {
   onIncomingHit(ev: CombatHitEvent): void;
   onPeerEvent?(msg: string): void;
   onItemEvent?(ev: ItemNetEvent): void;
+  onVoxelEvent?(ev: VoxelNetEvent): void;
   onRemoteCustomAvatar?(peerId: string, dataUrl: string | null): void;
   onRoomPasswordRequired?(
     roomSlug: string,
@@ -1109,6 +1111,22 @@ export class MqttSync {
       ...ev,
       from: this.clientId,
       fromName: this.name,
+      ts: Date.now(),
+    };
+    const payload = textEncoder.encode(JSON.stringify(packet));
+    this.sendRaw(buildPublishPacket(this.topicEventsBytes, payload, false));
+  }
+
+  publishVoxelEvent(ev: Omit<VoxelNetEvent, 't' | 'from' | 'ts'>): void {
+    if (this.disposed || !this.isRoomActive()) return;
+    const packet: VoxelNetEvent = {
+      t: 'vox',
+      from: this.clientId,
+      op: ev.op,
+      gx: ev.gx,
+      gy: ev.gy,
+      gz: ev.gz,
+      b: ev.b,
       ts: Date.now(),
     };
     const payload = textEncoder.encode(JSON.stringify(packet));
@@ -2220,8 +2238,8 @@ export class MqttSync {
       spinOut = (itemBits & (1 << 6)) !== 0;
     }
 
-    const cx = clamp(x, -12, 12);
-    const cy = clamp(y, 0, 8);
+    const cx = clamp(x, -125, 125);
+    const cy = clamp(y, -16, 80);
     const cspeed = clamp(speed, -10, 120);
     const cvx = clamp(vx, -40, 40);
     const clean = clamp(lean, -1.5, 1.5);
@@ -2499,6 +2517,33 @@ export class MqttSync {
         s,
         x,
         ts,
+      });
+      return;
+    }
+
+    if (obj.t === 'vox') {
+      if (typeof obj.from !== 'string' || obj.from === this.clientId) return;
+      if (obj.op !== 'set' && obj.op !== 'del') return;
+      if (
+        typeof obj.gx !== 'number' ||
+        typeof obj.gy !== 'number' ||
+        typeof obj.gz !== 'number' ||
+        !Number.isFinite(obj.gx) ||
+        !Number.isFinite(obj.gy) ||
+        !Number.isFinite(obj.gz)
+      ) {
+        return;
+      }
+      const b = typeof obj.b === 'number' && Number.isFinite(obj.b) ? Math.trunc(obj.b) : undefined;
+      this.callbacks.onVoxelEvent?.({
+        t: 'vox',
+        from: obj.from,
+        op: obj.op,
+        gx: Math.trunc(obj.gx),
+        gy: Math.trunc(obj.gy),
+        gz: Math.trunc(obj.gz),
+        b,
+        ts: typeof obj.ts === 'number' && Number.isFinite(obj.ts) ? obj.ts : Date.now(),
       });
       return;
     }
