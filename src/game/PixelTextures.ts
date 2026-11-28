@@ -37,7 +37,7 @@ export interface PixelTextureAtlas {
   curb: THREE.CanvasTexture;
   terrain: THREE.CanvasTexture;
   sky: THREE.CanvasTexture;
-  skies: Record<WeatherId, THREE.CanvasTexture>;
+  getSky(weather: WeatherId): THREE.CanvasTexture;
   headlightBeam: THREE.CanvasTexture;
   wheel: THREE.CanvasTexture;
   boostPad: THREE.CanvasTexture;
@@ -53,22 +53,25 @@ export interface PixelTextureAtlas {
 }
 
 let _cachedAtlas: PixelTextureAtlas | null = null;
+const _lazySkies: Partial<Record<WeatherId, THREE.CanvasTexture>> = {};
+
+function getOrCreateSky(weather: WeatherId): THREE.CanvasTexture {
+  const existing = _lazySkies[weather];
+  if (existing) return existing;
+  const tex = createSkyTexture(weather);
+  _lazySkies[weather] = tex;
+  return tex;
+}
 
 export function getPixelAtlas(): PixelTextureAtlas {
   if (_cachedAtlas) return _cachedAtlas;
-  const skies: Record<WeatherId, THREE.CanvasTexture> = {
-    clear: createSkyTexture('clear'),
-    sunset: createSkyTexture('sunset'),
-    storm: createSkyTexture('storm'),
-    fog: createSkyTexture('fog'),
-    snow: createSkyTexture('snow'),
-  };
+  const clearSky = getOrCreateSky('clear');
   _cachedAtlas = {
     road: createRoadTexture(),
     curb: createCurbTexture(),
     terrain: createTerrainTexture(),
-    sky: skies.clear,
-    skies,
+    sky: clearSky,
+    getSky: getOrCreateSky,
     headlightBeam: createHeadlightBeamTexture(),
     wheel: createWheelTexture(),
     boostPad: createBoostPadTexture(),
@@ -210,72 +213,71 @@ function createTerrainTexture(): THREE.CanvasTexture {
 }
 
 /**
- * Crisp 512x256 HD-pixel weather sky dome generator with smooth multi-stop pixel bands
- * (zero chunky checker artifacts), atmospheric celestial disc, and layered pixel clouds.
+ * Compact 256x128 HD-pixel weather sky dome generator (75% less VRAM than 512x256,
+ * lazily instantiated per weather with smooth 2px stepped atmospheric bands).
  */
 function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
-  const W = 512;
-  const H = 256;
+  const W = 256;
+  const H = 128;
   const [c, ctx] = makePixelCanvas(W, H);
 
   const stopsByWeather: Record<WeatherId, Array<[number, string]>> = {
     clear: [
       [0, '#165296'],
-      [34, '#216eb8'],
-      [70, '#368fd4'],
-      [104, '#5fb2e6'],
-      [134, '#92d1f2'],
-      [156, '#c8e9f8'],
-      [170, '#fff3d6'],
-      [178, '#638ca3'],
-      [256, '#273f52'],
+      [17, '#216eb8'],
+      [35, '#368fd4'],
+      [52, '#5fb2e6'],
+      [67, '#92d1f2'],
+      [78, '#c8e9f8'],
+      [85, '#fff3d6'],
+      [89, '#638ca3'],
+      [128, '#273f52'],
     ],
     sunset: [
       [0, '#141938'],
-      [32, '#242554'],
-      [66, '#432e69'],
-      [96, '#7a396d'],
-      [122, '#be4b60'],
-      [142, '#ea7149'],
-      [158, '#ffa44f'],
-      [170, '#ffe399'],
-      [178, '#464d6b'],
-      [256, '#1c2438'],
+      [16, '#242554'],
+      [33, '#432e69'],
+      [48, '#7a396d'],
+      [61, '#be4b60'],
+      [71, '#ea7149'],
+      [79, '#ffa44f'],
+      [85, '#ffe399'],
+      [89, '#464d6b'],
+      [128, '#1c2438'],
     ],
     storm: [
       [0, '#0c111b'],
-      [38, '#131c2b'],
-      [78, '#1c293d'],
-      [116, '#27374f'],
-      [148, '#344761'],
-      [170, '#465c78'],
-      [178, '#28364a'],
-      [256, '#111824'],
+      [19, '#131c2b'],
+      [39, '#1c293d'],
+      [58, '#27374f'],
+      [74, '#344761'],
+      [85, '#465c78'],
+      [89, '#28364a'],
+      [128, '#111824'],
     ],
     fog: [
       [0, '#607384'],
-      [44, '#738899'],
-      [88, '#8ba0b0'],
-      [126, '#a5b8c7'],
-      [154, '#c1d1de'],
-      [172, '#d8e4ed'],
-      [178, '#95aab8'],
-      [256, '#5c6e7c'],
+      [22, '#738899'],
+      [44, '#8ba0b0'],
+      [63, '#a5b8c7'],
+      [77, '#c1d1de'],
+      [86, '#d8e4ed'],
+      [89, '#95aab8'],
+      [128, '#5c6e7c'],
     ],
     snow: [
       [0, '#1f3759'],
-      [40, '#31527c'],
-      [82, '#4d74a1'],
-      [118, '#779ec4'],
-      [148, '#adcbe3'],
-      [168, '#d9e9f5'],
-      [174, '#eaf4fc'],
-      [178, '#8ea7bf'],
-      [256, '#445a70'],
+      [20, '#31527c'],
+      [41, '#4d74a1'],
+      [59, '#779ec4'],
+      [74, '#adcbe3'],
+      [84, '#d9e9f5'],
+      [87, '#eaf4fc'],
+      [89, '#8ea7bf'],
+      [128, '#445a70'],
     ],
   };
 
-  // Quantize into crisp 4px stepped atmospheric ribbons (retro banded feel without jagged dither teeth)
   const stops = stopsByWeather[weather];
   const parseHex = (hex: string): [number, number, number] => [
     Number.parseInt(hex.slice(1, 3), 16),
@@ -283,7 +285,7 @@ function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
     Number.parseInt(hex.slice(5, 7), 16),
   ];
 
-  const bandStep = 4;
+  const bandStep = 2;
   for (let y = 0; y < H; y += bandStep) {
     let seg = 0;
     while (seg < stops.length - 2 && y >= stops[seg + 1][0]) seg++;
@@ -299,66 +301,60 @@ function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
     ctx.fillRect(0, y, W, bandStep);
   }
 
-  // Subtle twinkling stars in upper sunset sky
   if (weather === 'sunset') {
     ctx.fillStyle = 'rgba(255, 248, 220, 0.85)';
-    for (let i = 0; i < 64; i++) {
-      const sx = (i * 97 + 23) % W;
-      const sy = 6 + ((i * 41) % 62);
-      ctx.fillRect(sx, sy, 2, 2);
+    for (let i = 0; i < 48; i++) {
+      const sx = (i * 53 + 13) % W;
+      const sy = 3 + ((i * 23) % 31);
+      ctx.fillRect(sx, sy, 1, 1);
     }
   }
 
-  // Forward celestial disc (sun aligned directly ahead at u = 0.5 -> x = 256)
-  const sunX = 256;
+  const sunX = 128;
   if (weather === 'clear') {
-    const sunY = 116;
-    // Soft multi-step sunlit corona (solid translucent rings, zero checkerboard noise)
+    const sunY = 58;
     const drawDisc = (rad: number, color: string) => {
       ctx.fillStyle = color;
-      for (let dy = -rad; dy <= rad; dy += 2) {
-        const halfW = Math.floor(Math.sqrt(Math.max(0, rad * rad - dy * dy)) / 2) * 2;
-        if (halfW > 0) ctx.fillRect(sunX - halfW, sunY + dy, halfW * 2, 2);
+      for (let dy = -rad; dy <= rad; dy++) {
+        const halfW = Math.floor(Math.sqrt(Math.max(0, rad * rad - dy * dy)));
+        if (halfW > 0) ctx.fillRect(sunX - halfW, sunY + dy, halfW * 2, 1);
       }
     };
-    drawDisc(30, 'rgba(255, 248, 214, 0.16)');
-    drawDisc(22, 'rgba(255, 246, 204, 0.34)');
-    drawDisc(15, '#fff6cc');
-    drawDisc(11, '#fffdf2');
+    drawDisc(15, 'rgba(255, 248, 214, 0.16)');
+    drawDisc(11, 'rgba(255, 246, 204, 0.34)');
+    drawDisc(8, '#fff6cc');
+    drawDisc(6, '#fffdf2');
   } else if (weather === 'sunset') {
-    const sunY = 134;
-    const r = 24;
-    // Warm sunset aura
+    const sunY = 67;
+    const r = 12;
     ctx.fillStyle = 'rgba(255, 190, 108, 0.22)';
-    for (let dy = -32; dy <= 32; dy += 2) {
-      const hw = Math.floor(Math.sqrt(Math.max(0, 32 * 32 - dy * dy)) / 2) * 2;
-      if (hw > 0) ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 2);
+    for (let dy = -16; dy <= 16; dy++) {
+      const hw = Math.floor(Math.sqrt(Math.max(0, 16 * 16 - dy * dy)));
+      if (hw > 0) ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 1);
     }
-    for (let dy = -r; dy <= r; dy += 2) {
-      // Iconic OutRun horizontal stripe cutouts near bottom of sun
-      if (dy > 6 && dy % 6 === 0) continue;
-      const hw = Math.floor(Math.sqrt(Math.max(0, r * r - dy * dy)) / 2) * 2;
+    for (let dy = -r; dy <= r; dy++) {
+      if (dy > 3 && dy % 3 === 0) continue;
+      const hw = Math.floor(Math.sqrt(Math.max(0, r * r - dy * dy)));
       if (hw <= 0) continue;
-      ctx.fillStyle = dy < -4 ? '#fff8cc' : dy < 8 ? '#ffd06b' : '#ff7b4a';
-      ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 2);
+      ctx.fillStyle = dy < -2 ? '#fff8cc' : dy < 4 ? '#ffd06b' : '#ff7b4a';
+      ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 1);
     }
   } else if (weather === 'fog' || weather === 'snow') {
-    const sunY = 120;
-    const rOuter = 24;
-    const rInner = 14;
+    const sunY = 60;
+    const rOuter = 12;
+    const rInner = 7;
     ctx.fillStyle = weather === 'fog' ? 'rgba(236, 244, 250, 0.22)' : 'rgba(238, 248, 255, 0.28)';
-    for (let dy = -rOuter; dy <= rOuter; dy += 2) {
-      const hw = Math.floor(Math.sqrt(Math.max(0, rOuter * rOuter - dy * dy)) / 2) * 2;
-      if (hw > 0) ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 2);
+    for (let dy = -rOuter; dy <= rOuter; dy++) {
+      const hw = Math.floor(Math.sqrt(Math.max(0, rOuter * rOuter - dy * dy)));
+      if (hw > 0) ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 1);
     }
     ctx.fillStyle = weather === 'fog' ? 'rgba(244, 249, 255, 0.45)' : 'rgba(246, 251, 255, 0.62)';
-    for (let dy = -rInner; dy <= rInner; dy += 2) {
-      const hw = Math.floor(Math.sqrt(Math.max(0, rInner * rInner - dy * dy)) / 2) * 2;
-      if (hw > 0) ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 2);
+    for (let dy = -rInner; dy <= rInner; dy++) {
+      const hw = Math.floor(Math.sqrt(Math.max(0, rInner * rInner - dy * dy)));
+      if (hw > 0) ctx.fillRect(sunX - hw, sunY + dy, hw * 2, 1);
     }
   }
 
-  // Weather-specific layered pixel clouds
   const cloudSets: Record<
     WeatherId,
     { hi: string; mid: string; lo: string; rects: Array<[number, number, number, number]> }
@@ -368,10 +364,10 @@ function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
       mid: '#eef7fc',
       lo: '#badcf2',
       rects: [
-        [34, 88, 58, 10],
-        [130, 100, 48, 8],
-        [326, 92, 64, 10],
-        [426, 80, 52, 8],
+        [17, 44, 29, 5],
+        [65, 50, 24, 4],
+        [163, 46, 32, 5],
+        [213, 40, 26, 4],
       ],
     },
     sunset: {
@@ -379,10 +375,10 @@ function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
       mid: '#f7b288',
       lo: '#c76472',
       rects: [
-        [46, 92, 60, 10],
-        [146, 104, 46, 8],
-        [332, 94, 62, 10],
-        [432, 84, 52, 8],
+        [23, 46, 30, 5],
+        [73, 52, 23, 4],
+        [166, 47, 31, 5],
+        [216, 42, 26, 4],
       ],
     },
     storm: {
@@ -390,11 +386,11 @@ function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
       mid: '#2c3d54',
       lo: '#172233',
       rects: [
-        [8, 66, 102, 20],
-        [114, 78, 114, 22],
-        [232, 66, 120, 22],
-        [356, 76, 110, 20],
-        [460, 70, 52, 18],
+        [4, 33, 51, 10],
+        [57, 39, 57, 11],
+        [116, 33, 60, 11],
+        [178, 38, 55, 10],
+        [230, 35, 26, 9],
       ],
     },
     fog: {
@@ -402,9 +398,9 @@ function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
       mid: '#bdcedb',
       lo: '#9eb4c4',
       rects: [
-        [20, 96, 110, 12],
-        [180, 108, 124, 12],
-        [346, 98, 120, 12],
+        [10, 48, 55, 6],
+        [90, 54, 62, 6],
+        [173, 49, 60, 6],
       ],
     },
     snow: {
@@ -412,10 +408,10 @@ function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
       mid: '#c8dceb',
       lo: '#92b0ca',
       rects: [
-        [28, 80, 78, 14],
-        [140, 90, 86, 12],
-        [298, 84, 90, 14],
-        [412, 76, 74, 12],
+        [14, 40, 39, 7],
+        [70, 45, 43, 6],
+        [149, 42, 45, 7],
+        [206, 38, 37, 6],
       ],
     },
   };
@@ -423,11 +419,11 @@ function createSkyTexture(weather: WeatherId): THREE.CanvasTexture {
   const cs = cloudSets[weather];
   for (const [cx, cy, cw, ch] of cs.rects) {
     ctx.fillStyle = cs.hi;
-    ctx.fillRect(cx + 8, cy - 4, cw - 16, 4);
+    ctx.fillRect(cx + 4, cy - 2, cw - 8, 2);
     ctx.fillStyle = cs.mid;
     ctx.fillRect(cx, cy, cw, ch);
     ctx.fillStyle = cs.lo;
-    ctx.fillRect(cx + 4, cy + ch - 4, cw - 8, 4);
+    ctx.fillRect(cx + 2, cy + ch - 2, cw - 4, 2);
   }
 
   const tex = toCrispTexture(c, 1, 1);

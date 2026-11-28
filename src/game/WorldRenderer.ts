@@ -33,7 +33,7 @@ const ROAD_SLICE_OFFSETS: Float32Array = (() => {
   return new Float32Array(offs);
 })();
 const ROAD_SLICES = ROAD_SLICE_OFFSETS.length; // 81 slices (down from 116)
-const MAX_PARTICLES = 140;
+const MAX_PARTICLES = 120;
 const MAX_PROPS_PER_POOL = 96;
 const MAX_TRAFFIC_RENDER = 26;
 const MAX_TRUCK_RENDER = 10;
@@ -41,7 +41,50 @@ const MAX_FALLEN_CARGO_RENDER = 20;
 const MAX_ANIMAL_RENDER = 16;
 const MAX_SIREN_RENDER = 12;
 const MAX_POPUPS = 14;
-const MAX_WEATHER_DROPS = 240;
+const MAX_WEATHER_DROPS = 220;
+
+interface QualityProfile {
+  dprDesktop: number;
+  dprMobile: number;
+  roadSlices: number;
+  propRange: number;
+  maxFogFar: number;
+  maxWeatherDrops: number;
+  maxParticles: number;
+}
+
+const QUALITY_PROFILES: readonly QualityProfile[] = [
+  // Tier 0: Low / power-saving mode for integrated GPUs & budget phones
+  {
+    dprDesktop: 0.78,
+    dprMobile: 0.7,
+    roadSlices: 62, // 216m road horizon
+    propRange: 196,
+    maxFogFar: 210,
+    maxWeatherDrops: 64,
+    maxParticles: 48,
+  },
+  // Tier 1: Balanced mode for ordinary laptops & mid-range mobile devices
+  {
+    dprDesktop: 0.96,
+    dprMobile: 0.85,
+    roadSlices: 70, // 264m road horizon
+    propRange: 242,
+    maxFogFar: 258,
+    maxWeatherDrops: 120,
+    maxParticles: 76,
+  },
+  // Tier 2: Crisp HD mode for fast machines
+  {
+    dprDesktop: 1.25,
+    dprMobile: 1.0,
+    roadSlices: ROAD_SLICES, // 324m road horizon
+    propRange: 285,
+    maxFogFar: 345,
+    maxWeatherDrops: MAX_WEATHER_DROPS,
+    maxParticles: MAX_PARTICLES,
+  },
+];
 
 const CARGO_DEBRIS_COLORS = [0x3b82f6, 0xc68642, 0x52b788, 0xe9c46a, 0xd62828, 0x8d99ae] as const;
 const TRUCK_CARGO_TINTS = [0xffffff, 0xd8a47f, 0x80ed99] as const;
@@ -206,7 +249,8 @@ export class WorldRenderer {
   private readonly postInst: THREE.InstancedMesh;
   private readonly lampInst: THREE.InstancedMesh;
   private readonly boostInst: THREE.InstancedMesh;
-  private readonly billboardMeshes: THREE.Mesh[] = [];
+  private readonly billboardBoards: THREE.Mesh[] = [];
+  private readonly billboardPolesInst: THREE.InstancedMesh;
   private readonly lapArchGroup: THREE.Group;
   private readonly gasStationGroup: THREE.Group;
   private readonly dinerGroup: THREE.Group;
@@ -266,9 +310,23 @@ export class WorldRenderer {
   private readonly bikeMap = new Map<string, BikeVisual>();
   private readonly activeRiderIds = new Set<string>();
 
-  // Camera & presentation controls
+  // Camera, adaptive performance governor & presentation controls
   cameraMode: CameraMode = 0;
   pixelScale = 1; // 1 = HD crisp, 2 = chunky retro pixel grid
+  private readonly isCoarsePointer: boolean;
+  private readonly maxBootTier: 0 | 1 | 2;
+  private qualityTier: 0 | 1 | 2;
+  private effectiveDpr = 1;
+  private govLastMs = 0;
+  private govAccumMs = 0;
+  private govFrames = 0;
+  private govLowStreak = 0;
+  private govHighStreak = 0;
+  private lastRoadBuiltS = Number.NaN;
+  private lastRoadSlicesBuilt = -1;
+  private lastPropsBuiltS = Number.NaN;
+  private lastPropsLampBoost = false;
+  private lastPropsRange = -1;
   private lastCssW = 0;
   private lastCssH = 0;
   private lastDpr = 0;
@@ -308,8 +366,24 @@ export class WorldRenderer {
   private readonly _flashColor = new THREE.Color('#eef6ff');
 
   constructor(canvas: HTMLCanvasElement) {
+    this.isCoarsePointer =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(pointer: coarse)').matches;
+    const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 4 : 4;
+    const mem =
+      typeof navigator !== 'undefined'
+        ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8
+        : 8;
+    // Ordinary/low-core laptops & mobile start at balanced tier 1; stronger machines start at tier 2
+    const initialTier: 0 | 1 | 2 =
+      cores <= 2 || mem <= 2 ? 0 : cores <= 4 || mem <= 4 || this.isCoarsePointer ? 1 : 2;
+    this.maxBootTier = initialTier === 0 ? 1 : 2;
+    this.qualityTier = initialTier;
+
     this.renderer = new THREE.WebGLRenderer({
       canvas,
+      alpha: false, // opaque backbuffer avoids full-screen compositor alpha blending!
       antialias: false, // crisp pixel-art edges + higher FPS!
       stencil: false,
       powerPreference: 'high-performance',
@@ -318,17 +392,18 @@ export class WorldRenderer {
     this.renderer.toneMapping = THREE.NoToneMapping;
 
     this.scene = new THREE.Scene();
-    this.fog = new THREE.Fog('#9cd3f0', 112, 345);
+    this.fog = new THREE.Fog('#9cd3f0', 112, QUALITY_PROFILES[this.qualityTier].maxFogFar);
     this.scene.fog = this.fog;
 
     this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.25, 620);
 
     const atlas = getPixelAtlas();
 
-    // Dual-layer pixel sky domes for seamless zero-pop weather crossfading (1 draw call when steady)
-    const skyGeo = new THREE.SphereGeometry(460, 24, 16);
+    // Dual-layer pixel sky domes (lazy on-demand sky textures: only 1 allocated at boot!)
+    const initialSky = atlas.getSky('clear');
+    const skyGeo = new THREE.SphereGeometry(460, 20, 14);
     this.skyDomeMat = new THREE.MeshBasicMaterial({
-      map: atlas.skies.clear,
+      map: initialSky,
       side: THREE.BackSide,
       fog: false,
       depthWrite: false,
@@ -337,9 +412,9 @@ export class WorldRenderer {
     this.skyDome.rotation.y = Math.PI * 0.5;
     this.scene.add(this.skyDome);
 
-    const skyBlendGeo = new THREE.SphereGeometry(452, 24, 16);
+    const skyBlendGeo = new THREE.SphereGeometry(452, 20, 14);
     this.skyDomeBlendMat = new THREE.MeshBasicMaterial({
-      map: atlas.skies.clear,
+      map: initialSky,
       side: THREE.BackSide,
       fog: false,
       depthWrite: false,
@@ -465,26 +540,26 @@ export class WorldRenderer {
       20
     );
 
-    // 8 pooled roadside billboards (merged dual-pole geometry saves draw calls)
+    // 8 pooled roadside billboards (poles batched in 1 InstancedMesh -> saves up to 7 draw calls!)
     const bbGeo = new THREE.PlaneGeometry(7.6, 3.8);
+    bbGeo.translate(0, 5.4, 0);
     const polesGeo = mergeBoxGeometries([
       { w: 0.35, h: 6.0, d: 0.35, x: -2.6, y: 3.0, z: -0.1 },
       { w: 0.35, h: 6.0, d: 0.35, x: 2.6, y: 3.0, z: -0.1 },
     ]);
-    const poleMat = new THREE.MeshLambertMaterial({ color: 0x3b4252 });
+    this.billboardPolesInst = this.makeInstanced(
+      polesGeo,
+      new THREE.MeshLambertMaterial({ color: 0x3b4252, flatShading: true }),
+      8
+    );
     for (let i = 0; i < 8; i++) {
-      const g = new THREE.Group();
       const board = new THREE.Mesh(
         bbGeo,
         new THREE.MeshBasicMaterial({ map: atlas.billboards[i % atlas.billboards.length] })
       );
-      board.position.y = 5.4;
-      g.add(board);
-      const poles = new THREE.Mesh(polesGeo, poleMat);
-      g.add(poles);
-      g.visible = false;
-      this.scene.add(g);
-      this.billboardMeshes.push(g as unknown as THREE.Mesh);
+      board.visible = false;
+      this.scene.add(board);
+      this.billboardBoards.push(board);
     }
 
     // Checkered 3D Start/Finish Lap Arch placed at cyclic loop s = 0
@@ -827,7 +902,72 @@ export class WorldRenderer {
       this.popups.push({ sprite, active: false, s: 0, x: 0, y: 0, life: 0, maxLife: 0.65 });
     }
 
+    this.applyRibbonDrawRange();
     this.resize();
+  }
+
+  private applyRibbonDrawRange(): void {
+    const activeSlices = QUALITY_PROFILES[this.qualityTier].roadSlices;
+    const indexCount = (activeSlices - 1) * 6;
+    this.roadGeo.setDrawRange(0, indexCount);
+    this.curbLGeo.setDrawRange(0, indexCount);
+    this.curbRGeo.setDrawRange(0, indexCount);
+    this.terrainLGeo.setDrawRange(0, indexCount);
+    this.terrainRGeo.setDrawRange(0, indexCount);
+  }
+
+  private setQualityTier(next: 0 | 1 | 2): void {
+    if (next === this.qualityTier) return;
+    this.qualityTier = next;
+    this.applyRibbonDrawRange();
+    this.lastRoadSlicesBuilt = -1;
+    this.lastPropsRange = -1;
+    this.resize();
+  }
+
+  private updatePerfGovernor(): void {
+    const now = performance.now();
+    if (this.govLastMs === 0) {
+      this.govLastMs = now;
+      return;
+    }
+    const delta = now - this.govLastMs;
+    this.govLastMs = now;
+    if (delta <= 0 || delta > 250) return;
+
+    this.govAccumMs += delta;
+    this.govFrames++;
+    if (this.govAccumMs < 1600) return;
+
+    const avgFps = (this.govFrames * 1000) / this.govAccumMs;
+    this.govAccumMs = 0;
+    this.govFrames = 0;
+
+    if (avgFps < 44) {
+      this.govLowStreak++;
+      this.govHighStreak = 0;
+      if (this.govLowStreak >= 2 && this.qualityTier > 0) {
+        this.govLowStreak = 0;
+        this.setQualityTier((this.qualityTier - 1) as 0 | 1 | 2);
+      }
+    } else if (avgFps >= 55) {
+      this.govHighStreak++;
+      this.govLowStreak = 0;
+      if (this.govHighStreak >= 3 && this.qualityTier < this.maxBootTier) {
+        this.govHighStreak = 0;
+        this.setQualityTier((this.qualityTier + 1) as 0 | 1 | 2);
+      }
+    } else {
+      this.govLowStreak = 0;
+      this.govHighStreak = 0;
+    }
+  }
+
+  getPerfState(): { qualityTier: 0 | 1 | 2; effectiveDpr: number } {
+    return {
+      qualityTier: this.qualityTier,
+      effectiveDpr: Number(this.effectiveDpr.toFixed(2)),
+    };
   }
 
   private makeInstanced(geo: THREE.BufferGeometry, mat: THREE.Material, count: number): THREE.InstancedMesh {
@@ -979,19 +1119,25 @@ export class WorldRenderer {
     return geo;
   }
 
+  private getTargetDpr(): number {
+    const profile = QUALITY_PROFILES[this.qualityTier];
+    const cap = this.isCoarsePointer ? profile.dprMobile : profile.dprDesktop;
+    return Math.min(window.devicePixelRatio || 1, cap);
+  }
+
   resize(): void {
     const dom = this.renderer.domElement;
     const rect = dom.getBoundingClientRect();
     const w = Math.max(1, Math.round(rect.width || dom.clientWidth || window.innerWidth));
     const h = Math.max(1, Math.round(rect.height || dom.clientHeight || window.innerHeight));
-    // Cap HD pixelRatio at 1.5 to cut HiDPI fragment load while keeping pixel edges crisp
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    const effectiveRatio = this.pixelScale === 1 ? dpr : 1 / this.pixelScale;
+    const dpr = this.getTargetDpr();
+    const effectiveRatio = this.pixelScale === 1 ? dpr : Math.min(dpr, 1 / this.pixelScale);
 
     this.lastCssW = w;
     this.lastCssH = h;
     this.lastDpr = dpr;
     this.lastPixelScale = this.pixelScale;
+    this.effectiveDpr = effectiveRatio;
 
     this.renderer.setPixelRatio(effectiveRatio);
     this.renderer.setSize(w, h, false);
@@ -1039,8 +1185,10 @@ export class WorldRenderer {
     gravity = 12,
     baseVs = 0
   ): void {
+    const cap = QUALITY_PROFILES[this.qualityTier].maxParticles;
+    const scaledCount = this.qualityTier === 2 ? count : Math.max(2, Math.ceil(count * (this.qualityTier === 1 ? 0.7 : 0.45)));
     let spawned = 0;
-    for (let i = 0; i < MAX_PARTICLES && spawned < count; i++) {
+    for (let i = 0; i < cap && spawned < scaledCount; i++) {
       const p = this.particles[i];
       if (!p.active) {
         p.active = true;
@@ -1091,11 +1239,14 @@ export class WorldRenderer {
     animals?: readonly CrossingAnimal[],
     weather?: WeatherRenderSnapshot
   ): void {
+    // Adaptive performance governor (auto-tunes DPR, horizon & particle caps for smooth FPS on ordinary machines)
+    this.updatePerfGovernor();
+
     // Self-healing zero-stretch guard: ensures camera.aspect & WebGL buffer ALWAYS match actual CSS canvas box
     const dom = this.renderer.domElement;
     const cw = dom.clientWidth;
     const ch = dom.clientHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const dpr = this.getTargetDpr();
     if (
       cw > 0 &&
       ch > 0 &&
@@ -1172,23 +1323,24 @@ export class WorldRenderer {
     const atlas = getPixelAtlas();
     const rate = Math.min(1, dt * 2.2);
 
-    // Crossfade sky dome textures cleanly with 0 extra draw calls when steady
+    // Crossfade sky dome textures cleanly with 0 extra draw calls when steady (lazy sky allocation!)
     if (w.transition < 0.999) {
       if (this.lastSkyPrev !== w.prev || this.lastSkyWeather !== w.current) {
         this.lastSkyPrev = w.prev;
         this.lastSkyWeather = w.current;
-        this.skyDomeMat.map = atlas.skies[w.prev];
+        this.skyDomeMat.map = atlas.getSky(w.prev);
         this.skyDomeMat.needsUpdate = true;
-        this.skyDomeBlendMat.map = atlas.skies[w.current];
+        this.skyDomeBlendMat.map = atlas.getSky(w.current);
         this.skyDomeBlendMat.needsUpdate = true;
       }
       this.skyDomeBlend.visible = true;
       this.skyDomeBlendMat.opacity = w.transition;
     } else {
-      if (this.lastSkyWeather !== w.current || this.skyDomeMat.map !== atlas.skies[w.current]) {
+      const targetSky = atlas.getSky(w.current);
+      if (this.lastSkyWeather !== w.current || this.skyDomeMat.map !== targetSky) {
         this.lastSkyWeather = w.current;
         this.lastSkyPrev = w.current;
-        this.skyDomeMat.map = atlas.skies[w.current];
+        this.skyDomeMat.map = targetSky;
         this.skyDomeMat.needsUpdate = true;
       }
       if (this.skyDomeBlend.visible) {
@@ -1205,15 +1357,16 @@ export class WorldRenderer {
       this.skyDomeMat.color.setHex(0xffffff);
     }
 
-    // Fog color & visibility depth
+    // Fog color & visibility depth (smoothly capped to match active quality tier horizon)
+    const tierFogMax = QUALITY_PROFILES[this.qualityTier].maxFogFar;
     this._targetFogColor.copy(w.fogColor).lerp(BIOME_FOG[biome], w.fogBlendBiome);
     if (flash > 0.01) {
       this._targetFogColor.lerp(this._flashColor, flash * 0.55);
     }
     this.smoothFogColor.lerp(this._targetFogColor, rate);
     this.fog.color.copy(this.smoothFogColor);
-    this.fog.near = w.fogNear;
-    this.fog.far = w.fogFar;
+    this.fog.near = Math.min(w.fogNear, tierFogMax * 0.42);
+    this.fog.far = Math.min(w.fogFar, tierFogMax);
 
     // Terrain & wet/frosted road color grading
     this._targetTerrainColor.copy(BIOME_TERRAIN_TINT[biome]).lerp(w.terrainTint, w.terrainBlend);
@@ -1280,6 +1433,7 @@ export class WorldRenderer {
       return;
     }
 
+    const maxDrops = QUALITY_PROFILES[this.qualityTier].maxWeatherDrops;
     const camX = this.camera.position.x;
     const camY = this.camera.position.y;
     const camZ = this.camera.position.z;
@@ -1289,7 +1443,7 @@ export class WorldRenderer {
 
     if (mode === 1) {
       // Heavy slanted 3D rain streaks rushing past camera
-      count = Math.max(12, Math.floor(MAX_WEATHER_DROPS * rain));
+      count = Math.max(12, Math.floor(maxDrops * rain));
       this.weatherDropsMat.color.setHex(0xc8e8ff);
       this.weatherDropsMat.opacity = 0.68 * rain;
       const fallVy = 34.0;
@@ -1315,7 +1469,7 @@ export class WorldRenderer {
       }
     } else if (mode === 2) {
       // Crisp drifting pixel snowflakes
-      count = Math.max(12, Math.floor(200 * snow));
+      count = Math.max(12, Math.floor(Math.min(180, maxDrops) * snow));
       this.weatherDropsMat.color.setHex(0xf4f9ff);
       this.weatherDropsMat.opacity = 0.85 * snow;
       const forwardZ = Math.max(10, playerSpeed * 0.45 + 6);
@@ -1371,6 +1525,16 @@ export class WorldRenderer {
   }
 
   private updateRoadRibbons(originS: number, originX: number, originY: number): void {
+    const activeSlices = QUALITY_PROFILES[this.qualityTier].roadSlices;
+    if (
+      Math.abs(originS - this.lastRoadBuiltS) < 0.015 &&
+      this.lastRoadSlicesBuilt === activeSlices
+    ) {
+      return;
+    }
+    this.lastRoadBuiltS = originS;
+    this.lastRoadSlicesBuilt = activeSlices;
+
     const baseS = Math.floor(originS / ROAD_SLICE_SNAP) * ROAD_SLICE_SNAP;
     const uvBaseRoad = Math.floor(originS / 12.0) * 12.0;
     const uvBaseCurb = Math.floor(originS / 4.0) * 4.0;
@@ -1401,7 +1565,7 @@ export class WorldRenderer {
     const curbOuter = ROAD_HALF_WIDTH + CURB_WIDTH;
     const terrainFar = 92.0;
 
-    for (let i = 0; i < ROAD_SLICES; i++) {
+    for (let i = 0; i < activeSlices; i++) {
       const s = baseS + ROAD_SLICE_OFFSETS[i];
       sampleRoadFrame(s, f);
       const cx = f.x - originX;
@@ -1485,135 +1649,157 @@ export class WorldRenderer {
   }
 
   private updateProps(originS: number, originX: number, originY: number, timeSec: number): void {
-    const slotStep = 12.0;
-    const minSlot = Math.floor((originS - 18) / slotStep);
-    const maxSlot = Math.floor((originS + 285) / slotStep);
-
-    let trunkC = 0;
-    let pineC = 0;
-    let palmC = 0;
-    let rockC = 0;
-    let postC = 0;
-    let lampC = 0;
-    let bbIdx = 0;
-
+    const propRange = QUALITY_PROFILES[this.qualityTier].propRange;
     const d = this._dummy;
     const pos = this._v1;
     const f = this._f;
 
-    for (let slot = minSlot; slot <= maxSlot; slot++) {
-      const s = slot * slotStep;
-      const wSlot = ((slot % 200) + 200) % 200; // 2400 / 12 = 200 exact slots per lap
-      const biome = getBiomeAt(s);
-      sampleRoadFrame(s, f);
-      const yaw = Math.atan2(-f.tx, -f.tz);
+    const propsDirty =
+      Math.abs(originS - this.lastPropsBuiltS) >= 0.04 ||
+      this.lastPropsLampBoost !== this.lastWeatherLampBoost ||
+      this.lastPropsRange !== propRange;
 
-      // Guard posts every slot along outer shoulder
-      for (let side = -1; side <= 1; side += 2) {
-        if (postC < MAX_PROPS_PER_POOL * 2 && (wSlot % 2 === 0)) {
-          roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH - 0.4), 0, originS, originX, originY, pos);
-          d.position.copy(pos);
-          d.rotation.set(0, yaw, 0);
-          d.scale.set(1, 1, 1);
-          d.updateMatrix();
-          this.postInst.setMatrixAt(postC++, d.matrix);
-        }
+    if (propsDirty) {
+      this.lastPropsBuiltS = originS;
+      this.lastPropsLampBoost = this.lastWeatherLampBoost;
+      this.lastPropsRange = propRange;
 
-        const h = hash1(wSlot * 37 + (side > 0 ? 101 : 211));
-        const h2 = hash1(wSlot * 71 + (side > 0 ? 19 : 83));
-        const dist = SHOULDER_HALF_WIDTH + 3.2 + h2 * 18.0;
+      const slotStep = 12.0;
+      const minSlot = Math.floor((originS - 18) / slotStep);
+      const maxSlot = Math.floor((originS + propRange) / slotStep);
 
-        // Street lamps in twilight biome, low-visibility weather, or periodic highway lamps
-        if (
-          lampC < MAX_PROPS_PER_POOL &&
-          ((biome === 3 && wSlot % 2 === 0) ||
-            (this.lastWeatherLampBoost && wSlot % 3 === 0) ||
-            wSlot % 6 === 0)
-        ) {
-          if ((wSlot + (side > 0 ? 1 : 0)) % 2 === 0) {
-            roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH + 0.8), 0, originS, originX, originY, pos);
+      let trunkC = 0;
+      let pineC = 0;
+      let palmC = 0;
+      let rockC = 0;
+      let postC = 0;
+      let lampC = 0;
+      let bbIdx = 0;
+
+      for (let slot = minSlot; slot <= maxSlot; slot++) {
+        const s = slot * slotStep;
+        const wSlot = ((slot % 200) + 200) % 200; // 2400 / 12 = 200 exact slots per lap
+        const biome = getBiomeAt(s);
+        sampleRoadFrame(s, f);
+        const yaw = Math.atan2(-f.tx, -f.tz);
+
+        // Guard posts every slot along outer shoulder
+        for (let side = -1; side <= 1; side += 2) {
+          if (postC < MAX_PROPS_PER_POOL * 2 && wSlot % 2 === 0) {
+            roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH - 0.4), 0, originS, originX, originY, pos);
             d.position.copy(pos);
             d.rotation.set(0, yaw, 0);
             d.scale.set(1, 1, 1);
             d.updateMatrix();
-            this.lampInst.setMatrixAt(lampC++, d.matrix);
+            this.postInst.setMatrixAt(postC++, d.matrix);
           }
-        }
 
-        // Biome-specific trees & canyon mesas
-        if (h < 0.62) {
-          const sc = 0.85 + h2 * 0.65;
-          roadFrameToLocalWorld(f, s, side * dist, -0.3, originS, originX, originY, pos);
-          d.position.copy(pos);
-          d.rotation.set(0, h * 6.28, 0);
-          d.scale.set(sc, sc, sc);
-          d.updateMatrix();
+          const h = hash1(wSlot * 37 + (side > 0 ? 101 : 211));
+          const h2 = hash1(wSlot * 71 + (side > 0 ? 19 : 83));
+          const dist = SHOULDER_HALF_WIDTH + 3.2 + h2 * 18.0;
 
-          if (biome === 2 && h < 0.46 && rockC < MAX_PROPS_PER_POOL) {
-            d.scale.set(sc * 1.4, sc * (1.2 + h * 1.8), sc * 1.2);
+          // Street lamps in twilight biome, low-visibility weather, or periodic highway lamps
+          if (
+            lampC < MAX_PROPS_PER_POOL &&
+            ((biome === 3 && wSlot % 2 === 0) ||
+              (this.lastWeatherLampBoost && wSlot % 3 === 0) ||
+              wSlot % 6 === 0)
+          ) {
+            if ((wSlot + (side > 0 ? 1 : 0)) % 2 === 0) {
+              roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH + 0.8), 0, originS, originX, originY, pos);
+              d.position.copy(pos);
+              d.rotation.set(0, yaw, 0);
+              d.scale.set(1, 1, 1);
+              d.updateMatrix();
+              this.lampInst.setMatrixAt(lampC++, d.matrix);
+            }
+          }
+
+          // Biome-specific trees & canyon mesas
+          if (h < 0.62) {
+            const sc = 0.85 + h2 * 0.65;
+            roadFrameToLocalWorld(f, s, side * dist, -0.3, originS, originX, originY, pos);
+            d.position.copy(pos);
+            d.rotation.set(0, h * 6.28, 0);
+            d.scale.set(sc, sc, sc);
+            d.updateMatrix();
+
+            if (biome === 2 && h < 0.46 && rockC < MAX_PROPS_PER_POOL) {
+              d.scale.set(sc * 1.4, sc * (1.2 + h * 1.8), sc * 1.2);
+              d.updateMatrix();
+              this.rockInst.setMatrixAt(rockC++, d.matrix);
+            } else if (biome === 0 && trunkC < MAX_PROPS_PER_POOL && palmC < MAX_PROPS_PER_POOL) {
+              this.trunkInst.setMatrixAt(trunkC++, d.matrix);
+              this.palmInst.setMatrixAt(palmC++, d.matrix);
+            } else if (trunkC < MAX_PROPS_PER_POOL && pineC < MAX_PROPS_PER_POOL) {
+              this.trunkInst.setMatrixAt(trunkC++, d.matrix);
+              this.pineInst.setMatrixAt(pineC++, d.matrix);
+            }
+          } else if (h > 0.84 && rockC < MAX_PROPS_PER_POOL) {
+            roadFrameToLocalWorld(f, s, side * (dist + 6), -0.4, originS, originX, originY, pos);
+            d.position.copy(pos);
+            d.rotation.set(0, h2 * 6.28, 0);
+            d.scale.set(0.8 + h2, 0.7 + h2 * 1.3, 0.8 + h2);
             d.updateMatrix();
             this.rockInst.setMatrixAt(rockC++, d.matrix);
-          } else if (biome === 0 && trunkC < MAX_PROPS_PER_POOL && palmC < MAX_PROPS_PER_POOL) {
-            this.trunkInst.setMatrixAt(trunkC++, d.matrix);
-            this.palmInst.setMatrixAt(palmC++, d.matrix);
-          } else if (trunkC < MAX_PROPS_PER_POOL && pineC < MAX_PROPS_PER_POOL) {
-            this.trunkInst.setMatrixAt(trunkC++, d.matrix);
-            this.pineInst.setMatrixAt(pineC++, d.matrix);
           }
-        } else if (h > 0.84 && rockC < MAX_PROPS_PER_POOL) {
-          roadFrameToLocalWorld(f, s, side * (dist + 6), -0.4, originS, originX, originY, pos);
+        }
+
+        // Retro arcade billboards every 9 slots (boards pooled + poles instanced in 1 draw call!)
+        if (wSlot > 2 && wSlot % 9 === 3 && bbIdx < this.billboardBoards.length) {
+          const side = wSlot % 18 === 3 ? -1 : 1;
+          roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH + 3.6), 0, originS, originX, originY, pos);
+          const bbRotY = yaw - side * 0.22;
+          const bb = this.billboardBoards[bbIdx];
+          bb.visible = true;
+          bb.position.copy(pos);
+          bb.rotation.set(0, bbRotY, 0);
+
           d.position.copy(pos);
-          d.rotation.set(0, h2 * 6.28, 0);
-          d.scale.set(0.8 + h2, 0.7 + h2 * 1.3, 0.8 + h2);
+          d.rotation.set(0, bbRotY, 0);
+          d.scale.set(1, 1, 1);
           d.updateMatrix();
-          this.rockInst.setMatrixAt(rockC++, d.matrix);
+          this.billboardPolesInst.setMatrixAt(bbIdx, d.matrix);
+          bbIdx++;
         }
       }
 
-      // Retro arcade billboards every 9 slots (keep clear of start/lap arch at wSlot 0..2)
-      if (wSlot > 2 && wSlot % 9 === 3 && bbIdx < this.billboardMeshes.length) {
-        const side = (wSlot % 18 === 3) ? -1 : 1;
-        roadFrameToLocalWorld(f, s, side * (SHOULDER_HALF_WIDTH + 3.6), 0, originS, originX, originY, pos);
-        const bb = this.billboardMeshes[bbIdx++];
-        bb.visible = true;
-        bb.position.copy(pos);
-        bb.rotation.set(0, yaw - side * 0.22, 0);
+      // Checkered Start/Finish Overhead Lap Arch at cyclic s = 0
+      const archDs = signedTrackDelta(0, originS);
+      if (archDs >= -32 && archDs <= propRange + 24) {
+        sampleRoadFrame(0, f);
+        roadFrameToLocalWorld(f, 0, 0, 0, originS, originX, originY, pos);
+        this.lapArchGroup.visible = true;
+        this.lapArchGroup.position.copy(pos);
+        this.setRoadBasisQuaternion(f, this.lapArchGroup.quaternion);
+      } else if (this.lapArchGroup.visible) {
+        this.lapArchGroup.visible = false;
       }
-    }
 
-    // Checkered Start/Finish Overhead Lap Arch at cyclic s = 0
-    const archDs = signedTrackDelta(0, originS);
-    if (archDs >= -32 && archDs <= 320) {
-      sampleRoadFrame(0, f);
-      roadFrameToLocalWorld(f, 0, 0, 0, originS, originX, originY, pos);
-      this.lapArchGroup.visible = true;
-      this.lapArchGroup.position.copy(pos);
-      this.setRoadBasisQuaternion(f, this.lapArchGroup.quaternion);
-    } else if (this.lapArchGroup.visible) {
-      this.lapArchGroup.visible = false;
-    }
+      for (let i = bbIdx; i < this.billboardBoards.length; i++) {
+        this.billboardBoards[i].visible = false;
+      }
+      this.billboardPolesInst.count = bbIdx;
+      this.billboardPolesInst.instanceMatrix.needsUpdate = true;
 
-    for (let i = bbIdx; i < this.billboardMeshes.length; i++) {
-      this.billboardMeshes[i].visible = false;
+      this.trunkInst.count = trunkC;
+      this.pineInst.count = pineC;
+      this.palmInst.count = palmC;
+      this.rockInst.count = rockC;
+      this.postInst.count = postC;
+      this.lampInst.count = lampC;
+      this.trunkInst.instanceMatrix.needsUpdate = true;
+      this.pineInst.instanceMatrix.needsUpdate = true;
+      this.palmInst.instanceMatrix.needsUpdate = true;
+      this.rockInst.instanceMatrix.needsUpdate = true;
+      this.postInst.instanceMatrix.needsUpdate = true;
+      this.lampInst.instanceMatrix.needsUpdate = true;
     }
-
-    this.trunkInst.count = trunkC;
-    this.pineInst.count = pineC;
-    this.palmInst.count = palmC;
-    this.rockInst.count = rockC;
-    this.postInst.count = postC;
-    this.lampInst.count = lampC;
-    this.trunkInst.instanceMatrix.needsUpdate = true;
-    this.pineInst.instanceMatrix.needsUpdate = true;
-    this.palmInst.instanceMatrix.needsUpdate = true;
-    this.rockInst.instanceMatrix.needsUpdate = true;
-    this.postInst.instanceMatrix.needsUpdate = true;
-    this.lampInst.instanceMatrix.needsUpdate = true;
 
     // Boost pads along the road
     let boostC = 0;
     const minB = Math.floor((originS - 24) / 24);
-    const maxB = Math.floor((originS + 280) / 24);
+    const maxB = Math.floor((originS + propRange) / 24);
     for (let bi = minB; bi <= maxB && boostC < 20; bi++) {
       const pad = getBoostPadInSlot(bi);
       if (!pad) continue;
@@ -1626,7 +1812,9 @@ export class WorldRenderer {
       this.boostInst.setMatrixAt(boostC++, this._m4);
     }
     this.boostInst.count = boostC;
-    this.boostInst.instanceMatrix.needsUpdate = true;
+    if (boostC > 0 || this.boostInst.count > 0) {
+      this.boostInst.instanceMatrix.needsUpdate = true;
+    }
   }
 
   private setRoadBasisQuaternion(f: RoadFrame, outQ: THREE.Quaternion): void {
@@ -2127,7 +2315,7 @@ export class WorldRenderer {
       if (!vis) {
         const palIdx = Math.abs(r.colorIdx);
         vis = new BikeVisual(BIKE_PALETTES[palIdx % BIKE_PALETTES.length], !r.isLocal);
-        vis.setPalette(palIdx, r.isBot);
+        vis.setPalette(palIdx, r.isBot, r.deliveryRole ?? null, r.avatarIdx);
         this.scene.add(vis.root);
         this.bikeMap.set(r.id, vis);
       }
@@ -2138,6 +2326,7 @@ export class WorldRenderer {
         continue;
       }
       vis.root.visible = true;
+      vis.setDistanceLod(Math.abs(ds));
       sampleRoadFrame(r.s, f);
       roadFrameToLocalWorld(f, r.s, r.x, 0, originS, originX, originY, pos);
       vis.root.position.copy(pos);

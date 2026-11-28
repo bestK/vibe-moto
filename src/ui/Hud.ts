@@ -37,6 +37,7 @@ import {
   getPixelIconSvg,
 } from './PixelIcons';
 import type { WeatherId } from '../game/WeatherSystem';
+import type { LobbyRoomSummary } from '../net/MqttSync';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline';
 export type ToastAccent = 'gold' | 'cyan' | 'red';
@@ -80,6 +81,8 @@ export interface HudCallbacks {
   onRoomModalToggle?(open: boolean): void;
   onJoinRoom?(room: string, password: string): Promise<void>;
   onCopyRoomLink?(): void;
+  onRenameRoom?(title: string): void;
+  onRefreshLobbyRooms?(): void;
   onTouchInput?(patch: TouchInputPatch): void;
 }
 
@@ -251,8 +254,19 @@ export class Hud {
   private readonly homeTitleTextEl: HTMLSpanElement;
   private readonly homeRoomIconEl: HTMLSpanElement;
   private readonly homeRoomTextEl: HTMLSpanElement;
+  private readonly homeHostBadgeEl: HTMLSpanElement;
   private readonly homeRoomPillEl: HTMLDivElement;
+  private readonly homeRenameBtnEl: HTMLButtonElement;
   private readonly homeCopyBtnEl: HTMLButtonElement;
+  private readonly homeRenameRowEl: HTMLDivElement;
+  private readonly homeRenameInputEl: HTMLInputElement;
+  private readonly homeRenameSaveBtnEl: HTMLButtonElement;
+  private readonly homeRenameCancelBtnEl: HTMLButtonElement;
+  private readonly homeLobbyWrapEl: HTMLDivElement;
+  private readonly homeLobbyLabelEl: HTMLSpanElement;
+  private readonly homeLobbyCountEl: HTMLSpanElement;
+  private readonly homeLobbyRefreshBtnEl: HTMLButtonElement;
+  private readonly homeLobbyListEl: HTMLDivElement;
   private readonly homeRoomInputEl: HTMLInputElement;
   private readonly homePassInputEl: HTMLInputElement;
   private readonly homeDiceBtnEl: HTMLButtonElement;
@@ -342,8 +356,13 @@ export class Hud {
   private hasOnlinePeers = false;
   private homeModalOpen = false;
   private homeBusy = false;
+  private homeAuthLocked = false;
+  private homeRenameOpen = false;
   private currentRoom = 'global';
+  private currentRoomTitle = 'global';
   private currentRoomLocked = false;
+  private currentRoomIsHost = false;
+  private lobbyRooms: LobbyRoomSummary[] = [];
   private recentRooms: string[] = [];
 
   // Gyroscope steering state
@@ -1262,7 +1281,22 @@ export class Hud {
     this.homeRoomTextEl = document.createElement('span');
     this.homeRoomTextEl.className = 'vm-home-room-name';
     this.homeRoomTextEl.textContent = t('publicHall');
-    this.homeRoomPillEl.append(this.homeRoomIconEl, this.homeRoomTextEl);
+    this.homeHostBadgeEl = document.createElement('span');
+    this.homeHostBadgeEl.className = 'vm-home-host-badge is-hidden';
+    this.homeHostBadgeEl.textContent = t('hostBadge');
+    this.homeRoomPillEl.append(this.homeRoomIconEl, this.homeRoomTextEl, this.homeHostBadgeEl);
+
+    this.homeRenameBtnEl = document.createElement('button');
+    this.homeRenameBtnEl.type = 'button';
+    this.homeRenameBtnEl.className = 'vm-home-icon-btn is-hidden';
+    this.homeRenameBtnEl.title = t('renameRoom');
+    this.homeRenameBtnEl.setAttribute('aria-label', 'Rename room');
+    this.homeRenameBtnEl.innerHTML = getPixelIconSvg('edit', 'vm-icon-sm');
+    this.homeRenameBtnEl.addEventListener('click', () => {
+      if (this.homeBusy || !this.currentRoomIsHost) return;
+      this.toggleRenameRow(!this.homeRenameOpen);
+      this.homeRenameBtnEl.blur();
+    });
 
     this.homeCopyBtnEl = document.createElement('button');
     this.homeCopyBtnEl.type = 'button';
@@ -1275,8 +1309,78 @@ export class Hud {
       this.homeCopyBtnEl.blur();
     });
 
-    homeStatusWrap.append(this.homeRoomPillEl, this.homeCopyBtnEl);
+    homeStatusWrap.append(this.homeRoomPillEl, this.homeRenameBtnEl, this.homeCopyBtnEl);
     homeHead.append(homeTitleWrap, homeStatusWrap);
+
+    this.homeRenameRowEl = document.createElement('div');
+    this.homeRenameRowEl.className = 'vm-home-rename-row is-hidden';
+    this.homeRenameInputEl = document.createElement('input');
+    this.homeRenameInputEl.type = 'text';
+    this.homeRenameInputEl.maxLength = 20;
+    this.homeRenameInputEl.spellcheck = false;
+    this.homeRenameInputEl.autocomplete = 'off';
+    this.homeRenameInputEl.className = 'vm-home-input vm-home-rename-input';
+    this.homeRenameInputEl.placeholder = t('roomTitlePlaceholder');
+    this.homeRenameInputEl.setAttribute('aria-label', 'Room title');
+    this.homeRenameInputEl.addEventListener('keydown', (e: KeyboardEvent) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.submitRenameRoom();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        this.toggleRenameRow(false);
+      }
+    });
+    this.homeRenameInputEl.addEventListener('keyup', (e: KeyboardEvent) => e.stopPropagation());
+
+    this.homeRenameSaveBtnEl = document.createElement('button');
+    this.homeRenameSaveBtnEl.type = 'button';
+    this.homeRenameSaveBtnEl.className = 'vm-home-btn vm-home-btn-primary vm-home-rename-btn';
+    this.homeRenameSaveBtnEl.textContent = t('save');
+    this.homeRenameSaveBtnEl.addEventListener('click', () => this.submitRenameRoom());
+
+    this.homeRenameCancelBtnEl = document.createElement('button');
+    this.homeRenameCancelBtnEl.type = 'button';
+    this.homeRenameCancelBtnEl.className = 'vm-home-btn vm-home-btn-resume vm-home-rename-btn';
+    this.homeRenameCancelBtnEl.textContent = t('cancel');
+    this.homeRenameCancelBtnEl.addEventListener('click', () => this.toggleRenameRow(false));
+
+    this.homeRenameRowEl.append(
+      this.homeRenameInputEl,
+      this.homeRenameSaveBtnEl,
+      this.homeRenameCancelBtnEl
+    );
+
+    this.homeLobbyWrapEl = document.createElement('div');
+    this.homeLobbyWrapEl.className = 'vm-home-lobby';
+    const lobbyHead = document.createElement('div');
+    lobbyHead.className = 'vm-home-lobby-head';
+    const lobbyTitleGroup = document.createElement('div');
+    lobbyTitleGroup.className = 'vm-home-lobby-title';
+    this.homeLobbyLabelEl = document.createElement('span');
+    this.homeLobbyLabelEl.textContent = t('onlineRooms');
+    this.homeLobbyCountEl = document.createElement('span');
+    this.homeLobbyCountEl.className = 'vm-home-lobby-count';
+    this.homeLobbyCountEl.textContent = '0';
+    lobbyTitleGroup.append(this.homeLobbyLabelEl, this.homeLobbyCountEl);
+
+    this.homeLobbyRefreshBtnEl = document.createElement('button');
+    this.homeLobbyRefreshBtnEl.type = 'button';
+    this.homeLobbyRefreshBtnEl.className = 'vm-home-icon-btn vm-home-refresh-btn';
+    this.homeLobbyRefreshBtnEl.title = t('refreshRooms');
+    this.homeLobbyRefreshBtnEl.setAttribute('aria-label', 'Refresh room list');
+    this.homeLobbyRefreshBtnEl.innerHTML = getPixelIconSvg('reset', 'vm-icon-sm');
+    this.homeLobbyRefreshBtnEl.addEventListener('click', () => {
+      if (this.homeBusy) return;
+      this.callbacks.onRefreshLobbyRooms?.();
+      this.homeLobbyRefreshBtnEl.blur();
+    });
+    lobbyHead.append(lobbyTitleGroup, this.homeLobbyRefreshBtnEl);
+
+    this.homeLobbyListEl = document.createElement('div');
+    this.homeLobbyListEl.className = 'vm-home-lobby-list';
+    this.homeLobbyWrapEl.append(lobbyHead, this.homeLobbyListEl);
 
     const homeForm = document.createElement('form');
     homeForm.className = 'vm-home-form';
@@ -1394,7 +1498,7 @@ export class Hud {
     this.renderRecentRooms();
 
     homeForm.append(homeInputs, this.homeErrorEl, homeActions, this.homeRecentWrapEl);
-    homeCard.append(homeHead, homeForm);
+    homeCard.append(homeHead, this.homeRenameRowEl, this.homeLobbyWrapEl, homeForm);
     this.homeOverlayEl.appendChild(homeCard);
 
     this.root.append(
@@ -1717,13 +1821,16 @@ export class Hud {
     return this.editingName;
   }
 
-  openHomeModal(prefillRoom?: string, errorMsg?: string): void {
+  openHomeModal(prefillRoom?: string, errorMsg?: string, requireAuth = false): void {
     if (this.editingName) {
       this.finishEditingName(true);
     }
     if (this.avatarPopoverOpen) {
       this.setAvatarPopoverOpen(false);
     }
+
+    this.homeAuthLocked = requireAuth;
+    this.homeResumeBtnEl.classList.toggle('is-hidden', requireAuth);
 
     if (typeof prefillRoom === 'string') {
       this.homeRoomInputEl.value = prefillRoom;
@@ -1758,8 +1865,12 @@ export class Hud {
     });
   }
 
-  closeHomeModal(): void {
+  closeHomeModal(force = false): void {
     if (!this.homeModalOpen) return;
+    if (!force && this.homeAuthLocked) return;
+    this.homeAuthLocked = false;
+    this.toggleRenameRow(false);
+    this.homeResumeBtnEl.classList.remove('is-hidden');
     this.homeModalOpen = false;
     this.homeOverlayEl.classList.remove('is-open');
     this.homeBtnEl.classList.remove('is-active');
@@ -1776,14 +1887,32 @@ export class Hud {
     return this.homeModalOpen;
   }
 
-  setRoomInfo(room: string, locked: boolean): void {
+  isHomeAuthLocked(): boolean {
+    return this.homeAuthLocked;
+  }
+
+  setRoomInfo(room: string, locked: boolean, title?: string, isHost?: boolean): void {
     const slug = (room || 'global').trim() || 'global';
+    const nextTitle =
+      slug === 'global'
+        ? 'global'
+        : (typeof title === 'string' && title.trim() ? title.trim().slice(0, 20) : slug);
     this.currentRoom = slug;
+    this.currentRoomTitle = nextTitle;
     this.currentRoomLocked = Boolean(locked) && slug !== 'global';
+    this.currentRoomIsHost = Boolean(isHost) && slug !== 'global';
+    if (!this.currentRoomIsHost && this.homeRenameOpen) {
+      this.toggleRenameRow(false);
+    }
     if (slug !== 'global') {
       this.rememberRecentRoom(slug);
     }
     this.syncRoomPill();
+  }
+
+  setLobbyRooms(rooms: LobbyRoomSummary[]): void {
+    this.lobbyRooms = rooms;
+    this.renderLobbyRooms();
   }
 
   setHomeError(msg: string | null): void {
@@ -1804,6 +1933,11 @@ export class Hud {
     this.homeJoinBtnEl.disabled = busy;
     this.homePublicBtnEl.disabled = busy;
     this.homeResumeBtnEl.disabled = busy;
+    this.homeRenameBtnEl.disabled = busy;
+    this.homeRenameInputEl.disabled = busy;
+    this.homeRenameSaveBtnEl.disabled = busy;
+    this.homeRenameCancelBtnEl.disabled = busy;
+    this.homeLobbyRefreshBtnEl.disabled = busy;
     this.homeJoinTextEl.textContent = busy ? t('checkingRoom') : t('createOrJoin');
   }
 
@@ -1848,6 +1982,13 @@ export class Hud {
     this.weatherLabelEl.textContent = weatherName(this.currentWeather);
     this.homeBtnEl.title = t('homeTitle');
     this.homeTitleTextEl.textContent = t('homeTitle');
+    this.homeHostBadgeEl.textContent = t('hostBadge');
+    this.homeRenameBtnEl.title = t('renameRoom');
+    this.homeRenameInputEl.placeholder = t('roomTitlePlaceholder');
+    this.homeRenameSaveBtnEl.textContent = t('save');
+    this.homeRenameCancelBtnEl.textContent = t('cancel');
+    this.homeLobbyLabelEl.textContent = t('onlineRooms');
+    this.homeLobbyRefreshBtnEl.title = t('refreshRooms');
     this.homeCopyBtnEl.title = t('copyLink');
     this.homeRoomInputEl.placeholder = t('roomCodePlaceholder');
     this.homePassInputEl.placeholder = t('roomPassPlaceholder');
@@ -1856,6 +1997,7 @@ export class Hud {
     this.homeResumeBtnEl.textContent = t('resumeRide');
     this.homeRecentLabelEl.textContent = t('recentRooms');
     this.syncRoomPill();
+    this.renderLobbyRooms();
     this.sniperEscBtnEl.textContent = t('escCancel');
 
     for (let i = 0; i < WEAPONS.length; i++) {
@@ -1926,13 +2068,132 @@ export class Hud {
 
   private syncRoomPill(): void {
     const isGlobal = this.currentRoom === 'global';
-    this.homeRoomTextEl.textContent = isGlobal ? t('publicHall') : this.currentRoom;
+    const label = isGlobal ? t('publicHall') : this.currentRoomTitle || this.currentRoom;
+    this.homeRoomTextEl.textContent = label;
+    this.homeRoomPillEl.title = isGlobal ? t('publicHall') : `${label} (#${this.currentRoom})`;
     this.homeRoomIconEl.innerHTML = getPixelIconSvg(
-      this.currentRoomLocked ? 'lock' : 'unlock',
+      this.currentRoomLocked ? 'lock' : isGlobal ? 'globe' : 'unlock',
       'vm-icon-sm'
     );
     this.homeRoomPillEl.classList.toggle('is-locked', this.currentRoomLocked);
+    this.homeHostBadgeEl.classList.toggle('is-hidden', !this.currentRoomIsHost);
+    this.homeRenameBtnEl.classList.toggle('is-hidden', !this.currentRoomIsHost);
     this.homePublicBtnEl.classList.toggle('is-hidden', isGlobal);
+  }
+
+  private toggleRenameRow(open: boolean): void {
+    const next = open && this.currentRoomIsHost && this.currentRoom !== 'global';
+    this.homeRenameOpen = next;
+    this.homeRenameRowEl.classList.toggle('is-hidden', !next);
+    if (next) {
+      this.homeRenameInputEl.value = this.currentRoomTitle || this.currentRoom;
+      window.requestAnimationFrame(() => {
+        this.homeRenameInputEl.focus();
+        this.homeRenameInputEl.select();
+      });
+    } else {
+      this.homeRenameInputEl.blur();
+    }
+  }
+
+  private submitRenameRoom(): void {
+    if (this.homeBusy || !this.currentRoomIsHost) return;
+    const nextTitle = this.homeRenameInputEl.value.trim();
+    this.callbacks.onRenameRoom?.(nextTitle);
+    this.toggleRenameRow(false);
+  }
+
+  private renderLobbyRooms(): void {
+    this.homeLobbyCountEl.textContent = String(this.lobbyRooms.length);
+    this.homeLobbyListEl.textContent = '';
+
+    if (this.lobbyRooms.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'vm-home-lobby-empty';
+      empty.textContent = t('noOtherRooms');
+      this.homeLobbyListEl.appendChild(empty);
+      return;
+    }
+
+    for (let i = 0; i < this.lobbyRooms.length; i++) {
+      const room = this.lobbyRooms[i];
+      const isGlobal = room.slug === 'global';
+      const displayTitle = isGlobal ? t('publicHall') : room.title || room.slug;
+      const showCodeSub = !isGlobal && displayTitle !== room.slug;
+
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'vm-home-lobby-item';
+      if (room.isCurrent) row.classList.add('is-current');
+      if (room.locked) row.classList.add('is-locked');
+
+      const left = document.createElement('div');
+      left.className = 'vm-home-lobby-left';
+
+      const icon = document.createElement('span');
+      icon.className = 'vm-btn-icon vm-home-lobby-icon';
+      icon.innerHTML = getPixelIconSvg(
+        room.locked ? 'lock' : isGlobal ? 'globe' : 'unlock',
+        'vm-icon-sm'
+      );
+
+      const names = document.createElement('div');
+      names.className = 'vm-home-lobby-names';
+
+      const titleEl = document.createElement('span');
+      titleEl.className = 'vm-home-lobby-name';
+      titleEl.textContent = displayTitle;
+      names.appendChild(titleEl);
+
+      if (showCodeSub) {
+        const codeEl = document.createElement('span');
+        codeEl.className = 'vm-home-lobby-code';
+        codeEl.textContent = `#${room.slug}`;
+        names.appendChild(codeEl);
+      }
+
+      left.append(icon, names);
+
+      const right = document.createElement('div');
+      right.className = 'vm-home-lobby-right';
+
+      if (room.isCurrent) {
+        const curBadge = document.createElement('span');
+        curBadge.className = 'vm-home-lobby-tag is-current';
+        curBadge.textContent = t('currentBadge');
+        right.appendChild(curBadge);
+      }
+
+      const lockTag = document.createElement('span');
+      lockTag.className = `vm-home-lobby-tag ${room.locked ? 'is-locked' : 'is-open'}`;
+      lockTag.textContent = room.locked ? t('lockedRoom') : t('openRoom');
+
+      const countTag = document.createElement('span');
+      countTag.className = 'vm-home-lobby-players';
+      const dot = document.createElement('span');
+      dot.className = 'vm-home-lobby-dot';
+      const num = document.createElement('span');
+      num.textContent = t('playersCount', { count: room.count });
+      countTag.append(dot, num);
+
+      right.append(lockTag, countTag);
+      row.append(left, right);
+
+      row.addEventListener('click', () => {
+        if (this.homeBusy || room.isCurrent) return;
+        if (room.locked) {
+          this.homeRoomInputEl.value = room.slug;
+          this.homePassInputEl.value = '';
+          this.setHomeError(t('enterPassForRoom', { room: displayTitle }));
+          this.homePassInputEl.focus();
+          return;
+        }
+        this.setHomeError(null);
+        void this.callbacks.onJoinRoom?.(room.slug, '');
+      });
+
+      this.homeLobbyListEl.appendChild(row);
+    }
   }
 
   private loadRecentRooms(): string[] {

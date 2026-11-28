@@ -29,6 +29,22 @@ export interface RoomJoinResult {
   created?: boolean;
 }
 
+export interface RoomInfoSnapshot {
+  room: string;
+  title: string;
+  locked: boolean;
+  isHost: boolean;
+}
+
+export interface LobbyRoomSummary {
+  slug: string;
+  title: string;
+  count: number;
+  locked: boolean;
+  hostId: string;
+  isCurrent: boolean;
+}
+
 export interface MqttCallbacks {
   onStatus(status: ConnectionStatus): void;
   onInitialPackSpawn(target: PackSpawnTarget): void;
@@ -36,15 +52,30 @@ export interface MqttCallbacks {
   onPeerEvent?(msg: string): void;
   onItemEvent?(ev: ItemNetEvent): void;
   onRemoteCustomAvatar?(peerId: string, dataUrl: string | null): void;
-  onRoomPasswordRequired?(roomSlug: string): void;
+  onRoomPasswordRequired?(
+    roomSlug: string,
+    reason?: 'password_required' | 'wrong_password'
+  ): void;
+  onRoomInfoChange?(info: RoomInfoSnapshot): void;
+  onLobbyRoomsChange?(rooms: LobbyRoomSummary[]): void;
 }
 
 const BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';
 const TOPIC_VERSION = 'vmoto/v2';
 const META_TOPIC_PREFIX = `${TOPIC_VERSION}/meta/`;
+const META_QUERY_TOPIC_PREFIX = `${TOPIC_VERSION}/metaq/`;
+const LOBBY_ROOMS_TOPIC = `${TOPIC_VERSION}/lobby/rooms`;
+const LOBBY_QUERY_TOPIC = `${TOPIC_VERSION}/lobby/query`;
 const ROOM_META_TTL_MS = 86_400_000; // 24 hours
-const META_POST_SUBACK_WAIT_MS = 320;
-const META_QUERY_HARD_TIMEOUT_MS = 1_500;
+const META_POST_SUBACK_WAIT_MS = 1_200;
+const META_PROBE_RETRY_MS = 450;
+const META_QUERY_HARD_TIMEOUT_MS = 2_500;
+const META_REPLY_MIN_INTERVAL_MS = 120;
+const LOBBY_ANNOUNCE_INTERVAL_MS = 8_000;
+const LOBBY_ANNOUNCE_MIN_INTERVAL_MS = 350;
+const LOBBY_PROBE_RETRY_MS = 500;
+const LOBBY_ROOM_TTL_MS = 18_000;
+const LOBBY_PRUNE_INTERVAL_MS = 4_000;
 const CONNECT_WAIT_TIMEOUT_MS = 5_000;
 
 const STATE_PACKET_MIN_BYTES = 32;
@@ -82,9 +113,12 @@ const WHEEL_RADIUS = 0.35;
 const PKT_PINGREQ = new Uint8Array([0xc0, 0x00]);
 const PKT_DISCONNECT = new Uint8Array([0xe0, 0x00]);
 const EMPTY_BYTES = new Uint8Array(0);
+const META_PROBE_PAYLOAD = new Uint8Array([0x31]);
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const LOBBY_ROOMS_TOPIC_BYTES = textEncoder.encode(LOBBY_ROOMS_TOPIC);
+const LOBBY_QUERY_TOPIC_BYTES = textEncoder.encode(LOBBY_QUERY_TOPIC);
 
 // ---- Pure-TS Deterministic SHA-256 (works on HTTPS, localhost & plain HTTP LAN) ----
 
@@ -198,11 +232,23 @@ interface RoomMeta {
 
 interface PendingMetaQuery {
   topic: string;
+  queryTopicBytes: Uint8Array;
   packetId: number;
   subackReceived: boolean;
   timer: ReturnType<typeof setTimeout> | null;
+  retryTimer: ReturnType<typeof setTimeout> | null;
   hardTimer: ReturnType<typeof setTimeout> | null;
+  staleMeta: RoomMeta | null;
   resolve: (meta: RoomMeta | null) => void;
+}
+
+interface RemoteLobbyRoom {
+  slug: string;
+  title: string;
+  count: number;
+  locked: boolean;
+  hostId: string;
+  updatedAt: number;
 }
 
 interface PeerProfile {
@@ -434,8 +480,23 @@ function readRoomFromLocation(): string {
   }
 }
 
+function readPasswordFromLocation(): string {
+  if (typeof window === 'undefined' || !window.location?.search) return '';
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return (params.get('pwd') ?? params.get('password') ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
 function sanitizeName(raw: string, fallback: string): string {
   const cleaned = raw.trim().replace(/\s+/g, ' ').slice(0, 14);
+  return cleaned.length > 0 ? cleaned : fallback;
+}
+
+function sanitizeRoomTitle(raw: string, fallback: string): string {
+  const cleaned = raw.trim().replace(/\s+/g, ' ').slice(0, 20);
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
@@ -502,7 +563,13 @@ export class MqttSync {
   readonly clientId: string;
 
   private _displayRoom: string;
+  private _roomTitle: string;
+  private _roomHostId = '';
+  private _roomInfoRev = 0;
+  private _roomInfoTs = 0;
   private _isRoomLocked = false;
+  private _roomPassword = '';
+  private _roomLockHash = '';
   private channelRoom: string;
 
   private readonly callbacks: MqttCallbacks;
@@ -513,7 +580,14 @@ export class MqttSync {
   private topicProfile = '';
   private topicAvatar = '';
   private topicEvents = '';
+  private topicRoomInfo = '';
   private topicWildcard = '';
+  private topicMeta = '';
+  private topicMetaBytes: Uint8Array | null = null;
+  private topicMetaQuery = '';
+  private lastMetaReplyMs = -Infinity;
+  private lastLobbyAnnounceMs = -Infinity;
+  private lastRoomInfoPublishMs = -Infinity;
   private statePrefix = '';
   private profilePrefix = '';
   private avatarPrefix = '';
@@ -521,6 +595,7 @@ export class MqttSync {
   private topicProfileBytes!: Uint8Array;
   private topicAvatarBytes!: Uint8Array;
   private topicEventsBytes!: Uint8Array;
+  private topicRoomInfoBytes!: Uint8Array;
   private clearAvatarPacket!: Uint8Array;
   private unloadCoalescedPacket!: Uint8Array;
   private disposeCoalescedPacket!: Uint8Array;
@@ -532,6 +607,7 @@ export class MqttSync {
   private mqttConnected = false;
   private activeInRoom = false;
   private pendingInitialMetaCheck = false;
+  private pendingInitialPassword = '';
   private awaitingPassword = false;
   private status: ConnectionStatus = 'offline';
   private disposed = false;
@@ -540,6 +616,9 @@ export class MqttSync {
 
   private packetId = 1;
   private roomSubPacketId = 0;
+  private lobbySubPacketId = 0;
+  private lobbyBrowsing = false;
+  private lobbySubscribed = false;
   private roomSwitchGen = 0;
   private reconnectAttempt = 0;
   private awaitingPingResp = false;
@@ -553,6 +632,8 @@ export class MqttSync {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pingTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private lobbyRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private lobbyPruneTimer: ReturnType<typeof setInterval> | null = null;
 
   private name: string;
   private colorIdx: number;
@@ -574,6 +655,7 @@ export class MqttSync {
   private readonly profiles = new Map<string, PeerProfile>();
   private readonly customAvatars = new Map<string, string>();
   private readonly peers = new Map<string, RemotePeer>();
+  private readonly lobbyRooms = new Map<string, RemoteLobbyRoom>();
   private readonly remoteList: RiderRenderState[] = [];
 
   private readonly handleUnload = (): void => {
@@ -590,8 +672,10 @@ export class MqttSync {
     this.clientId = generateClientId();
     const initialSlug = readRoomFromLocation();
     this._displayRoom = initialSlug;
+    this._roomTitle = initialSlug;
     this.channelRoom = initialSlug;
     this.pendingInitialMetaCheck = initialSlug !== 'global';
+    this.pendingInitialPassword = initialSlug !== 'global' ? readPasswordFromLocation() : '';
     this.callbacks = callbacks;
 
     this.name = sanitizeName(initialName, fallbackPeerName(this.clientId));
@@ -617,6 +701,135 @@ export class MqttSync {
 
   get isRoomLocked(): boolean {
     return this._isRoomLocked;
+  }
+
+  get roomPassword(): string {
+    return this._roomPassword;
+  }
+
+  get roomTitle(): string {
+    return this._displayRoom === 'global' ? 'global' : this._roomTitle || this._displayRoom;
+  }
+
+  get isRoomHost(): boolean {
+    return (
+      this._displayRoom !== 'global' &&
+      this.activeInRoom &&
+      this._roomHostId === this.clientId
+    );
+  }
+
+  getRoomInfo(): RoomInfoSnapshot {
+    return {
+      room: this._displayRoom,
+      title: this.roomTitle,
+      locked: this._isRoomLocked && this._displayRoom !== 'global',
+      isHost: this.isRoomHost,
+    };
+  }
+
+  setRoomTitle(rawTitle: string): boolean {
+    if (this.disposed || !this.isRoomHost || this._displayRoom === 'global') {
+      return false;
+    }
+    const nextTitle = sanitizeRoomTitle(rawTitle, this._displayRoom);
+    if (nextTitle === this._roomTitle) {
+      return true;
+    }
+    this._roomTitle = nextTitle;
+    this._roomInfoRev += 1;
+    this._roomInfoTs = Date.now();
+    this.publishRoomInfo(monotonicNow());
+    this.announceLobbyRoom(true);
+    this.emitRoomInfo();
+    if (this.lobbyBrowsing) {
+      this.emitLobbyRooms();
+    }
+    return true;
+  }
+
+  setLobbyBrowsing(active: boolean): void {
+    if (this.disposed) return;
+    if (this.lobbyBrowsing === active) {
+      if (active) {
+        this.refreshLobbyRooms();
+      }
+      return;
+    }
+    this.lobbyBrowsing = active;
+    if (active) {
+      this.emitLobbyRooms();
+      if (this.isConnected()) {
+        this.subscribeLobbyRooms();
+      }
+      if (this.lobbyPruneTimer === null) {
+        this.lobbyPruneTimer = setInterval(() => {
+          this.pruneLobbyRooms();
+        }, LOBBY_PRUNE_INTERVAL_MS);
+      }
+    } else {
+      this.clearLobbyTimers();
+      if (this.lobbySubscribed && this.isConnected()) {
+        this.sendRaw(buildUnsubscribePacket(this.nextPacketId(), LOBBY_ROOMS_TOPIC));
+      }
+      this.lobbySubscribed = false;
+      this.lobbySubPacketId = 0;
+    }
+  }
+
+  refreshLobbyRooms(): void {
+    if (this.disposed) return;
+    this.pruneLobbyRooms(false);
+    if (!this.isConnected()) {
+      this.emitLobbyRooms();
+      return;
+    }
+    if (!this.lobbySubscribed) {
+      this.subscribeLobbyRooms();
+    } else {
+      this.sendLobbyProbe();
+    }
+    this.emitLobbyRooms();
+  }
+
+  getLobbyRooms(): LobbyRoomSummary[] {
+    const now = monotonicNow();
+    const bySlug = new Map<string, LobbyRoomSummary>();
+
+    for (const [slug, entry] of this.lobbyRooms) {
+      if (now - entry.updatedAt > LOBBY_ROOM_TTL_MS) continue;
+      if (entry.count <= 0) continue;
+      bySlug.set(slug, {
+        slug: entry.slug,
+        title: entry.slug === 'global' ? 'global' : entry.title || entry.slug,
+        count: entry.count,
+        locked: entry.slug !== 'global' && entry.locked,
+        hostId: entry.hostId,
+        isCurrent: false,
+      });
+    }
+
+    if (this.activeInRoom) {
+      const slug = this._displayRoom;
+      bySlug.set(slug, {
+        slug,
+        title: this.roomTitle,
+        count: this.getOnlineCount(),
+        locked: this._isRoomLocked && slug !== 'global',
+        hostId: this._roomHostId,
+        isCurrent: true,
+      });
+    }
+
+    const list = Array.from(bySlug.values());
+    list.sort((a, b) => {
+      if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+      if (a.slug === 'global') return -1;
+      if (b.slug === 'global') return 1;
+      if (b.count !== a.count) return b.count - a.count;
+      return a.slug.localeCompare(b.slug);
+    });
+    return list;
   }
 
   connect(): void {
@@ -652,13 +865,19 @@ export class MqttSync {
     // Public hall 'global' is always open & unlocked
     if (slug === 'global') {
       this.pendingInitialMetaCheck = false;
+      this.pendingInitialPassword = '';
       this.awaitingPassword = false;
       if (this.channelRoom === 'global' && this.activeInRoom) {
         this._displayRoom = 'global';
         this._isRoomLocked = false;
+        this._roomPassword = '';
+        this._roomLockHash = '';
+        this.topicMeta = '';
+        this.topicMetaBytes = null;
+        this.topicMetaQuery = '';
         return { ok: true, room: 'global', locked: false, created: false };
       }
-      await this.switchChannel('global', 'global', false, gen);
+      await this.switchChannel('global', 'global', false, '', '', false, gen);
       return { ok: true, room: 'global', locked: false, created: false };
     }
 
@@ -682,33 +901,38 @@ export class MqttSync {
       }
       const isolatedChannel = `${slug}__${channelHash(slug, pwd)}`;
       this.pendingInitialMetaCheck = false;
+      this.pendingInitialPassword = '';
       this.awaitingPassword = false;
       if (this.channelRoom === isolatedChannel && this.activeInRoom) {
         this._displayRoom = slug;
         this._isRoomLocked = true;
+        this._roomPassword = pwd;
+        this._roomLockHash = meta.h;
         return { ok: true, room: slug, locked: true, created: false };
       }
-      await this.switchChannel(slug, isolatedChannel, true, gen);
+      await this.switchChannel(slug, isolatedChannel, true, pwd, meta.h, false, gen);
       return { ok: true, room: slug, locked: true, created: false };
     }
 
     // New or expired/unlocked room
     this.pendingInitialMetaCheck = false;
+    this.pendingInitialPassword = '';
     this.awaitingPassword = false;
 
     if (pwd) {
       // Lock the room with retained verifyHash metadata (NEVER plaintext password!)
+      const lockHash = verifyHash(slug, pwd);
       const metaTopicBytes = textEncoder.encode(`${META_TOPIC_PREFIX}${slug}`);
       const metaPayload = textEncoder.encode(
         JSON.stringify({
           l: true,
-          h: verifyHash(slug, pwd),
+          h: lockHash,
           ts: Date.now(),
         })
       );
       this.pendingMetaPacket = buildPublishPacket(metaTopicBytes, metaPayload, true);
       const isolatedChannel = `${slug}__${channelHash(slug, pwd)}`;
-      await this.switchChannel(slug, isolatedChannel, true, gen);
+      await this.switchChannel(slug, isolatedChannel, true, pwd, lockHash, true, gen);
       return { ok: true, room: slug, locked: true, created: true };
     }
 
@@ -725,11 +949,17 @@ export class MqttSync {
     if (this.channelRoom === slug && this.activeInRoom) {
       this._displayRoom = slug;
       this._isRoomLocked = false;
+      this._roomPassword = '';
+      this._roomLockHash = '';
+      this.topicMeta = '';
+      this.topicMetaBytes = null;
+      this.topicMetaQuery = '';
       return { ok: true, room: slug, locked: false, created: !meta };
     }
 
-    await this.switchChannel(slug, slug, false, gen);
-    return { ok: true, room: slug, locked: false, created: !meta };
+    const isKnownOccupied = this.lobbyRooms.has(slug) && (this.lobbyRooms.get(slug)?.count ?? 0) > 0;
+    await this.switchChannel(slug, slug, false, '', '', !meta && !isKnownOccupied, gen);
+    return { ok: true, room: slug, locked: false, created: !meta && !isKnownOccupied };
   }
 
   setName(name: string): void {
@@ -776,6 +1006,13 @@ export class MqttSync {
       if (kos !== this.lastPublishedKos || clockMs - this.lastProfilePublishMs >= PROFILE_REFRESH_MS) {
         this.lastPublishedKos = kos;
         this.publishProfile(clockMs);
+        if (this.isRoomHost && clockMs - this.lastRoomInfoPublishMs >= PROFILE_REFRESH_MS) {
+          this.publishRoomInfo(clockMs);
+        }
+      }
+
+      if (clockMs - this.lastLobbyAnnounceMs >= LOBBY_ANNOUNCE_INTERVAL_MS) {
+        this.announceLobbyRoom(false);
       }
 
       const isActive =
@@ -805,9 +1042,16 @@ export class MqttSync {
 
     // 3. Prune stale remote peers & advance smooth dead-reckoning / interpolation (zero array alloc)
     this.remoteList.length = 0;
+    let prunedAny = false;
+    let prunedHost = false;
     for (const [peerId, peer] of this.peers) {
       if (clockMs - peer.lastStateAt > PEER_TIMEOUT_MS) {
         this.peers.delete(peerId);
+        this.profiles.delete(peerId);
+        prunedAny = true;
+        if (peerId === this._roomHostId) {
+          prunedHost = true;
+        }
         if (this.customAvatars.delete(peerId)) {
           this.callbacks.onRemoteCustomAvatar?.(peerId, null);
         }
@@ -815,6 +1059,16 @@ export class MqttSync {
       }
       this.integrateRemotePeer(peer, clockMs, clampedDt);
       this.remoteList.push(peer.render);
+    }
+
+    if (prunedHost) {
+      this.reconcileRoomHost();
+    }
+    if (prunedAny) {
+      this.announceLobbyRoom(false);
+      if (this.lobbyBrowsing) {
+        this.emitLobbyRooms();
+      }
     }
   }
 
@@ -912,6 +1166,8 @@ export class MqttSync {
 
     this.cancelMetaQuery(null);
     this.flushConnectWaiters();
+    this.clearLobbyTimers();
+    this.announceRoomEmptyIfSoleMember();
     this.sendCleanDisconnect(true);
     this.clearTimers();
 
@@ -948,6 +1204,7 @@ export class MqttSync {
     this.topicProfile = `${this.topicPrefix}/p/${this.clientId}`;
     this.topicAvatar = `${this.topicPrefix}/a/${this.clientId}`;
     this.topicEvents = `${this.topicPrefix}/e`;
+    this.topicRoomInfo = `${this.topicPrefix}/r`;
     this.topicWildcard = `${this.topicPrefix}/#`;
     this.statePrefix = `${this.topicPrefix}/s/`;
     this.profilePrefix = `${this.topicPrefix}/p/`;
@@ -956,6 +1213,7 @@ export class MqttSync {
     this.topicProfileBytes = textEncoder.encode(this.topicProfile);
     this.topicAvatarBytes = textEncoder.encode(this.topicAvatar);
     this.topicEventsBytes = textEncoder.encode(this.topicEvents);
+    this.topicRoomInfoBytes = textEncoder.encode(this.topicRoomInfo);
     const clearProfilePacket = buildPublishPacket(this.topicProfileBytes, EMPTY_BYTES, true);
     this.clearAvatarPacket = buildPublishPacket(this.topicAvatarBytes, EMPTY_BYTES, true);
     const byeEventPacket = buildPublishPacket(
@@ -992,12 +1250,16 @@ export class MqttSync {
     displayRoom: string,
     newChannelRoom: string,
     locked: boolean,
+    roomPassword: string,
+    roomLockHash: string,
+    claimHost: boolean,
     gen: number
   ): Promise<void> {
     this.cancelMetaQuery(null);
 
     // Cleanly announce departure & clear old retained profile/avatar if we were active in a previous room
     if (this.activeInRoom && this.isConnected()) {
+      this.announceRoomEmptyIfSoleMember();
       this.sendCleanDisconnect(true);
     } else if (this.isConnected()) {
       this.sendRaw(PKT_DISCONNECT);
@@ -1005,6 +1267,8 @@ export class MqttSync {
 
     // Tear down existing socket quietly before opening a fresh socket with updated LWT
     this.clearTimers();
+    this.lobbySubscribed = false;
+    this.lobbySubPacketId = 0;
     if (this.ws) {
       const oldWs = this.ws;
       this.ws = null;
@@ -1032,7 +1296,25 @@ export class MqttSync {
 
     // Reconfigure topics, LWT & pre-allocated binary header, and re-arm 5m behind-last-player discovery
     this._displayRoom = displayRoom;
+    this._roomTitle = displayRoom;
+    this._roomHostId = displayRoom !== 'global' && claimHost ? this.clientId : '';
+    this._roomInfoRev = 0;
+    this._roomInfoTs = 0;
     this._isRoomLocked = locked;
+    this._roomPassword = locked ? roomPassword : '';
+    this._roomLockHash = locked ? roomLockHash : '';
+    if (locked && displayRoom !== 'global') {
+      this.topicMeta = `${META_TOPIC_PREFIX}${displayRoom}`;
+      this.topicMetaBytes = textEncoder.encode(this.topicMeta);
+      this.topicMetaQuery = `${META_QUERY_TOPIC_PREFIX}${displayRoom}`;
+    } else {
+      this.topicMeta = '';
+      this.topicMetaBytes = null;
+      this.topicMetaQuery = '';
+    }
+    this.lastMetaReplyMs = -Infinity;
+    this.lastLobbyAnnounceMs = -Infinity;
+    this.lastRoomInfoPublishMs = -Infinity;
     this.configureTopics(newChannelRoom);
 
     this.didSendBye = false;
@@ -1082,20 +1364,24 @@ export class MqttSync {
     }
 
     const topic = `${META_TOPIC_PREFIX}${slug}`;
+    const queryTopicBytes = textEncoder.encode(`${META_QUERY_TOPIC_PREFIX}${slug}`);
     const packetId = this.nextPacketId();
 
     return new Promise<RoomMeta | null>((resolve) => {
       const q: PendingMetaQuery = {
         topic,
+        queryTopicBytes,
         packetId,
         subackReceived: false,
         timer: null,
+        retryTimer: null,
         hardTimer: null,
+        staleMeta: null,
         resolve,
       };
       q.hardTimer = setTimeout(() => {
         if (this.metaQuery === q) {
-          this.finishMetaQuery(null);
+          this.finishMetaQuery(q.staleMeta);
         }
       }, META_QUERY_HARD_TIMEOUT_MS);
 
@@ -1109,6 +1395,7 @@ export class MqttSync {
     if (!q) return;
     this.metaQuery = null;
     if (q.timer !== null) clearTimeout(q.timer);
+    if (q.retryTimer !== null) clearTimeout(q.retryTimer);
     if (q.hardTimer !== null) clearTimeout(q.hardTimer);
     if (this.isConnected()) {
       this.sendRaw(buildUnsubscribePacket(this.nextPacketId(), q.topic));
@@ -1121,6 +1408,7 @@ export class MqttSync {
     if (!q) return;
     this.metaQuery = null;
     if (q.timer !== null) clearTimeout(q.timer);
+    if (q.retryTimer !== null) clearTimeout(q.retryTimer);
     if (q.hardTimer !== null) clearTimeout(q.hardTimer);
     q.resolve(meta);
   }
@@ -1135,27 +1423,241 @@ export class MqttSync {
     const pid = this.nextPacketId();
     this.roomSubPacketId = pid;
     this.sendRaw(buildSubscribePacket(pid, this.topicWildcard));
-    this.publishProfile(monotonicNow());
+    // Listen for live lobby queries so active rooms always appear in the lobby list
+    this.sendRaw(buildSubscribePacket(this.nextPacketId(), LOBBY_QUERY_TOPIC));
+    // Listen for live lock-metadata probes so locked rooms stay protected even when brokers disable retained messages
+    if (this._isRoomLocked && this._roomLockHash && this.topicMetaQuery) {
+      this.sendRaw(buildSubscribePacket(this.nextPacketId(), this.topicMetaQuery));
+    }
+    if (this.lobbyBrowsing) {
+      this.subscribeLobbyRooms();
+    }
+    const now = monotonicNow();
+    this.publishProfile(now);
     if (this.customAvatar !== null) {
       this.publishCustomAvatar();
     }
+    if (this.isRoomHost) {
+      this.publishRoomInfo(now);
+    }
+    this.announceLobbyRoom(true);
+    this.emitRoomInfo();
+    if (this.lobbyBrowsing) {
+      this.emitLobbyRooms();
+    }
     this.lastStatePublishMs = -Infinity;
+  }
+
+  private emitRoomInfo(): void {
+    this.callbacks.onRoomInfoChange?.(this.getRoomInfo());
+  }
+
+  private isLobbyRep(): boolean {
+    if (!this.isRoomActive()) return false;
+    if (this._displayRoom !== 'global') {
+      if (this._roomHostId === this.clientId) return true;
+      if (this._roomHostId && this.peers.has(this._roomHostId)) return false;
+    }
+    for (const peerId of this.peers.keys()) {
+      if (peerId < this.clientId) return false;
+    }
+    return true;
+  }
+
+  private publishRoomInfo(clockMs: number): void {
+    if (!this.isRoomActive() || this._displayRoom === 'global' || !this._roomHostId) return;
+    this.lastRoomInfoPublishMs = clockMs;
+    const payload = textEncoder.encode(
+      JSON.stringify({
+        t: this.roomTitle,
+        h: this._roomHostId,
+        rev: this._roomInfoRev,
+        ts: this._roomInfoTs || Date.now(),
+      })
+    );
+    this.sendRaw(buildPublishPacket(this.topicRoomInfoBytes, payload, true));
+  }
+
+  private announceLobbyRoom(force: boolean): void {
+    if (!this.isRoomActive() || !this.isLobbyRep()) return;
+    const now = monotonicNow();
+    if (!force && now - this.lastLobbyAnnounceMs < LOBBY_ANNOUNCE_MIN_INTERVAL_MS) return;
+    this.lastLobbyAnnounceMs = now;
+    const payload = textEncoder.encode(
+      JSON.stringify({
+        s: this._displayRoom,
+        t: this.roomTitle,
+        c: this.getOnlineCount(),
+        l: this._isRoomLocked && this._displayRoom !== 'global',
+        h: this._roomHostId,
+        ts: Date.now(),
+      })
+    );
+    this.sendRaw(buildPublishPacket(LOBBY_ROOMS_TOPIC_BYTES, payload, false));
+  }
+
+  private announceRoomEmptyIfSoleMember(): void {
+    if (!this.isRoomActive() || this.peers.size > 0) return;
+    const payload = textEncoder.encode(
+      JSON.stringify({
+        s: this._displayRoom,
+        t: this.roomTitle,
+        c: 0,
+        l: false,
+        h: '',
+        ts: Date.now(),
+      })
+    );
+    this.sendRaw(buildPublishPacket(LOBBY_ROOMS_TOPIC_BYTES, payload, false));
+  }
+
+  private subscribeLobbyRooms(): void {
+    if (!this.isConnected() || this.disposed) return;
+    const pid = this.nextPacketId();
+    this.lobbySubPacketId = pid;
+    this.lobbySubscribed = true;
+    this.sendRaw(buildSubscribePacket(pid, LOBBY_ROOMS_TOPIC));
+  }
+
+  private sendLobbyProbe(): void {
+    if (!this.isConnected() || this.disposed) return;
+    this.sendRaw(buildPublishPacket(LOBBY_QUERY_TOPIC_BYTES, META_PROBE_PAYLOAD, false));
+    if (this.lobbyRetryTimer !== null) {
+      clearTimeout(this.lobbyRetryTimer);
+    }
+    this.lobbyRetryTimer = setTimeout(() => {
+      this.lobbyRetryTimer = null;
+      if (this.lobbyBrowsing && this.isConnected() && !this.disposed) {
+        this.sendRaw(buildPublishPacket(LOBBY_QUERY_TOPIC_BYTES, META_PROBE_PAYLOAD, false));
+      }
+    }, LOBBY_PROBE_RETRY_MS);
+  }
+
+  private clearLobbyTimers(): void {
+    if (this.lobbyRetryTimer !== null) {
+      clearTimeout(this.lobbyRetryTimer);
+      this.lobbyRetryTimer = null;
+    }
+    if (this.lobbyPruneTimer !== null) {
+      clearInterval(this.lobbyPruneTimer);
+      this.lobbyPruneTimer = null;
+    }
+  }
+
+  private pruneLobbyRooms(emit = true): void {
+    const now = monotonicNow();
+    let changed = false;
+    for (const [slug, entry] of this.lobbyRooms) {
+      if (now - entry.updatedAt > LOBBY_ROOM_TTL_MS || entry.count <= 0) {
+        this.lobbyRooms.delete(slug);
+        changed = true;
+      }
+    }
+    if (changed && emit && this.lobbyBrowsing) {
+      this.emitLobbyRooms();
+    }
+  }
+
+  private emitLobbyRooms(): void {
+    this.callbacks.onLobbyRoomsChange?.(this.getLobbyRooms());
+  }
+
+  private reconcileRoomHost(): void {
+    if (!this.activeInRoom || this._displayRoom === 'global') return;
+    if (this._roomHostId === this.clientId) return;
+    if (this._roomHostId && (this.peers.has(this._roomHostId) || this.profiles.has(this._roomHostId))) {
+      return;
+    }
+    let nextHost = this.clientId;
+    for (const peerId of this.peers.keys()) {
+      if (peerId < nextHost) nextHost = peerId;
+    }
+    if (nextHost !== this._roomHostId) {
+      this._roomHostId = nextHost;
+      this.emitRoomInfo();
+      if (this.isRoomHost) {
+        this._roomInfoRev += 1;
+        this._roomInfoTs = Date.now();
+        this.publishRoomInfo(monotonicNow());
+        this.announceLobbyRoom(true);
+      }
+    }
+  }
+
+  private replyRoomLockMeta(): void {
+    if (!this.isRoomActive() || !this._isRoomLocked || !this._roomLockHash || !this.topicMetaBytes) {
+      return;
+    }
+    const now = monotonicNow();
+    if (now - this.lastMetaReplyMs < META_REPLY_MIN_INTERVAL_MS) return;
+    this.lastMetaReplyMs = now;
+    const payload = textEncoder.encode(
+      JSON.stringify({
+        l: true,
+        h: this._roomLockHash,
+        ts: Date.now(),
+      })
+    );
+    this.sendRaw(buildPublishPacket(this.topicMetaBytes, payload, true));
   }
 
   private async runInitialUrlLockCheck(slug: string, gen: number): Promise<void> {
     const meta = await this.queryRoomMeta(slug);
     if (this.disposed || gen !== this.roomSwitchGen || !this.isConnected()) return;
 
+    const initialPwd = this.pendingInitialPassword;
     this.pendingInitialMetaCheck = false;
-    if (isFreshLockedMeta(meta)) {
-      this._isRoomLocked = true;
-      this.awaitingPassword = true;
-      this.activeInRoom = false;
-      this.callbacks.onRoomPasswordRequired?.(slug);
+    this.pendingInitialPassword = '';
+
+    if (meta !== null && isFreshLockedMeta(meta)) {
+      if (!initialPwd) {
+        this._isRoomLocked = true;
+        this._roomPassword = '';
+        this._roomLockHash = '';
+        this.awaitingPassword = true;
+        this.activeInRoom = false;
+        this.callbacks.onRoomPasswordRequired?.(slug, 'password_required');
+        return;
+      }
+      if (verifyHash(slug, initialPwd) !== meta.h) {
+        this._isRoomLocked = true;
+        this._roomPassword = '';
+        this._roomLockHash = '';
+        this.awaitingPassword = true;
+        this.activeInRoom = false;
+        this.callbacks.onRoomPasswordRequired?.(slug, 'wrong_password');
+        return;
+      }
+      const isolatedChannel = `${slug}__${channelHash(slug, initialPwd)}`;
+      this.awaitingPassword = false;
+      await this.switchChannel(slug, isolatedChannel, true, initialPwd, meta.h, false, gen);
+      if (this.disposed || gen !== this.roomSwitchGen) return;
+      this.emitRoomInfo();
+      return;
+    }
+
+    if (initialPwd) {
+      const lockHash = verifyHash(slug, initialPwd);
+      const metaTopicBytes = textEncoder.encode(`${META_TOPIC_PREFIX}${slug}`);
+      const metaPayload = textEncoder.encode(
+        JSON.stringify({
+          l: true,
+          h: lockHash,
+          ts: Date.now(),
+        })
+      );
+      this.pendingMetaPacket = buildPublishPacket(metaTopicBytes, metaPayload, true);
+      const isolatedChannel = `${slug}__${channelHash(slug, initialPwd)}`;
+      this.awaitingPassword = false;
+      await this.switchChannel(slug, isolatedChannel, true, initialPwd, lockHash, true, gen);
+      if (this.disposed || gen !== this.roomSwitchGen) return;
+      this.emitRoomInfo();
       return;
     }
 
     this._isRoomLocked = false;
+    this._roomPassword = '';
+    this._roomLockHash = '';
     this.awaitingPassword = false;
     this.enterActiveRoom();
   }
@@ -1234,6 +1736,8 @@ export class MqttSync {
       this.ws = null;
       this.mqttConnected = false;
       this.activeInRoom = false;
+      this.lobbySubscribed = false;
+      this.lobbySubPacketId = 0;
       this.rxRemainder = null;
       this.cancelMetaQuery(null);
       this.clearTimers();
@@ -1395,6 +1899,9 @@ export class MqttSync {
           this.enterActiveRoom();
           this.flushConnectWaiters();
         } else {
+          if (this.lobbyBrowsing && !this.lobbySubscribed) {
+            this.subscribeLobbyRooms();
+          }
           this.flushConnectWaiters();
         }
         return;
@@ -1410,14 +1917,26 @@ export class MqttSync {
           const q = this.metaQuery;
           q.subackReceived = true;
           if (granted === 0x80) {
-            this.finishMetaQuery(null);
+            this.finishMetaQuery(q.staleMeta);
           } else if (q.timer === null) {
+            // Actively probe live members of the locked room in case the broker ignores retained messages
+            this.sendRaw(buildPublishPacket(q.queryTopicBytes, META_PROBE_PAYLOAD, false));
+            q.retryTimer = setTimeout(() => {
+              if (this.metaQuery === q && this.isConnected()) {
+                this.sendRaw(buildPublishPacket(q.queryTopicBytes, META_PROBE_PAYLOAD, false));
+              }
+            }, META_PROBE_RETRY_MS);
             q.timer = setTimeout(() => {
               if (this.metaQuery === q) {
-                this.finishMetaQuery(null);
+                this.finishMetaQuery(q.staleMeta);
               }
             }, META_POST_SUBACK_WAIT_MS);
           }
+          return;
+        }
+
+        if (this.lobbyBrowsing && pid === this.lobbySubPacketId && granted !== 0x80) {
+          this.sendLobbyProbe();
           return;
         }
 
@@ -1579,11 +2098,36 @@ export class MqttSync {
   private handleMessage(topic: string, payload: Uint8Array, isRetained: boolean): void {
     // Intercept room lock metadata query responses first
     if (this.metaQuery && topic === this.metaQuery.topic) {
-      this.finishMetaQuery(parseRoomMeta(payload));
+      const parsed = parseRoomMeta(payload);
+      if (parsed !== null && isFreshLockedMeta(parsed)) {
+        this.finishMetaQuery(parsed);
+      } else if (parsed !== null) {
+        this.metaQuery.staleMeta = parsed;
+      }
+      return;
+    }
+
+    if (this.lobbyBrowsing && topic === LOBBY_ROOMS_TOPIC) {
+      this.handleLobbyRoomPacket(payload);
       return;
     }
 
     if (!this.activeInRoom) return;
+
+    if (topic === LOBBY_QUERY_TOPIC) {
+      this.announceLobbyRoom(false);
+      return;
+    }
+
+    if (this._isRoomLocked && this.topicMetaQuery && topic === this.topicMetaQuery) {
+      this.replyRoomLockMeta();
+      return;
+    }
+
+    if (topic === this.topicRoomInfo) {
+      this.handleRoomInfoPacket(payload);
+      return;
+    }
 
     if (topic.startsWith(this.statePrefix)) {
       if (isRetained) return; // Never accept retained state ghosts as live riders
@@ -1788,6 +2332,14 @@ export class MqttSync {
       this.callbacks.onRemoteCustomAvatar?.(peerId, pendingCustomAvatar);
     }
 
+    if (this.isRoomHost) {
+      this.publishRoomInfo(arrivalMs);
+    }
+    this.announceLobbyRoom(false);
+    if (this.lobbyBrowsing) {
+      this.emitLobbyRooms();
+    }
+
     if (!this.initialSpawnDone) {
       if (this.firstLivePeerAtMs === null) {
         this.firstLivePeerAtMs = arrivalMs;
@@ -1830,6 +2382,7 @@ export class MqttSync {
         ? Math.trunc(obj.ko)
         : 0;
 
+    const isNewProfile = !this.profiles.has(peerId);
     this.profiles.set(peerId, {
       name,
       colorIdx,
@@ -1837,6 +2390,10 @@ export class MqttSync {
       kos,
       updatedAt: monotonicNow(),
     });
+
+    if (isNewProfile && this.isRoomHost) {
+      this.publishRoomInfo(monotonicNow());
+    }
 
     const peer = this.peers.get(peerId);
     if (peer) {
@@ -1968,6 +2525,77 @@ export class MqttSync {
     }
   }
 
+  private handleRoomInfoPacket(payload: Uint8Array): void {
+    if (this._displayRoom === 'global' || payload.byteLength === 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(textDecoder.decode(payload));
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object') return;
+    const obj = parsed as Record<string, unknown>;
+    const hostId = typeof obj.h === 'string' ? obj.h.trim() : '';
+    if (!hostId) return;
+    const rev = typeof obj.rev === 'number' && Number.isFinite(obj.rev) ? Math.trunc(obj.rev) : 0;
+    const ts = typeof obj.ts === 'number' && Number.isFinite(obj.ts) ? obj.ts : 0;
+    const rawTitle = typeof obj.t === 'string' ? obj.t : '';
+    const title = sanitizeRoomTitle(rawTitle, this._displayRoom);
+
+    if (rev < this._roomInfoRev) return;
+    if (rev === this._roomInfoRev && ts < this._roomInfoTs && this._roomHostId) return;
+
+    const changed = title !== this._roomTitle || hostId !== this._roomHostId;
+    this._roomTitle = title;
+    this._roomHostId = hostId;
+    this._roomInfoRev = rev;
+    this._roomInfoTs = ts;
+
+    if (changed) {
+      this.emitRoomInfo();
+      if (this.lobbyBrowsing) {
+        this.emitLobbyRooms();
+      }
+    }
+  }
+
+  private handleLobbyRoomPacket(payload: Uint8Array): void {
+    if (payload.byteLength === 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(textDecoder.decode(payload));
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object') return;
+    const obj = parsed as Record<string, unknown>;
+    const slug = sanitizeRoom(typeof obj.s === 'string' ? obj.s : '');
+    if (!slug) return;
+    const count = typeof obj.c === 'number' && Number.isFinite(obj.c) ? Math.max(0, Math.trunc(obj.c)) : 0;
+    if (count <= 0) {
+      if (this.lobbyRooms.delete(slug)) {
+        this.emitLobbyRooms();
+      }
+      return;
+    }
+    const locked = slug !== 'global' && Boolean(obj.l);
+    const title =
+      slug === 'global'
+        ? 'global'
+        : sanitizeRoomTitle(typeof obj.t === 'string' ? obj.t : '', slug);
+    const hostId = typeof obj.h === 'string' ? obj.h : '';
+
+    this.lobbyRooms.set(slug, {
+      slug,
+      title,
+      count,
+      locked,
+      hostId,
+      updatedAt: monotonicNow(),
+    });
+    this.emitLobbyRooms();
+  }
+
   private removePeer(peerId: string): void {
     const existing = this.peers.get(peerId);
     this.peers.delete(peerId);
@@ -1975,8 +2603,17 @@ export class MqttSync {
     if (this.customAvatars.delete(peerId)) {
       this.callbacks.onRemoteCustomAvatar?.(peerId, null);
     }
-    if (existing && this.initialSpawnDone) {
-      this.callbacks.onPeerEvent?.(`${existing.render.name} LEFT`);
+    if (peerId === this._roomHostId) {
+      this.reconcileRoomHost();
+    }
+    if (existing) {
+      this.announceLobbyRoom(false);
+      if (this.lobbyBrowsing) {
+        this.emitLobbyRooms();
+      }
+      if (this.initialSpawnDone) {
+        this.callbacks.onPeerEvent?.(`${existing.render.name} LEFT`);
+      }
     }
   }
 
@@ -1988,6 +2625,7 @@ export class MqttSync {
 
     if (sinceSuback >= DISCOVERY_MAX_MS || (this.firstLivePeerAtMs !== null && sinceFirstLive >= DISCOVERY_AFTER_FIRST_PEER_MS)) {
       this.initialSpawnDone = true;
+      this.reconcileRoomHost();
       const target = this.computeSpawnBehindLastPlayer();
       if (target) {
         this.callbacks.onInitialPackSpawn(target);

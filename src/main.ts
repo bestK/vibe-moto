@@ -25,7 +25,7 @@ import {
 import { CameraMode, WorldRenderer } from './game/WorldRenderer';
 import { WeatherCallbacks, WeatherId, WeatherSystem } from './game/WeatherSystem';
 import { t, weatherName } from './i18n';
-import { ConnectionStatus, MqttSync, PackSpawnTarget } from './net/MqttSync';
+import { ConnectionStatus, LobbyRoomSummary, MqttSync, PackSpawnTarget, RoomInfoSnapshot } from './net/MqttSync';
 import { Hud, TouchInputPatch } from './ui/Hud';
 import { ANIMAL_ICON_MAP, WEATHER_ICON_MAP, type PixelIconId } from './ui/PixelIcons';
 
@@ -256,10 +256,23 @@ const mqtt = new MqttSync(
     onPeerEvent(msg: string) {
       hud.showToast(msg, 'cyan', 'globe');
     },
-    onRoomPasswordRequired(roomSlug: string) {
+    onRoomPasswordRequired(roomSlug: string, reason?: 'password_required' | 'wrong_password') {
       clearHeldInputs();
       hud.setRoomInfo(roomSlug, true);
-      hud.openHomeModal(roomSlug, t('passwordRequired'));
+      hud.openHomeModal(
+        roomSlug,
+        t(reason === 'wrong_password' ? 'wrongPassword' : 'passwordRequired'),
+        true
+      );
+    },
+    onRoomInfoChange(info: RoomInfoSnapshot) {
+      hud.setRoomInfo(info.room, info.locked, info.title, info.isHost);
+      if (hud.isHomeAuthLocked()) {
+        hud.closeHomeModal(true);
+      }
+    },
+    onLobbyRoomsChange(rooms: LobbyRoomSummary[]) {
+      hud.setLobbyRooms(rooms);
     },
   },
   initialCustomAvatar
@@ -295,6 +308,8 @@ function updateRoomUrlParam(roomSlug: string): void {
     } else {
       url.searchParams.set('room', roomSlug);
     }
+    url.searchParams.delete('pwd');
+    url.searchParams.delete('password');
     window.history.replaceState(null, '', url.pathname + url.search + url.hash);
   } catch {
     // Ignore restricted history contexts
@@ -507,6 +522,15 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
     if (open) {
       clearHeldInputs();
     }
+    mqtt.setLobbyBrowsing(open);
+  },
+  onRenameRoom(title: string) {
+    if (mqtt.setRoomTitle(title)) {
+      hud.showToast(t('roomRenamed', { title: mqtt.roomTitle }), 'gold', 'edit');
+    }
+  },
+  onRefreshLobbyRooms() {
+    mqtt.refreshLobbyRooms();
   },
   async onJoinRoom(room: string, password: string) {
     audio.unlock();
@@ -526,8 +550,9 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
         return;
       }
       updateRoomUrlParam(res.room);
-      hud.setRoomInfo(res.room, res.locked);
-      hud.closeHomeModal();
+      const roomInfo = mqtt.getRoomInfo();
+      hud.setRoomInfo(roomInfo.room, roomInfo.locked, roomInfo.title, roomInfo.isHost);
+      hud.closeHomeModal(true);
       items.resetActiveEffects();
       player.state.incomingLockName = null;
       animals.reset();
@@ -545,10 +570,16 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   },
   onCopyRoomLink() {
     const roomSlug = mqtt.displayRoom;
-    const shareUrl =
-      roomSlug === 'global'
-        ? `${window.location.origin}${window.location.pathname}`
-        : `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomSlug)}`;
+    const baseUrl = `${window.location.origin}${window.location.pathname}`;
+    let shareUrl = baseUrl;
+    if (roomSlug !== 'global') {
+      const params = new URLSearchParams();
+      params.set('room', roomSlug);
+      if (mqtt.isRoomLocked && mqtt.roomPassword) {
+        params.set('pwd', mqtt.roomPassword);
+      }
+      shareUrl = `${baseUrl}?${params.toString()}`;
+    }
     copyTextToClipboard(shareUrl);
     hud.showToast(t('linkCopied'), 'gold', 'copy');
   },
@@ -588,7 +619,13 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   },
 });
 
-hud.setRoomInfo(mqtt.displayRoom, mqtt.isRoomLocked);
+const initialRoomInfo = mqtt.getRoomInfo();
+hud.setRoomInfo(
+  initialRoomInfo.room,
+  initialRoomInfo.locked,
+  initialRoomInfo.title,
+  initialRoomInfo.isHost
+);
 
 itemCallbacks = {
   onBroadcast(text, accent = 'gold', icon?: PixelIconId) {
@@ -1115,6 +1152,8 @@ interface PerfSnapshot {
   geometries: number;
   textures: number;
   fps: number;
+  qualityTier: number;
+  effectiveDpr: number;
   cssW: number;
   cssH: number;
   bufW: number;
@@ -1129,6 +1168,8 @@ const perfSnapshot: PerfSnapshot = {
   geometries: 0,
   textures: 0,
   fps: 60,
+  qualityTier: 2,
+  effectiveDpr: 1,
   cssW: 0,
   cssH: 0,
   bufW: 0,
@@ -1150,9 +1191,30 @@ const perfSnapshot: PerfSnapshot = {
   set: (w: WeatherId) => weather.setWeather(w, true, weatherCallbacks),
   cycle: () => weather.cycleWeather(weatherCallbacks),
 };
+(
+  window as unknown as {
+    __VMOTO_AVATAR__?: {
+      get: () => number;
+      set: (idx: number) => number;
+    };
+  }
+).__VMOTO_AVATAR__ = {
+  get: () => player.state.avatarIdx,
+  set: (idx: number) => {
+    const safe = ((Math.trunc(idx) % AVATAR_COUNT) + AVATAR_COUNT) % AVATAR_COUNT;
+    player.state.avatarIdx = safe;
+    setCustomAvatar(mqtt.clientId, null);
+    mqtt.setAvatar(safe);
+    hud.refreshLocalAvatar();
+    return safe;
+  },
+};
 
 function syncPerfViewportMetrics(): void {
   const m = world.getViewportMetrics();
+  const p = world.getPerfState();
+  perfSnapshot.qualityTier = p.qualityTier;
+  perfSnapshot.effectiveDpr = p.effectiveDpr;
   perfSnapshot.cssW = m.cssW;
   perfSnapshot.cssH = m.cssH;
   perfSnapshot.bufW = m.bufW;

@@ -93,6 +93,18 @@ const ZH_DICT = {
   lockedRoom: '加密',
   openRoom: '公开',
   recentRooms: '最近',
+  onlineRooms: '在线房间',
+  noOtherRooms: '暂无其他在线房间',
+  refreshRooms: '刷新房间列表',
+  playersCount: '{count}人',
+  hostBadge: '房主',
+  currentBadge: '当前',
+  renameRoom: '修改房间名',
+  roomTitlePlaceholder: '输入新房间名',
+  save: '保存',
+  cancel: '取消',
+  roomRenamed: '房间名已改为「{title}」',
+  enterPassForRoom: '房间「{room}」已加密，请输入密码',
 } as const;
 
 export type I18nKey = keyof typeof ZH_DICT;
@@ -185,6 +197,18 @@ const EN_DICT: Record<I18nKey, string> = {
   lockedRoom: 'LOCKED',
   openRoom: 'OPEN',
   recentRooms: 'RECENT',
+  onlineRooms: 'LIVE ROOMS',
+  noOtherRooms: 'No other live rooms',
+  refreshRooms: 'Refresh room list',
+  playersCount: '{count}',
+  hostBadge: 'HOST',
+  currentBadge: 'HERE',
+  renameRoom: 'Rename room',
+  roomTitlePlaceholder: 'New room name',
+  save: 'SAVE',
+  cancel: 'CANCEL',
+  roomRenamed: 'ROOM RENAMED: {title}',
+  enterPassForRoom: 'Room "{room}" is locked, enter password',
 };
 
 const ITEM_NAMES: Readonly<Record<Lang, Readonly<Record<ItemType, string>>>> = {
