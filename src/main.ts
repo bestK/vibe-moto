@@ -28,6 +28,7 @@ import {
   IntruderSiteVisual,
   ItemNetEvent,
   ItemType,
+  NamedBuildingVisual,
   RiderRenderState,
   TrafficCar,
   VoxelNetEvent,
@@ -43,6 +44,7 @@ import {
   IntruderRecord,
   MapMarker,
   MapOnlinePlayer,
+  NamedBuilding,
   ServerBlueprint,
   ServerClient,
   createDefaultEconomyState,
@@ -161,6 +163,7 @@ let economyState: EconomyState = createDefaultEconomyState();
 let savedBlueprints: ServerBlueprint[] = [];
 let mapMarkers: MapMarker[] = [];
 let intruderRecords: IntruderRecord[] = [];
+let namedBuildings: NamedBuilding[] = [];
 let mapOnlinePlayers: MapOnlinePlayer[] = [];
 let savedCustomAvatars: SavedCustomAvatar[] = [];
 let activeCustomAvatarId = '';
@@ -169,6 +172,7 @@ let trackInfoHidden = false;
 let mapUiRefreshAccum = 0;
 let mapNetRefreshAccum = 0;
 let intruderSitesBuf: IntruderSiteVisual[] = [];
+let namedBuildingsBuf: NamedBuildingVisual[] = [];
 let shieldHudTickAccum = 0;
 let lastBlockSlowToastMs = 0;
 let lastInteractKind: 'none' | 'computer' | 'resource' | 'blueprint' = 'none';
@@ -598,10 +602,22 @@ function syncIntruderVisuals(): void {
     gy: r.gy,
     gz: r.gz,
     intruderName: r.intruderName,
+    buildingName: r.buildingName,
     liveWx: r.liveWx,
     liveWs: r.liveWs,
     online: r.online,
     createdAt: r.createdAt,
+  }));
+}
+
+function syncNamedBuildingVisuals(): void {
+  namedBuildingsBuf = namedBuildings.slice(0, 24).map((b) => ({
+    id: b.id,
+    name: b.name,
+    ownerName: b.ownerName,
+    gx: b.gx,
+    gy: b.gy,
+    gz: b.gz,
   }));
 }
 
@@ -638,10 +654,16 @@ function computeMyBuildingCenters(): WorldMapBuildingCenter[] {
   }
   const out: WorldMapBuildingCenter[] = [];
   for (const c of cells.values()) {
+    const cx = c.sumX / c.count;
+    const cs = c.sumS / c.count;
+    const matched = namedBuildings.find(
+      (b) => Math.hypot(b.gx + 0.5 - cx, signedTrackDelta(b.gz + 0.5, cs)) <= 18
+    );
     out.push({
-      wx: c.sumX / c.count,
-      ws: c.sumS / c.count,
+      wx: cx,
+      ws: cs,
       count: c.count,
+      label: matched?.name,
     });
   }
   return out;
@@ -701,20 +723,24 @@ function buildWorldMapSnapshot(remoteRiders: readonly RiderRenderState[]): World
       color: `#${n.colorHex.toString(16).padStart(6, '0')}`,
     })),
     myBuildingCenters: computeMyBuildingCenters(),
+    namedBuildings,
     teleportCards: economyState.teleportCards ?? 0,
   };
 }
 
 async function refreshMapAndIntruders(): Promise<void> {
-  const [markers, intruders, players] = await Promise.all([
+  const [markers, intruders, players, blds] = await Promise.all([
     serverClient.getMapMarkers(),
     serverClient.getIntruderRecords(mqtt.displayRoom),
     serverClient.getMapPlayers(mqtt.displayRoom),
+    serverClient.getNamedBuildings(mqtt.displayRoom),
   ]);
   mapMarkers = markers;
   intruderRecords = intruders;
   mapOnlinePlayers = players;
+  namedBuildings = blds;
   syncIntruderVisuals();
+  syncNamedBuildingVisuals();
   if (worldMapModal?.isOpen()) {
     worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
   }
@@ -742,7 +768,7 @@ async function teleportPlayerTo(
     player.teleportToWorld(wx, ws, voxels);
   }
   worldMapModal.close();
-  audio.playSpawnChime();
+  audio.playTeleport();
   const s = player.state.s;
   const lat = wx - roadX(s);
   world.spawnParticles(s, lat, 1.0, 22, 0x38e2d4, 7.5, 0.18, 0.5, 6, 0);
@@ -750,20 +776,23 @@ async function teleportPlayerTo(
 }
 
 async function refreshEconomyAndBlueprints(): Promise<void> {
-  const [eco, bpsRes, markers, intruders, avatarRes] = await Promise.all([
+  const [eco, bpsRes, markers, intruders, avatarRes, blds] = await Promise.all([
     serverClient.getEconomyState(),
     serverClient.getBlueprints(),
     serverClient.getMapMarkers(),
     serverClient.getIntruderRecords(mqtt.displayRoom),
     serverClient.getCustomAvatars(),
+    serverClient.getNamedBuildings(mqtt.displayRoom),
   ]);
   savedBlueprints = bpsRes.blueprints;
   mapMarkers = markers;
   intruderRecords = intruders;
   savedCustomAvatars = avatarRes.avatars;
   activeCustomAvatarId = avatarRes.activeId;
+  namedBuildings = blds;
   syncEconomyUi(eco);
   syncIntruderVisuals();
+  syncNamedBuildingVisuals();
 
   const activeAv = savedCustomAvatars.find((a) => a.id === activeCustomAvatarId) ?? null;
   if (activeAv) {
@@ -972,7 +1001,7 @@ function handleContextInteract(): boolean {
   if (node && node.cooldown <= 0) {
     const res = resourceNodes.harvestNode(node.id);
     if (res) {
-      audio.playPickup();
+      audio.playHarvest();
       const s = node.ws;
       const lat = node.wx - roadX(s);
       world.spawnParticles(s, lat, 1.0, 14, node.colorHex, 6.0, 0.16, 0.45, 10, 0);
@@ -1394,10 +1423,12 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   },
   onOpenEconomy(tab?: EconomyTab) {
     audio.unlock();
+    audio.playUiClick();
     economyModal.open(tab ?? 'shop');
   },
   onOpenAiBuilder() {
     audio.unlock();
+    audio.playUiClick();
     aiBuilderModal.open(economyState.inventory);
   },
   onInteract() {
@@ -1408,12 +1439,14 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   },
   onOpenWorldMap() {
     audio.unlock();
+    audio.playUiClick();
     worldMapModal.open(intruderRecords.length > 0 ? 'intruders' : 'markers');
     worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
     void refreshMapAndIntruders();
   },
   onOpenAvatarStudio() {
     audio.unlock();
+    audio.playUiClick();
     avatarStudioModal.open(savedCustomAvatars, activeCustomAvatarId);
   },
 });
@@ -1477,7 +1510,7 @@ serverClient = new ServerClient(mqtt.clientId, initialName, {
   onIntruderAlert(record) {
     intruderRecords = [record, ...intruderRecords.filter((r) => r.id !== record.id)].slice(0, 100);
     syncIntruderVisuals();
-    audio.playHorn();
+    audio.playIntruderAlert();
     const msg = t('intruderAlertToast', { name: record.intruderName });
     hud.showToast(msg, 'red', 'intruder');
     hud.pushBroadcast(msg, 'red', 'intruder');
@@ -1503,6 +1536,7 @@ worldMapModal = new WorldMapModal(hudContainer, {
   async onAddMarker(name, wx, wy, ws, color) {
     const res = await serverClient.saveMapMarker({ name, wx, wy, ws, color });
     if (res.ok && res.marker) {
+      audio.playUiClick();
       mapMarkers = [res.marker, ...mapMarkers.filter((m) => m.id !== res.marker!.id)];
       worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
       hud.showToast(`已标记「${res.marker.name}」`, 'gold', 'pin');
@@ -1514,6 +1548,30 @@ worldMapModal = new WorldMapModal(hudContainer, {
     const res = await serverClient.deleteMapMarker(id);
     if (res.ok) {
       mapMarkers = mapMarkers.filter((m) => m.id !== id);
+      worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+    }
+  },
+  async onNameBuilding(name, gx, gy, gz) {
+    const res = await serverClient.saveNamedBuilding(mqtt.displayRoom, name, gx, gy, gz);
+    if (res.ok) {
+      audio.playUiClick();
+      if (res.buildings) {
+        namedBuildings = res.buildings;
+      } else if (res.building) {
+        namedBuildings = [res.building, ...namedBuildings.filter((b) => b.id !== res.building!.id)];
+      }
+      syncNamedBuildingVisuals();
+      worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
+      hud.showToast(`建筑已命名为「${name}」`, 'gold', 'blueprint');
+    } else {
+      hud.showToast(res.error || '命名失败', 'red', 'warning');
+    }
+  },
+  async onDeleteNamedBuilding(id) {
+    const res = await serverClient.deleteNamedBuilding(id, mqtt.displayRoom);
+    if (res.ok) {
+      namedBuildings = namedBuildings.filter((b) => b.id !== id);
+      syncNamedBuildingVisuals();
       worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
     }
   },
@@ -1624,6 +1682,13 @@ economyModal = new EconomyModal(hudContainer, serverClient, {
   },
   onEconomyUpdated(state) {
     syncEconomyUi(state);
+  },
+  onShopPurchased(kind) {
+    if (kind === 'shield') {
+      audio.playShieldActivate();
+    } else {
+      audio.playShopBuy();
+    }
   },
   onStashHeldItem(_heldIdx, _item) {
     stashCurrentHeldItem();
@@ -2537,7 +2602,7 @@ const perfSnapshot: PerfSnapshot = {
       openShop: (tab?: EconomyTab) => void;
       openAi: () => void;
       openSsh: () => void;
-      openMap: (tab?: 'markers' | 'intruders' | 'players') => void;
+      openMap: (tab?: 'markers' | 'buildings' | 'intruders' | 'players') => void;
       openAvatarStudio: () => void;
       cycleOnFootCam: () => number;
       setOffTrackQuiet: (hidden: boolean) => void;
@@ -2561,7 +2626,7 @@ const perfSnapshot: PerfSnapshot = {
   openShop: (tab?: EconomyTab) => economyModal.open(tab ?? 'shop'),
   openAi: () => aiBuilderModal.open(economyState.inventory),
   openSsh: () => webSshModal.open(),
-  openMap: (tab?: 'markers' | 'intruders' | 'players') => {
+  openMap: (tab?: 'markers' | 'buildings' | 'intruders' | 'players') => {
     worldMapModal.open(tab ?? 'markers');
     worldMapModal.updateData(buildWorldMapSnapshot(mqtt.getRemoteRiders()));
     void refreshMapAndIntruders();
@@ -2921,7 +2986,8 @@ function frame(nowPerfMs: number): void {
     onFoot.state,
     resourceNodes.getActiveNodes(),
     blueprints,
-    intruderSitesBuf
+    intruderSitesBuf,
+    namedBuildingsBuf
   );
   hud.setWeather(weather.render.current, weather.render.lightningFlash);
   hud.setEnragedWarning(ai.isAnyDeliveryEnraged());

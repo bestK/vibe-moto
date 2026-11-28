@@ -28,7 +28,14 @@ import { ItemVisuals } from './ItemSystem';
 import { OnFootState } from './OnFootController';
 import { PlayerCharacterVisual } from './PlayerCharacterVisual';
 import type { ResourceNode } from './ResourceNodes';
-import { BIKE_PALETTES, FallenCargo, IntruderSiteVisual, RiderRenderState, TrafficCar } from './types';
+import {
+  BIKE_PALETTES,
+  FallenCargo,
+  IntruderSiteVisual,
+  NamedBuildingVisual,
+  RiderRenderState,
+  TrafficCar,
+} from './types';
 import { VoxelWorld, VoxelWorldVisual, wrapGridZ } from './VoxelWorld';
 import type { WeatherId, WeatherRenderSnapshot } from './WeatherSystem';
 
@@ -50,6 +57,7 @@ const MAX_FALLEN_CARGO_RENDER = 20;
 const MAX_ANIMAL_RENDER = 16;
 const MAX_RESOURCE_NODES = 48;
 const MAX_INTRUDER_SITES = 16;
+const MAX_NAMED_BUILDINGS = 24;
 const MAX_SIREN_RENDER = 12;
 const MAX_POPUPS = 14;
 const MAX_WEATHER_DROPS = 220;
@@ -300,6 +308,16 @@ export class WorldRenderer {
   private readonly intruderPillarInst: THREE.InstancedMesh;
   private readonly intruderMarkers: IntruderMarkerSlot[] = [];
   private lastIntruderCount = 0;
+
+  // 3D Floating Signposts for Named Buildings (up to 24 active)
+  private readonly buildingSigns: {
+    sprite: THREE.Sprite;
+    canvas: HTMLCanvasElement;
+    ctx: CanvasRenderingContext2D;
+    tex: THREE.CanvasTexture;
+    lastKey: string;
+  }[] = [];
+  private lastBuildingSignCount = 0;
 
   // Instanced roadside scenery pools
   private readonly trunkInst: THREE.InstancedMesh;
@@ -721,6 +739,33 @@ export class WorldRenderer {
       this.scene.add(sprite);
 
       this.intruderMarkers.push({ wire, sprite, canvas, ctx, tex, lastKey: '' });
+    }
+
+    // Floating 3D signposts above named player buildings
+    for (let i = 0; i < MAX_NAMED_BUILDINGS; i++) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 56;
+      const ctx = canvas.getContext('2d')!;
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.magFilter = THREE.NearestFilter;
+      tex.minFilter = THREE.NearestFilter;
+      tex.generateMipmaps = false;
+      tex.colorSpace = THREE.SRGBColorSpace;
+
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthTest: true,
+          depthWrite: false,
+        })
+      );
+      sprite.scale.set(4.0, 0.88, 1);
+      sprite.frustumCulled = false;
+      sprite.visible = false;
+      this.scene.add(sprite);
+      this.buildingSigns.push({ sprite, canvas, ctx, tex, lastKey: '' });
     }
 
     // Instanced roadside props (single draw call per category!)
@@ -1726,7 +1771,8 @@ export class WorldRenderer {
     onFoot?: OnFootState,
     resourceNodes?: readonly ResourceNode[],
     blueprint?: BlueprintManager | BlueprintRenderData | null,
-    intruderSites?: readonly IntruderSiteVisual[]
+    intruderSites?: readonly IntruderSiteVisual[],
+    namedBuildings?: readonly NamedBuildingVisual[]
   ): void {
     // Adaptive performance governor (auto-tunes DPR, horizon & particle caps for smooth FPS on ordinary machines)
     this.updatePerfGovernor();
@@ -1800,6 +1846,7 @@ export class WorldRenderer {
     this.updateResourceNodeVisuals(resourceNodes, originS, originX, originY, timeSec);
     this.updateBlueprintVisuals(blueprint, onFoot, originS, originX, originY, timeSec);
     this.updateIntruderSiteVisuals(intruderSites, originS, originX, originY, timeSec);
+    this.updateNamedBuildingVisuals(namedBuildings, originS, originX, originY, timeSec);
 
     // 3. Update traffic car meshes (sedans/police + Chinese overloaded cargo trucks)
     this.updateTrafficVisuals(traffic, originS, originX, originY, timeSec);
@@ -2645,10 +2692,11 @@ export class WorldRenderer {
       const coordZ = Math.round(hasLive ? s.liveWs! : s.gz);
       const statusTag = hasLive ? (s.online ? '●在线' : '离线') : '现场';
       const coordLine = `(${coordX}, ${coordZ}) ${statusTag}`;
-      const badgeKey = `${s.intruderName}|${coordLine}|${s.online ? 1 : 0}`;
+      const intruderTitle = s.buildingName ? `${s.buildingName}·${s.intruderName}` : s.intruderName;
+      const badgeKey = `${intruderTitle}|${coordLine}|${s.online ? 1 : 0}`;
       if (slot.lastKey !== badgeKey) {
         slot.lastKey = badgeKey;
-        this.drawIntruderBadgeCanvas(slot.ctx, s.intruderName, coordLine, Boolean(s.online));
+        this.drawIntruderBadgeCanvas(slot.ctx, intruderTitle, coordLine, Boolean(s.online));
         slot.tex.needsUpdate = true;
       }
 
@@ -2670,6 +2718,84 @@ export class WorldRenderer {
       this.intruderPillarInst.instanceMatrix.needsUpdate = true;
       this.lastIntruderCount = count;
     }
+  }
+
+  private drawBuildingSignCanvas(
+    ctx: CanvasRenderingContext2D,
+    name: string,
+    ownerName?: string
+  ): void {
+    const w = ctx.canvas.width;
+    const h = ctx.canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    ctx.fillStyle = 'rgba(11, 16, 28, 0.9)';
+    ctx.fillRect(2, 2, w - 4, h - 4);
+    ctx.strokeStyle = '#ffbe3b';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(2, 2, w - 4, h - 4);
+    ctx.fillStyle = '#ffbe3b';
+    ctx.fillRect(6, 6, 4, h - 12);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff3c4';
+    ctx.font = 'bold 20px "Microsoft YaHei", monospace';
+    const shortName = name.length > 14 ? `${name.slice(0, 13)}…` : name;
+    ctx.fillText(shortName, w / 2 + 2, ownerName ? 20 : h / 2);
+
+    if (ownerName) {
+      ctx.fillStyle = '#38e2d4';
+      ctx.font = 'bold 12px "Microsoft YaHei", monospace';
+      ctx.fillText(ownerName.slice(0, 14), w / 2 + 2, 41);
+    }
+  }
+
+  private updateNamedBuildingVisuals(
+    buildings: readonly NamedBuildingVisual[] | undefined,
+    originS: number,
+    originX: number,
+    originY: number,
+    timeSec: number
+  ): void {
+    if (!buildings || buildings.length === 0) {
+      if (this.lastBuildingSignCount > 0) {
+        for (let i = 0; i < this.lastBuildingSignCount; i++) {
+          this.buildingSigns[i].sprite.visible = false;
+        }
+        this.lastBuildingSignCount = 0;
+      }
+      return;
+    }
+
+    const pos = this._v1;
+    let count = 0;
+    for (let i = 0; i < buildings.length && count < MAX_NAMED_BUILDINGS; i++) {
+      const b = buildings[i];
+      const wx = b.gx + 0.5;
+      const wy = b.gy + 3.2;
+      const ws = b.gz + 0.5;
+      const ds = signedTrackDelta(ws, originS);
+      if (Math.abs(ds) > 220 || Math.abs(wx - originX) > 220) continue;
+
+      worldAbsToLocal(wx, wy, ws, originS, originX, originY, pos);
+      const slot = this.buildingSigns[count];
+      const key = `${b.name}|${b.ownerName ?? ''}`;
+      if (slot.lastKey !== key) {
+        slot.lastKey = key;
+        this.drawBuildingSignCanvas(slot.ctx, b.name, b.ownerName);
+        slot.tex.needsUpdate = true;
+      }
+      const bob = Math.sin(timeSec * 2.2 + count * 0.9) * 0.12;
+      slot.sprite.position.set(pos.x, pos.y + bob, pos.z);
+      slot.sprite.visible = true;
+      count++;
+    }
+
+    for (let i = count; i < this.lastBuildingSignCount; i++) {
+      this.buildingSigns[i].sprite.visible = false;
+    }
+    this.lastBuildingSignCount = count;
   }
 
   private updateTrafficVisuals(

@@ -40,23 +40,23 @@ const ACCESSORY_OPTIONS: readonly { id: CustomAccessory; label: string }[] = [
 type ColorSlotKey = Exclude<keyof CustomAvatarSkin, 'accessory'>;
 
 const COLOR_SLOTS: readonly { key: ColorSlotKey; label: string }[] = [
-  { key: 'head', label: '头盔/头部' },
-  { key: 'face', label: '肤色/面罩' },
-  { key: 'hair', label: '头发/顶饰' },
+  { key: 'head', label: '头盔' },
+  { key: 'face', label: '肤色' },
+  { key: 'hair', label: '发型' },
   { key: 'visor', label: '护目镜' },
-  { key: 'jacket', label: '外套/护甲' },
-  { key: 'stripe', label: '亮色条纹' },
+  { key: 'jacket', label: '外套' },
+  { key: 'stripe', label: '条纹' },
   { key: 'pants', label: '裤装' },
   { key: 'boots', label: '战靴' },
-  { key: 'bikePrimary', label: '摩托主色' },
-  { key: 'bikeAccent', label: '摩托点缀' },
+  { key: 'bikePrimary', label: '车体主色' },
+  { key: 'bikeAccent', label: '车体点缀' },
 ] as const;
 
 const PROMPT_PRESETS = [
-  '红黑赛博忍者，带金色光环和蓝色护目镜',
-  '白金机甲骑士，带发光机翼和青色面罩',
-  '紫黑暗影恶魔，带恶魔角和霓虹紫摩托',
-  '皇家黄金车手，带王冠和赤红披风',
+  '红黑赛博忍者，金色光环，蓝色护目镜',
+  '白金机甲骑士，发光机翼，青色面罩',
+  '紫黑暗影恶魔，恶魔角，霓虹紫摩托',
+  '皇家黄金车手，王冠，赤红披风',
 ] as const;
 
 const DEFAULT_DRAFT_SKIN: CustomAvatarSkin = {
@@ -694,7 +694,7 @@ export class AvatarStudioModal {
     this.portraitImgEl.src = portrait;
     const accLabel =
       ACCESSORY_OPTIONS.find((a) => a.id === this.draftSkin.accessory)?.label ?? '无';
-    this.previewMetaEl.textContent = `实时 3D 像素预览 · 配饰: ${accLabel} · 骑行/步行双态同步`;
+    this.previewMetaEl.textContent = `实时预览 · 配饰：${accLabel}`;
   }
 
   private async handleReferenceUpload(file: File): Promise<void> {

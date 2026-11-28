@@ -233,8 +233,18 @@ export interface IntruderSiteVisual {
   gy: number;
   gz: number;
   intruderName: string;
+  buildingName?: string;
   liveWx?: number;
   liveWs?: number;
   online?: boolean;
   createdAt: number;
+}
+
+export interface NamedBuildingVisual {
+  id: string;
+  name: string;
+  ownerName?: string;
+  gx: number;
+  gy: number;
+  gz: number;
 }

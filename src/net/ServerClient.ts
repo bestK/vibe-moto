@@ -100,6 +100,7 @@ export interface IntruderRecord {
   intruderAccountId?: string;
   intruderClientId?: string;
   intruderName: string;
+  buildingName?: string;
   gx: number;
   gy: number;
   gz: number;
@@ -111,6 +112,18 @@ export interface IntruderRecord {
   liveWs?: number;
   online?: boolean;
   lastSeen?: number;
+}
+
+export interface NamedBuilding {
+  id: string;
+  room: string;
+  ownerId: string;
+  ownerName: string;
+  name: string;
+  gx: number;
+  gy: number;
+  gz: number;
+  createdAt: number;
 }
 
 export interface MapOnlinePlayer {
@@ -511,6 +524,7 @@ function normalizeIntruderRecord(raw: unknown): IntruderRecord | null {
     intruderAccountId: typeof o.intruderAccountId === 'string' && o.intruderAccountId ? o.intruderAccountId : undefined,
     intruderClientId: typeof o.intruderClientId === 'string' && o.intruderClientId ? o.intruderClientId : undefined,
     intruderName: String(o.intruderName || 'Unknown'),
+    buildingName: typeof o.buildingName === 'string' && o.buildingName ? o.buildingName : undefined,
     gx: Math.floor(Number(o.gx) || 0),
     gy: Math.floor(Number(o.gy) || 0),
     gz: Math.floor(Number(o.gz) || 0),
@@ -1920,5 +1934,140 @@ export class ServerClient {
       this.setStatus('disconnected');
       this.scheduleReconnect();
     };
+  }
+
+  async getNamedBuildings(room?: string): Promise<NamedBuilding[]> {
+    const slug = (room || this.roomSlug || 'global').trim() || 'global';
+    const localKey = `vibemoto_guest_buildings_${slug}`;
+    const loadLocal = (): NamedBuilding[] => {
+      try {
+        const raw = window.localStorage.getItem(localKey);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? (parsed as NamedBuilding[]) : [];
+      } catch {
+        return [];
+      }
+    };
+    try {
+      const res = await fetch(`${this.serverUrl}/api/buildings?room=${encodeURIComponent(slug)}`, {
+        method: 'GET',
+        headers: this.authHeaders(false),
+      });
+      if (!res.ok) return loadLocal();
+      const data = (await res.json()) as { buildings?: NamedBuilding[] };
+      const remote = Array.isArray(data.buildings) ? data.buildings : [];
+      if (!this.token) {
+        const local = loadLocal();
+        const merged = [...remote];
+        for (const lb of local) {
+          if (!merged.some((rb) => rb.id === lb.id)) merged.push(lb);
+        }
+        return merged;
+      }
+      return remote;
+    } catch {
+      return loadLocal();
+    }
+  }
+
+  async saveNamedBuilding(
+    room: string,
+    name: string,
+    gx: number,
+    gy: number,
+    gz: number
+  ): Promise<{ ok: boolean; building?: NamedBuilding; buildings?: NamedBuilding[]; error?: string }> {
+    const slug = (room || this.roomSlug || 'global').trim() || 'global';
+    const cleanName = name.trim().slice(0, 20);
+    if (!cleanName) return { ok: false, error: '请输入建筑名称' };
+    const localKey = `vibemoto_guest_buildings_${slug}`;
+    const saveLocal = (): { ok: boolean; building: NamedBuilding; buildings: NamedBuilding[] } => {
+      let existing: NamedBuilding[] = [];
+      try {
+        const raw = window.localStorage.getItem(localKey);
+        if (raw) existing = JSON.parse(raw) as NamedBuilding[];
+      } catch {
+        existing = [];
+      }
+      const nearIdx = existing.findIndex((b) => Math.hypot(b.gx - gx, b.gz - gz) <= 14);
+      const nb: NamedBuilding = {
+        id: nearIdx >= 0 ? existing[nearIdx].id : `local_bld_${Date.now().toString(36)}`,
+        room: slug,
+        ownerId: 'guest',
+        ownerName: this.playerName,
+        name: cleanName,
+        gx: Math.floor(gx),
+        gy: Math.floor(gy),
+        gz: Math.floor(gz),
+        createdAt: Math.floor(Date.now() / 1000),
+      };
+      if (nearIdx >= 0) existing[nearIdx] = nb;
+      else existing.unshift(nb);
+      existing = existing.slice(0, 30);
+      try {
+        window.localStorage.setItem(localKey, JSON.stringify(existing));
+      } catch {
+        // ignore
+      }
+      return { ok: true, building: nb, buildings: existing };
+    };
+
+    if (!this.token) return saveLocal();
+    try {
+      const res = await fetch(`${this.serverUrl}/api/buildings`, {
+        method: 'POST',
+        headers: this.authHeaders(true),
+        body: JSON.stringify({
+          room: slug,
+          name: cleanName,
+          gx: Math.floor(gx),
+          gy: Math.floor(gy),
+          gz: Math.floor(gz),
+        }),
+      });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        building?: NamedBuilding;
+        buildings?: NamedBuilding[];
+        error?: string;
+      };
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: data.error || `HTTP ${res.status}` };
+      }
+      return { ok: true, building: data.building, buildings: data.buildings };
+    } catch {
+      return saveLocal();
+    }
+  }
+
+  async deleteNamedBuilding(id: string, room?: string): Promise<{ ok: boolean; error?: string }> {
+    const slug = (room || this.roomSlug || 'global').trim() || 'global';
+    const localKey = `vibemoto_guest_buildings_${slug}`;
+    if (!this.token || id.startsWith('local_bld_')) {
+      try {
+        const raw = window.localStorage.getItem(localKey);
+        if (raw) {
+          const list = (JSON.parse(raw) as NamedBuilding[]).filter((b) => b.id !== id);
+          window.localStorage.setItem(localKey, JSON.stringify(list));
+        }
+      } catch {
+        // ignore
+      }
+      return { ok: true };
+    }
+    try {
+      const res = await fetch(`${this.serverUrl}/api/buildings/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: this.authHeaders(false),
+      });
+      const data = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || data.ok === false) {
+        return { ok: false, error: data.error || `HTTP ${res.status}` };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : '删除失败' };
+    }
   }
 }

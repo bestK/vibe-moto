@@ -1,4 +1,5 @@
 import { ITEM_BY_ID, type HeldItemSlot, type ItemType } from '../game/types';
+import { getBlockSwatchUrl, type BlockType } from '../game/VoxelWorld';
 import { getLang, itemName } from '../i18n';
 import {
   BLOCK_CATALOG,
@@ -28,6 +29,7 @@ export interface EconomyModalCallbacks {
   onToast?(msg: string, accent?: 'gold' | 'cyan' | 'red'): void;
   onEconomyUpdated?(state: EconomyState): void;
   onBuyShopItem?(itemId: string, qty: number): Promise<void> | void;
+  onShopPurchased?(kind: 'block' | 'bag' | 'shield' | 'teleport'): void;
   onStashHeldItem?(heldIndex: number, item: ItemType): Promise<void> | void;
   onUseBagItem?(bagIndex: number, item: ItemType): Promise<void> | void;
   onSetBlueprintCornerA?(): void;
@@ -130,7 +132,7 @@ export class EconomyModal {
     titleIcon.className = 'vm-btn-icon';
     titleIcon.innerHTML = getPixelIconSvg('crate');
     const titleText = document.createElement('span');
-    titleText.textContent = getLang() === 'zh' ? '世界经济与建造中心' : 'WORLD ECONOMY & BUILD';
+    titleText.textContent = getLang() === 'zh' ? '世界商店' : 'WORLD SHOP';
     titleWrap.append(titleIcon, titleText);
 
     const statusWrap = document.createElement('div');
@@ -177,10 +179,10 @@ export class EconomyModal {
     };
 
     this.tabBtns = {
-      shop: makeTab('shop', '世界商店'),
-      market: makeTab('market', '玩家交易行'),
+      shop: makeTab('shop', '商店'),
+      market: makeTab('market', '交易行'),
       bag: makeTab('bag', '道具袋'),
-      blueprints: makeTab('blueprints', '建筑蓝图'),
+      blueprints: makeTab('blueprints', '蓝图'),
     };
 
     this.errorEl = document.createElement('div');
@@ -332,183 +334,182 @@ export class EconomyModal {
   }
 
   // -------------------------------------------------------------------------
-  // TAB 1: WORLD SHOP
+  // TAB 1: WORLD SHOP (Square Inventory Tile Grid)
   // -------------------------------------------------------------------------
+  private shopBuyQty: 1 | 5 = 1;
+
   private renderShopTab(): void {
     const shieldRem = getShieldRemainingSeconds(this.state.shieldUntil);
 
-    // Status summary bar
+    // Compact status + batch buy bar
     const summary = document.createElement('div');
-    summary.className = 'vm-home-lobby';
-    summary.style.flexDirection = 'row';
-    summary.style.justifyContent = 'space-between';
-    summary.style.flexWrap = 'wrap';
-    summary.style.fontSize = '11px';
+    summary.className = 'vm-shop-summary';
+
+    const statsWrap = document.createElement('div');
+    statsWrap.className = 'vm-shop-stats';
 
     const s1 = document.createElement('span');
-    s1.textContent = `金币余额：${this.state.coins} 🪙`;
-    s1.style.color = 'var(--vm-gold)';
-    s1.style.fontWeight = '700';
+    s1.className = 'vm-shop-stat is-gold';
+    s1.textContent = `🪙 ${this.state.coins}`;
 
     const s2 = document.createElement('span');
-    s2.textContent =
-      shieldRem > 0
-        ? `建筑防护盾激活中 · 剩余 ${formatCountdown(shieldRem)}（购买可叠加）`
-        : '建筑防护盾未激活（开启后他人无法破坏你的建筑）';
-    s2.style.color = shieldRem > 0 ? 'var(--vm-cyan)' : 'var(--vm-dim)';
+    s2.className = shieldRem > 0 ? 'vm-shop-stat is-cyan' : 'vm-shop-stat';
+    s2.textContent = shieldRem > 0 ? `🛡 ${formatCountdown(shieldRem)}` : '🛡 未开启';
 
     const s3 = document.createElement('span');
-    s3.textContent = `道具袋：${this.state.savedItems.length}/${this.state.bagCapacity} 格`;
-    s3.style.color = 'var(--vm-green)';
+    s3.className = 'vm-shop-stat is-green';
+    s3.textContent = `🎒 ${this.state.savedItems.length}/${this.state.bagCapacity}`;
 
     const s4 = document.createElement('span');
-    s4.textContent = `传送卡：${this.state.teleportCards ?? 0} 张`;
-    s4.style.color = 'var(--vm-sky)';
-    s4.style.fontWeight = '700';
+    s4.className = 'vm-shop-stat is-sky';
+    s4.textContent = `🎫 ${this.state.teleportCards ?? 0}`;
 
-    summary.append(s1, s2, s3, s4);
+    statsWrap.append(s1, s2, s3, s4);
+
+    // ×1 / ×5 toggle for material slots
+    const qtyToggle = document.createElement('div');
+    qtyToggle.className = 'vm-shop-qty-toggle';
+    for (const q of [1, 5] as const) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = this.shopBuyQty === q ? 'vm-shop-qty-btn is-active' : 'vm-shop-qty-btn';
+      b.textContent = `×${q}`;
+      b.addEventListener('click', () => {
+        this.shopBuyQty = q;
+        this.renderActiveTab();
+      });
+      qtyToggle.appendChild(b);
+    }
+
+    summary.append(statsWrap, qtyToggle);
     this.bodyEl.appendChild(summary);
 
-    // Gear items (bag + shields + teleport cards)
+    // Section 1: Gear square slots
     const gearItems = this.state.shop.filter(
       (i) => i.kind === 'bag' || i.kind === 'shield' || i.kind === 'teleport'
     );
     if (gearItems.length > 0) {
       const secTitle = document.createElement('div');
-      secTitle.style.fontSize = '11px';
-      secTitle.style.fontWeight = '700';
-      secTitle.style.color = 'var(--vm-cyan)';
-      secTitle.textContent = `功能装备 · 道具袋 / 传送卡 (当前: ${this.state.teleportCards ?? 0}) / 建筑防护盾`;
+      secTitle.className = 'vm-shop-sec-title is-cyan';
+      secTitle.textContent = '装备';
       this.bodyEl.appendChild(secTitle);
 
       const gearGrid = document.createElement('div');
-      gearGrid.className = 'vm-eco-grid';
-      gearGrid.style.display = 'grid';
-      gearGrid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(210px, 1fr))';
-      gearGrid.style.gap = '8px';
+      gearGrid.className = 'vm-shop-slot-grid is-gear';
 
       for (const item of gearItems) {
-        const card = document.createElement('div');
-        card.className = 'vm-eco-card vm-home-lobby';
-
-        const nameEl = document.createElement('div');
-        nameEl.style.fontSize = '12px';
-        nameEl.style.fontWeight = '700';
-        nameEl.style.color =
-          item.kind === 'shield'
-            ? 'var(--vm-cyan)'
-            : item.kind === 'teleport'
-              ? 'var(--vm-sky)'
-              : 'var(--vm-gold)';
-        nameEl.textContent = item.zhName;
-
-        const descEl = document.createElement('div');
-        descEl.style.fontSize = '10px';
-        descEl.style.color = 'var(--vm-dim)';
-        if (item.kind === 'bag') {
-          descEl.textContent = `当前 ${this.state.bagCapacity}/12 格 · 永久保存赛道道具，开放世界也能用`;
-        } else if (item.kind === 'teleport') {
-          descEl.textContent = `当前拥有 ${this.state.teleportCards ?? 0}/50 张 · 世界地图可消耗传送卡追击传送至入侵者实时位置`;
-        } else {
-          const mins = Math.round((item.durationSec ?? 600) / 60);
-          descEl.textContent = `+${mins} 分钟建筑保护（多次购买自动叠加时长）`;
-        }
-
-        const buyBtn = document.createElement('button');
-        buyBtn.type = 'button';
-        buyBtn.className = 'vm-home-btn vm-home-btn-primary';
         const bagMaxed = item.kind === 'bag' && this.state.bagCapacity >= 12;
         const tpMaxed = item.kind === 'teleport' && (this.state.teleportCards ?? 0) >= 50;
+        const maxed = bagMaxed || tpMaxed;
         const cantAfford = this.state.coins < item.price;
-        buyBtn.disabled = this.busy || bagMaxed || tpMaxed || cantAfford;
-        buyBtn.textContent = bagMaxed
-          ? '已满级 (12格)'
-          : tpMaxed
-            ? '已达上限 (50张)'
-            : `购买 · ${item.price} 🪙`;
-        buyBtn.addEventListener('click', () => {
-          void this.handleBuyShop(item.id, 1);
-        });
 
-        card.append(nameEl, descEl, buyBtn);
-        gearGrid.appendChild(card);
+        const slot = document.createElement('button');
+        slot.type = 'button';
+        slot.className = `vm-shop-slot is-${item.kind}${maxed ? ' is-maxed' : cantAfford ? ' is-locked' : ''}`;
+        slot.disabled = this.busy || maxed || cantAfford;
+
+        let badgeText = '';
+        let iconHtml = '';
+        let shortTitle = item.zhName;
+        if (item.kind === 'bag') {
+          badgeText = `${this.state.bagCapacity}/12`;
+          iconHtml = getPixelIconSvg('bag');
+          shortTitle = '道具袋 +3';
+          slot.title = '永久保存赛道拾取的道具';
+        } else if (item.kind === 'teleport') {
+          badgeText = `拥有 ${this.state.teleportCards ?? 0}`;
+          iconHtml = getPixelIconSvg('teleport');
+          shortTitle = (item.qty ?? 1) > 1 ? `传送卡 ×${item.qty}` : '传送卡';
+          slot.title = '用于传送到入侵者当前位置';
+        } else {
+          const mins = Math.round((item.durationSec ?? 600) / 60);
+          badgeText = `+${mins}分`;
+          iconHtml = getPixelIconSvg('shield');
+          shortTitle = `防护盾`;
+          slot.title = '保护你的建筑不被破坏，时长可叠加';
+        }
+
+        const badge = document.createElement('span');
+        badge.className = 'vm-shop-slot-badge';
+        badge.textContent = badgeText;
+
+        const iconBox = document.createElement('div');
+        iconBox.className = 'vm-shop-slot-icon';
+        iconBox.innerHTML = iconHtml;
+
+        const nameEl = document.createElement('div');
+        nameEl.className = 'vm-shop-slot-name';
+        nameEl.textContent = shortTitle;
+
+        const priceEl = document.createElement('div');
+        priceEl.className = 'vm-shop-slot-price';
+        priceEl.textContent = maxed ? '已满' : `${item.price} 🪙`;
+
+        slot.append(badge, iconBox, nameEl, priceEl);
+        slot.addEventListener('click', () => {
+          void this.handleBuyShop(item.id, 1, item.kind);
+        });
+        gearGrid.appendChild(slot);
       }
       this.bodyEl.appendChild(gearGrid);
     }
 
-    // Block items (1..10)
+    // Section 2: Material square slots (#1..#10)
     const matTitle = document.createElement('div');
-    matTitle.style.fontSize = '11px';
-    matTitle.style.fontWeight = '700';
-    matTitle.style.color = 'var(--vm-gold)';
-    matTitle.textContent = '建筑材料商店（支持 #1..#10 含 Vibe 电脑终端）';
+    matTitle.className = 'vm-shop-sec-title is-gold';
+    matTitle.textContent = '材料';
     this.bodyEl.appendChild(matTitle);
 
     const blockGrid = document.createElement('div');
-    blockGrid.className = 'vm-eco-grid';
-    blockGrid.style.display = 'grid';
-    blockGrid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(168px, 1fr))';
-    blockGrid.style.gap = '8px';
+    blockGrid.className = 'vm-shop-slot-grid';
 
     const blockShop = this.state.shop.filter((i) => i.kind === 'block');
     for (const item of blockShop) {
-      const bId = item.blockType ?? 1;
+      const bId = (item.blockType ?? 1) as BlockType;
       const catalog = getBlockCatalogEntry(bId);
       const cur = this.state.inventory[bId] ?? 0;
       const cap = this.state.caps[bId] ?? 99;
-      const full = cur >= cap;
+      const remSpace = Math.max(0, cap - cur);
+      const full = remSpace <= 0;
+      const buyQty = full ? 1 : Math.min(this.shopBuyQty, remSpace);
+      const totalCost = item.price * buyQty;
+      const cantAfford = this.state.coins < totalCost;
 
-      const card = document.createElement('div');
-      card.className = 'vm-eco-card vm-home-lobby';
+      const slot = document.createElement('button');
+      slot.type = 'button';
+      slot.className = `vm-shop-slot is-block${full ? ' is-maxed' : cantAfford ? ' is-locked' : ''}`;
+      slot.disabled = this.busy || full || cantAfford;
+      slot.title = `#${bId} ${catalog.zhName} (${cur}/${cap})`;
 
-      const topRow = document.createElement('div');
-      topRow.style.display = 'flex';
-      topRow.style.alignItems = 'center';
-      topRow.style.justifyContent = 'space-between';
-      topRow.style.gap = '6px';
+      const badge = document.createElement('span');
+      badge.className = 'vm-shop-slot-badge';
+      badge.textContent = `${cur}/${cap}`;
 
-      const leftInfo = document.createElement('div');
-      leftInfo.style.display = 'flex';
-      leftInfo.style.alignItems = 'center';
-      leftInfo.style.gap = '6px';
+      const iconBox = document.createElement('div');
+      iconBox.className = 'vm-shop-slot-icon';
+      const img = document.createElement('img');
+      img.className = 'vm-shop-block-img';
+      img.src = getBlockSwatchUrl(bId);
+      img.alt = catalog.zhName;
+      iconBox.appendChild(img);
 
-      const swatch = document.createElement('span');
-      swatch.style.width = '14px';
-      swatch.style.height = '14px';
-      swatch.style.display = 'inline-block';
-      swatch.style.flexShrink = '0';
-      swatch.style.background = catalog.colorHex;
-      swatch.style.border = '2px solid rgba(255,255,255,0.45)';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'vm-shop-slot-name';
+      nameEl.textContent = catalog.zhName;
 
-      const title = document.createElement('span');
-      title.style.fontSize = '11px';
-      title.style.fontWeight = '700';
-      title.textContent = `#${bId} ${catalog.zhName}`;
+      const priceEl = document.createElement('div');
+      priceEl.className = 'vm-shop-slot-price';
+      priceEl.textContent = full
+        ? '已满'
+        : buyQty > 1
+          ? `×${buyQty} · ${totalCost}🪙`
+          : `${totalCost} 🪙`;
 
-      leftInfo.append(swatch, title);
-
-      const stockEl = document.createElement('span');
-      stockEl.style.fontSize = '10px';
-      stockEl.style.fontWeight = '700';
-      stockEl.style.color = full ? 'var(--vm-gold)' : 'var(--vm-cyan)';
-      stockEl.textContent = `${cur}/${cap}`;
-
-      topRow.append(leftInfo, stockEl);
-
-      const buyBtn = document.createElement('button');
-      buyBtn.type = 'button';
-      buyBtn.className = 'vm-home-btn vm-home-btn-public';
-      buyBtn.style.height = '28px';
-      buyBtn.disabled = this.busy || full || this.state.coins < item.price;
-      buyBtn.textContent = full
-        ? '库存已满'
-        : `+${item.qty ?? 1} · ${item.price} 🪙`;
-      buyBtn.addEventListener('click', () => {
-        void this.handleBuyShop(item.id, 1);
+      slot.append(badge, iconBox, nameEl, priceEl);
+      slot.addEventListener('click', () => {
+        void this.handleBuyShop(item.id, buyQty, 'block');
       });
-
-      card.append(topRow, buyBtn);
-      blockGrid.appendChild(card);
+      blockGrid.appendChild(slot);
     }
 
     this.bodyEl.appendChild(blockGrid);
@@ -710,7 +711,7 @@ export class EconomyModal {
     capText.style.fontSize = '12px';
     capText.style.fontWeight = '700';
     capText.style.color = 'var(--vm-cyan)';
-    capText.textContent = `道具袋容量：${used} / ${cap} 格（永久保存 · 赛道 & 开放世界 PvP 通用）`;
+    capText.textContent = `容量：${used}/${cap} 格（永久保存赛道道具）`;
 
     const upgradeBtn = document.createElement('button');
     upgradeBtn.type = 'button';
@@ -797,7 +798,7 @@ export class EconomyModal {
       empty.textContent =
         cap <= 0
           ? '你还未解锁道具袋，前往「世界商店」购买即可永久存储赛道道具！'
-          : '道具袋为空，快去赛道拾取火箭筒/空袭/狙击枪存进来吧！';
+          : '道具袋为空，拾取赛道道具后即可存入';
       this.bodyEl.appendChild(empty);
     } else {
       const grid = document.createElement('div');
@@ -1045,7 +1046,11 @@ export class EconomyModal {
   // ASYNC ACTION HANDLERS
   // -------------------------------------------------------------------------
 
-  private async handleBuyShop(itemId: string, qty: number): Promise<void> {
+  private async handleBuyShop(
+    itemId: string,
+    qty: number,
+    kind?: 'block' | 'bag' | 'shield' | 'teleport'
+  ): Promise<void> {
     if (this.busy) return;
     this.setError(null);
     this.busy = true;
@@ -1060,6 +1065,7 @@ export class EconomyModal {
         } else {
           this.state = res.state;
           this.cb.onEconomyUpdated?.(res.state);
+          this.cb.onShopPurchased?.(kind ?? 'block');
           this.cb.onToast?.('购买成功！', 'gold');
         }
       }

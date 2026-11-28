@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"vibe-moto-server/internal/auth"
+	"vibe-moto-server/internal/buildings"
 	"vibe-moto-server/internal/economy"
 	"vibe-moto-server/internal/hub"
 	"vibe-moto-server/internal/intruders"
@@ -44,8 +45,12 @@ func setupTestServer(t *testing.T) (*httptest.Server, *auth.Store, *world.Store,
 	if err != nil {
 		t.Fatal(err)
 	}
+	buildingStore, err := buildings.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	wsHub := hub.New(worlds, accounts, intruderStore)
-	h := buildHandler(accounts, worlds, econ, intruderStore, wsHub, nil, time.Now(), "localhost")
+	h := buildHandler(accounts, worlds, econ, intruderStore, buildingStore, wsHub, nil, time.Now(), "localhost")
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
 	return ts, accounts, worlds, econ

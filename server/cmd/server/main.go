@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"vibe-moto-server/internal/auth"
+	"vibe-moto-server/internal/buildings"
 	"vibe-moto-server/internal/economy"
 	"vibe-moto-server/internal/hub"
 	"vibe-moto-server/internal/intruders"
@@ -95,6 +96,7 @@ func buildHandler(
 	worlds *world.Store,
 	econ *economy.Store,
 	intruderStore *intruders.Store,
+	buildingStore *buildings.Store,
 	wsHub *hub.Hub,
 	mcSrv *mcproto.Server,
 	startedAt time.Time,
@@ -453,11 +455,96 @@ func buildHandler(
 		}
 		enriched := make([]intruders.EnrichedRecord, 0, len(rawRecords))
 		for _, rec := range rawRecords {
-			enriched = append(enriched, wsHub.EnrichIntruderRecord(rec))
+			en := wsHub.EnrichIntruderRecord(rec)
+			if buildingStore != nil {
+				en.BuildingName = buildingStore.FindNearestName(rec.Room, rec.OwnerID, rec.GX, rec.GZ, 20.0)
+			}
+			enriched = append(enriched, en)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":      true,
 			"records": enriched,
+		})
+	})
+
+	// ── Named Buildings ──
+	mux.HandleFunc("/api/buildings", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			room := world.SanitizeRoom(r.URL.Query().Get("room"))
+			list := []buildings.NamedBuilding{}
+			if buildingStore != nil {
+				list = buildingStore.ListByRoom(room)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":        true,
+				"room":      room,
+				"buildings": list,
+			})
+		case http.MethodPost:
+			acc, err := accounts.VerifyToken(extractBearer(r))
+			if err != nil {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+				return
+			}
+			var req struct {
+				Room string `json:"room"`
+				Name string `json:"name"`
+				GX   int    `json:"gx"`
+				GY   int    `json:"gy"`
+				GZ   int    `json:"gz"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+				return
+			}
+			if buildingStore == nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "建筑存储未初始化"})
+				return
+			}
+			nb, all, err := buildingStore.Upsert(req.Room, acc.ID, acc.DisplayName, req.Name, req.GX, req.GY, req.GZ)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"ok":        true,
+				"building":  nb,
+				"buildings": all,
+			})
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/buildings/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		acc, err := accounts.VerifyToken(extractBearer(r))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		bID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/buildings/"))
+		if buildingStore == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "建筑不存在"})
+			return
+		}
+		if err := buildingStore.Delete(acc.ID, bID); err != nil {
+			code := http.StatusBadRequest
+			if errors.Is(err, buildings.ErrNotFound) {
+				code = http.StatusNotFound
+			} else if errors.Is(err, buildings.ErrForbidden) {
+				code = http.StatusForbidden
+			}
+			writeJSON(w, code, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true,
+			"id": bID,
 		})
 	})
 
@@ -918,6 +1005,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("init intruder store: %v", err)
 	}
+	buildingStore, err := buildings.NewStore(dataDir)
+	if err != nil {
+		log.Fatalf("init building store: %v", err)
+	}
 
 	wsHub := hub.New(worlds, accounts, intruderStore)
 	mcSrv := mcproto.NewServer(mcAddr, mcMotd, publicHost, worlds, wsHub)
@@ -925,7 +1016,7 @@ func main() {
 		log.Printf("[mc] warning: failed to start Minecraft protocol listener on %s: %v", mcAddr, err)
 	}
 
-	handler := buildHandler(accounts, worlds, econ, intruderStore, wsHub, mcSrv, startedAt, publicHost)
+	handler := buildHandler(accounts, worlds, econ, intruderStore, buildingStore, wsHub, mcSrv, startedAt, publicHost)
 
 	srv := &http.Server{
 		Addr:              httpAddr,

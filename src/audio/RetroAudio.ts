@@ -20,7 +20,17 @@ type SfxKey =
   | 'banana_slip'
   | 'jet_flyby'
   | 'fuel_chime'
-  | 'truck_horn';
+  | 'truck_horn'
+  | 'block_place'
+  | 'block_break'
+  | 'footstep'
+  | 'dismount'
+  | 'shop_buy'
+  | 'teleport'
+  | 'harvest'
+  | 'shield_on'
+  | 'intruder_alert'
+  | 'ui_click';
 
 const SFX_MANIFEST: Record<SfxKey, string> = {
   swing: 'swing.mp3',
@@ -41,6 +51,16 @@ const SFX_MANIFEST: Record<SfxKey, string> = {
   jet_flyby: 'jet_flyby.mp3',
   fuel_chime: 'fuel_chime.mp3',
   truck_horn: 'truck_horn.mp3',
+  block_place: 'block_place.mp3',
+  block_break: 'block_break.mp3',
+  footstep: 'footstep.mp3',
+  dismount: 'dismount.mp3',
+  shop_buy: 'shop_buy.mp3',
+  teleport: 'teleport.mp3',
+  harvest: 'harvest.mp3',
+  shield_on: 'shield_on.mp3',
+  intruder_alert: 'intruder_alert.mp3',
+  ui_click: 'ui_click.mp3',
 };
 
 const SFX_KEYS = Object.keys(SFX_MANIFEST) as SfxKey[];
@@ -1527,6 +1547,16 @@ export class RetroAudio {
 
   playBlockPlace(): void {
     if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('block_place', {
+        volume: 0.62,
+        rate: 1.06,
+        rateJitter: 0.1,
+        cooldownMs: 45,
+      })
+    ) {
+      return;
+    }
     const ctx = this.ctx;
     const now = ctx.currentTime;
 
@@ -1546,6 +1576,16 @@ export class RetroAudio {
 
   playBlockBreak(): void {
     if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('block_break', {
+        volume: 0.56,
+        rate: 1.08,
+        rateJitter: 0.1,
+        cooldownMs: 55,
+      })
+    ) {
+      return;
+    }
     const ctx = this.ctx;
     const now = ctx.currentTime;
 
@@ -1579,7 +1619,19 @@ export class RetroAudio {
   }
 
   playFootstep(): void {
-    if (!this.canPlaySfx() || !this.ctx || !this.sfxBus || !this.noiseBuffer) return;
+    if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('footstep', {
+        volume: 0.24,
+        rate: 1.0,
+        rateJitter: 0.14,
+        pan: (Math.random() - 0.5) * 0.22,
+        cooldownMs: 140,
+      })
+    ) {
+      return;
+    }
+    if (!this.noiseBuffer) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
     const src = ctx.createBufferSource();
@@ -1598,6 +1650,16 @@ export class RetroAudio {
 
   playDismount(dismounting: boolean): void {
     if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('dismount', {
+        volume: 0.52,
+        rate: dismounting ? 0.94 : 1.14,
+        rateJitter: 0.04,
+        cooldownMs: 120,
+      })
+    ) {
+      return;
+    }
     const ctx = this.ctx;
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
@@ -1616,5 +1678,110 @@ export class RetroAudio {
     g.connect(this.sfxBus);
     osc.start(now);
     osc.stop(now + 0.17);
+  }
+
+  playShopBuy(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('shop_buy', {
+        volume: 0.56,
+        rate: 1.02,
+        rateJitter: 0.04,
+        cooldownMs: 65,
+      })
+    ) {
+      return;
+    }
+    this.playPickup();
+  }
+
+  playTeleport(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('teleport', {
+        volume: 0.68,
+        rate: 1.0,
+        rateJitter: 0.03,
+        pan: -0.25,
+        panEnd: 0.25,
+        panDuration: 0.65,
+        cooldownMs: 200,
+      })
+    ) {
+      return;
+    }
+    this.playSpawnChime();
+  }
+
+  playHarvest(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('harvest', {
+        volume: 0.58,
+        rate: 1.04,
+        rateJitter: 0.05,
+        cooldownMs: 120,
+      })
+    ) {
+      return;
+    }
+    this.playFuelChime();
+  }
+
+  playShieldActivate(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('shield_on', {
+        volume: 0.6,
+        rate: 1.0,
+        rateJitter: 0.02,
+        cooldownMs: 200,
+      })
+    ) {
+      return;
+    }
+    this.playSpawnChime();
+  }
+
+  playIntruderAlert(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('intruder_alert', {
+        volume: 0.64,
+        rate: 1.05,
+        rateJitter: 0.02,
+        cooldownMs: 300,
+      })
+    ) {
+      return;
+    }
+    this.playHorn();
+  }
+
+  playUiClick(): void {
+    if (!this.canPlaySfx() || !this.ctx || !this.sfxBus) return;
+    if (
+      this.playSample('ui_click', {
+        volume: 0.34,
+        rate: 1.08,
+        rateJitter: 0.05,
+        cooldownMs: 40,
+      })
+    ) {
+      return;
+    }
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(760, now);
+    osc.frequency.exponentialRampToValueAtTime(520, now + 0.04);
+    g.gain.setValueAtTime(0.12, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
+    osc.connect(g);
+    g.connect(this.sfxBus);
+    osc.start(now);
+    osc.stop(now + 0.05);
   }
 }

@@ -4,10 +4,11 @@ import {
   getBlockCatalogEntry,
   type IntruderRecord,
   type MapMarker,
+  type NamedBuilding,
 } from '../net/ServerClient';
 import { getPixelIconSvg } from './PixelIcons';
 
-export type WorldMapTab = 'markers' | 'intruders' | 'players';
+export type WorldMapTab = 'markers' | 'buildings' | 'intruders' | 'players';
 
 export interface WorldMapRemotePlayer {
   id: string;
@@ -47,6 +48,7 @@ export interface WorldMapSnapshot {
   intruders: readonly IntruderRecord[];
   resourceNodes: readonly WorldMapResourceNode[];
   myBuildingCenters: readonly WorldMapBuildingCenter[];
+  namedBuildings?: readonly NamedBuilding[];
   teleportCards: number;
 }
 
@@ -68,6 +70,8 @@ export interface WorldMapModalCallbacks {
     color: string
   ): void | Promise<void>;
   onDeleteMarker(id: string): void | Promise<void>;
+  onNameBuilding?(name: string, gx: number, gy: number, gz: number): void | Promise<void>;
+  onDeleteNamedBuilding?(id: string): void | Promise<void>;
   onDismissIntruder(id: string): void | Promise<void>;
   onOpenShop?(): void;
 }
@@ -202,7 +206,7 @@ export class WorldMapModal {
     titleIcon.className = 'vm-btn-icon';
     titleIcon.innerHTML = getPixelIconSvg('map');
     const titleText = document.createElement('span');
-    titleText.textContent = getLang() === 'zh' ? '世界地图与入侵追踪' : 'WORLD MAP & TRACKER';
+    titleText.textContent = getLang() === 'zh' ? '世界地图' : 'WORLD MAP';
     titleWrap.append(titleIcon, titleText);
 
     const statusWrap = document.createElement('div');
@@ -360,8 +364,8 @@ export class WorldMapModal {
       '<span style="color:#ffbe3b">▲ 我</span>' +
       '<span style="color:#38e2d4">● 玩家</span>' +
       '<span style="color:#46d97c">◆ 资源点</span>' +
-      '<span style="color:#60b4ff">■ 我的建筑</span>' +
-      '<span style="color:#ff3b5c">⚠ 入侵者/追击线</span>';
+      '<span style="color:#60b4ff">■ 建筑</span>' +
+      '<span style="color:#ff3b5c">⚠ 入侵追踪</span>';
 
     mapCol.append(canvasWrap, quickBar, legend);
 
@@ -372,15 +376,15 @@ export class WorldMapModal {
     const tabBar = document.createElement('div');
     tabBar.className = 'vm-eco-tabs';
     tabBar.style.display = 'grid';
-    tabBar.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
-    tabBar.style.gap = '5px';
+    tabBar.style.gridTemplateColumns = 'repeat(4, minmax(0, 1fr))';
+    tabBar.style.gap = '4px';
 
     const makeTab = (id: WorldMapTab, label: string): HTMLButtonElement => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'vm-home-btn';
-      btn.style.fontSize = '11px';
-      btn.style.padding = '0 4px';
+      btn.style.fontSize = '10px';
+      btn.style.padding = '0 3px';
       btn.textContent = label;
       btn.addEventListener('click', () => this.switchTab(id));
       tabBar.appendChild(btn);
@@ -388,9 +392,10 @@ export class WorldMapModal {
     };
 
     this.tabBtns = {
-      markers: makeTab('markers', '地图标记'),
-      intruders: makeTab('intruders', '入侵记录'),
-      players: makeTab('players', '世界玩家'),
+      markers: makeTab('markers', '标记'),
+      buildings: makeTab('buildings', '建筑'),
+      intruders: makeTab('intruders', '入侵'),
+      players: makeTab('players', '玩家'),
     };
 
     this.panelBodyEl = document.createElement('div');
@@ -482,13 +487,14 @@ export class WorldMapModal {
     this.tpPillEl.textContent = `🎫 传送卡: ${tp}`;
     const intruderCount = this.snapshot.intruders.length;
     const playerCount = this.snapshot.remotePlayers.length + 1;
+    const bldCount = (this.snapshot.namedBuildings?.length ?? 0) || this.snapshot.myBuildingCenters.length;
 
-    this.tabBtns.markers.textContent = `地图标记 (${this.snapshot.markers.length})`;
-    this.tabBtns.intruders.textContent =
-      intruderCount > 0 ? `入侵记录 (${intruderCount})` : '入侵记录';
-    this.tabBtns.players.textContent = `世界玩家 (${playerCount})`;
+    this.tabBtns.markers.textContent = `标记 (${this.snapshot.markers.length})`;
+    this.tabBtns.buildings.textContent = bldCount > 0 ? `建筑 (${bldCount})` : '建筑';
+    this.tabBtns.intruders.textContent = intruderCount > 0 ? `入侵 (${intruderCount})` : '入侵';
+    this.tabBtns.players.textContent = `玩家 (${playerCount})`;
 
-    const keys: WorldMapTab[] = ['markers', 'intruders', 'players'];
+    const keys: WorldMapTab[] = ['markers', 'buildings', 'intruders', 'players'];
     for (const k of keys) {
       const btn = this.tabBtns[k];
       if (k === this.activeTab) {
@@ -736,19 +742,33 @@ export class WorldMapModal {
       ctx.restore();
     }
 
-    // 6. Player's Building Centers
+    // 6. Player's Building Centers & Named Buildings
     for (const b of this.snapshot.myBuildingCenters) {
       const p = this.worldToScreen(b.wx, b.ws);
       if (p.sx < -16 || p.sx > w + 16 || p.sy < -16 || p.sy > h + 16) continue;
-      ctx.fillStyle = '#60b4ff';
+      ctx.fillStyle = b.label ? '#ffbe3b' : '#60b4ff';
       ctx.fillRect(p.sx - 5, p.sy - 5, 10, 10);
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1.5;
       ctx.strokeRect(p.sx - 5, p.sy - 5, 10, 10);
       if (b.label || b.count) {
-        ctx.font = 'bold 9px monospace';
-        ctx.fillStyle = '#bfe2ff';
+        ctx.font = 'bold 10px monospace';
+        ctx.fillStyle = b.label ? '#ffe699' : '#bfe2ff';
         ctx.fillText(b.label || `建筑(${b.count})`, p.sx + 7, p.sy + 3);
+      }
+    }
+    if (this.snapshot.namedBuildings) {
+      for (const nb of this.snapshot.namedBuildings) {
+        const p = this.worldToScreen(nb.gx + 0.5, wrapTrackS(nb.gz + 0.5));
+        if (p.sx < -24 || p.sx > w + 24 || p.sy < -24 || p.sy > h + 24) continue;
+        ctx.fillStyle = '#ffbe3b';
+        ctx.fillRect(p.sx - 5, p.sy - 5, 10, 10);
+        ctx.strokeStyle = '#05070d';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(p.sx - 5, p.sy - 5, 10, 10);
+        ctx.font = 'bold 10px "Microsoft YaHei", monospace';
+        ctx.fillStyle = '#fff0b3';
+        ctx.fillText(`🏠 ${nb.name}`, p.sx + 8, p.sy + 3);
       }
     }
 
@@ -902,6 +922,8 @@ export class WorldMapModal {
     ctx.restore();
   }
 
+  private buildingNameDraft = '';
+
   private computePanelSignature(): string {
     if (this.activeTab === 'markers') {
       return (
@@ -909,13 +931,22 @@ export class WorldMapModal {
         this.snapshot.markers.map((m) => `${m.id}:${m.name}:${Math.round(m.wx)},${Math.round(m.ws)}`).join(';')
       );
     }
+    if (this.activeTab === 'buildings') {
+      const nbSig = (this.snapshot.namedBuildings ?? [])
+        .map((b) => `${b.id}:${b.name}:${b.gx},${b.gz}`)
+        .join(';');
+      const cSig = this.snapshot.myBuildingCenters
+        .map((c) => `${Math.round(c.wx)},${Math.round(c.ws)}:${c.count ?? 0}:${c.label ?? ''}`)
+        .join(';');
+      return `b|${nbSig}||${cSig}`;
+    }
     if (this.activeTab === 'intruders') {
       return (
         `i|${this.snapshot.teleportCards}|` +
         this.snapshot.intruders
           .map(
             (r) =>
-              `${r.id}:${r.online ? 1 : 0}:${Math.round(r.liveWx ?? 0)},${Math.round(r.liveWs ?? 0)}`
+              `${r.id}:${r.buildingName ?? ''}:${r.online ? 1 : 0}:${Math.round(r.liveWx ?? 0)},${Math.round(r.liveWs ?? 0)}`
           )
           .join(';')
       );
@@ -936,10 +967,204 @@ export class WorldMapModal {
 
     if (this.activeTab === 'markers') {
       this.renderMarkersTab();
+    } else if (this.activeTab === 'buildings') {
+      this.renderBuildingsTab();
     } else if (this.activeTab === 'intruders') {
       this.renderIntrudersTab();
     } else {
       this.renderPlayersTab();
+    }
+  }
+
+  private renderBuildingsTab(): void {
+    const form = document.createElement('div');
+    form.className = 'vm-home-lobby';
+    form.style.gap = '6px';
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'vm-home-input';
+    nameInput.maxLength = 20;
+    nameInput.placeholder = '输入建筑名称（如：海景车库）';
+    nameInput.value = this.buildingNameDraft;
+    nameInput.addEventListener('input', () => {
+      this.buildingNameDraft = nameInput.value;
+    });
+
+    const btnRow = document.createElement('div');
+    btnRow.style.display = 'grid';
+    btnRow.style.gridTemplateColumns = '1fr 1fr';
+    btnRow.style.gap = '5px';
+
+    const nameHereBtn = document.createElement('button');
+    nameHereBtn.type = 'button';
+    nameHereBtn.className = 'vm-home-btn vm-home-btn-primary';
+    nameHereBtn.style.height = '26px';
+    nameHereBtn.style.fontSize = '10px';
+    nameHereBtn.textContent = '命名当前建筑';
+    nameHereBtn.addEventListener('click', () => {
+      const clean = this.buildingNameDraft.trim();
+      if (!clean) {
+        this.cb.onToast?.('请先输入建筑名称', 'gold');
+        nameInput.focus();
+        return;
+      }
+      this.buildingNameDraft = '';
+      void this.cb.onNameBuilding?.(
+        clean,
+        Math.floor(this.snapshot.playerWx),
+        Math.floor(this.snapshot.playerWy ?? 0),
+        Math.floor(wrapTrackS(this.snapshot.playerWs))
+      );
+    });
+
+    const nameSelBtn = document.createElement('button');
+    nameSelBtn.type = 'button';
+    nameSelBtn.className = 'vm-home-btn vm-home-btn-public';
+    nameSelBtn.style.height = '26px';
+    nameSelBtn.style.fontSize = '10px';
+    nameSelBtn.textContent = '命名地图选点';
+    nameSelBtn.addEventListener('click', () => {
+      const clean = this.buildingNameDraft.trim();
+      if (!clean) {
+        this.cb.onToast?.('请先输入建筑名称', 'gold');
+        nameInput.focus();
+        return;
+      }
+      const wx = this.selectedWx ?? this.snapshot.playerWx;
+      const ws = this.selectedWs ?? wrapTrackS(this.snapshot.playerWs);
+      this.buildingNameDraft = '';
+      void this.cb.onNameBuilding?.(
+        clean,
+        Math.floor(wx),
+        Math.floor(this.snapshot.playerWy ?? 0),
+        Math.floor(wrapTrackS(ws))
+      );
+    });
+
+    btnRow.append(nameHereBtn, nameSelBtn);
+    form.append(nameInput, btnRow);
+    this.panelBodyEl.appendChild(form);
+
+    const named = this.snapshot.namedBuildings ?? [];
+    for (const nb of named) {
+      const card = document.createElement('div');
+      card.className = 'vm-eco-card vm-home-lobby';
+      card.style.gap = '5px';
+
+      const top = document.createElement('div');
+      top.style.display = 'flex';
+      top.style.alignItems = 'center';
+      top.style.justifyContent = 'space-between';
+      top.style.gap = '6px';
+
+      const title = document.createElement('span');
+      title.style.fontSize = '11px';
+      title.style.fontWeight = '700';
+      title.style.color = 'var(--vm-gold)';
+      title.textContent = `🏠 ${nb.name}`;
+
+      const coord = document.createElement('span');
+      coord.style.fontSize = '10px';
+      coord.style.color = 'var(--vm-dim)';
+      coord.textContent = `(${nb.gx}, ${nb.gz})`;
+
+      top.append(title, coord);
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '5px';
+
+      const focusBtn = document.createElement('button');
+      focusBtn.type = 'button';
+      focusBtn.className = 'vm-home-recent-chip';
+      focusBtn.textContent = '定位';
+      focusBtn.addEventListener('click', () => this.focusPoint(nb.gx + 0.5, nb.gz + 0.5, true));
+
+      const tpBtn = document.createElement('button');
+      tpBtn.type = 'button';
+      tpBtn.className = 'vm-home-btn vm-home-btn-primary';
+      tpBtn.style.height = '24px';
+      tpBtn.style.fontSize = '10px';
+      tpBtn.style.flex = '1';
+      tpBtn.textContent = '传送';
+      tpBtn.addEventListener('click', () => {
+        void this.cb.onTeleportTo(nb.gx + 0.5, wrapTrackS(nb.gz + 0.5), nb.name, false);
+        this.close();
+      });
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'vm-home-btn vm-home-btn-resume';
+      delBtn.style.height = '24px';
+      delBtn.style.fontSize = '10px';
+      delBtn.style.padding = '0 8px';
+      delBtn.textContent = '删除';
+      delBtn.addEventListener('click', () => {
+        void this.cb.onDeleteNamedBuilding?.(nb.id);
+      });
+
+      actions.append(focusBtn, tpBtn, delBtn);
+      card.append(top, actions);
+      this.panelBodyEl.appendChild(card);
+    }
+
+    // Unnamed detected building clusters for 1-click naming
+    const unnamedClusters = this.snapshot.myBuildingCenters.filter((c) => !c.label);
+    for (const c of unnamedClusters) {
+      const card = document.createElement('div');
+      card.className = 'vm-eco-card vm-home-lobby';
+      card.style.gap = '5px';
+
+      const top = document.createElement('div');
+      top.style.display = 'flex';
+      top.style.justifyContent = 'space-between';
+      top.style.fontSize = '10px';
+      top.innerHTML = `<span style="color:#bfe2ff;font-weight:700">未命名建筑 (${c.count ?? 1}块)</span><span style="color:var(--vm-dim)">(${Math.round(c.wx)}, ${Math.round(c.ws)})</span>`;
+
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.gap = '5px';
+
+      const quickInput = document.createElement('input');
+      quickInput.type = 'text';
+      quickInput.className = 'vm-home-input';
+      quickInput.style.height = '24px';
+      quickInput.style.fontSize = '10px';
+      quickInput.maxLength = 20;
+      quickInput.placeholder = '输入名称...';
+
+      const saveBtn = document.createElement('button');
+      saveBtn.type = 'button';
+      saveBtn.className = 'vm-home-btn vm-home-btn-public';
+      saveBtn.style.height = '24px';
+      saveBtn.style.fontSize = '10px';
+      saveBtn.style.padding = '0 8px';
+      saveBtn.textContent = '命名';
+      saveBtn.addEventListener('click', () => {
+        const nm = quickInput.value.trim();
+        if (!nm) {
+          quickInput.focus();
+          return;
+        }
+        void this.cb.onNameBuilding?.(
+          nm,
+          Math.floor(c.wx),
+          Math.floor(this.snapshot.playerWy ?? 0),
+          Math.floor(wrapTrackS(c.ws))
+        );
+      });
+
+      row.append(quickInput, saveBtn);
+      card.append(top, row);
+      this.panelBodyEl.appendChild(card);
+    }
+
+    if (named.length === 0 && unnamedClusters.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'vm-home-lobby-empty';
+      empty.textContent = '暂无建筑，建造后即可在这里命名并在世界3D挂牌显示';
+      this.panelBodyEl.appendChild(empty);
     }
   }
 
@@ -1210,7 +1435,8 @@ export class WorldMapModal {
       detail1.style.fontSize = '10px';
       detail1.style.color = 'var(--vm-text)';
       const actionLabel = rec.action === 'overwrite' ? '覆盖了' : '破坏了';
-      detail1.textContent = `${actionLabel} ${blk.zhName} · 建筑坐标 (${rec.gx}, ${rec.gy}, ${rec.gz}) · ${formatTimeAgo(rec.createdAt)}`;
+      const bldPrefix = rec.buildingName ? `「${rec.buildingName}」` : '';
+      detail1.textContent = `${bldPrefix}${actionLabel} ${blk.zhName} · (${rec.gx}, ${rec.gy}, ${rec.gz}) · ${formatTimeAgo(rec.createdAt)}`;
 
       const detail2 = document.createElement('div');
       detail2.style.fontSize = '10px';

@@ -33,11 +33,12 @@ type Record struct {
 
 type EnrichedRecord struct {
 	Record
-	LiveWX   *float64 `json:"liveWx,omitempty"`
-	LiveWY   *float64 `json:"liveWy,omitempty"`
-	LiveWS   *float64 `json:"liveWs,omitempty"`
-	Online   bool     `json:"online"`
-	LastSeen int64    `json:"lastSeen,omitempty"`
+	BuildingName string   `json:"buildingName,omitempty"`
+	LiveWX       *float64 `json:"liveWx,omitempty"`
+	LiveWY       *float64 `json:"liveWy,omitempty"`
+	LiveWS       *float64 `json:"liveWs,omitempty"`
+	Online       bool     `json:"online"`
+	LastSeen     int64    `json:"lastSeen,omitempty"`
 }
 
 type Store struct {
