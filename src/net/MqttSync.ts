@@ -845,7 +845,7 @@ export class MqttSync {
     this.openSocket();
   }
 
-  async joinRoom(rawRoom: string, password = ''): Promise<RoomJoinResult> {
+  async joinRoom(rawRoom: string, password = '', initialTitle = ''): Promise<RoomJoinResult> {
     if (this.disposed) {
       return { ok: false, error: 'invalid_room', room: '', locked: false };
     }
@@ -861,6 +861,7 @@ export class MqttSync {
 
     const gen = ++this.roomSwitchGen;
     const pwd = password.trim();
+    const cleanTitle = sanitizeRoomTitle(initialTitle, slug);
 
     // Public hall 'global' is always open & unlocked
     if (slug === 'global') {
@@ -932,7 +933,7 @@ export class MqttSync {
       );
       this.pendingMetaPacket = buildPublishPacket(metaTopicBytes, metaPayload, true);
       const isolatedChannel = `${slug}__${channelHash(slug, pwd)}`;
-      await this.switchChannel(slug, isolatedChannel, true, pwd, lockHash, true, gen);
+      await this.switchChannel(slug, isolatedChannel, true, pwd, lockHash, true, gen, cleanTitle);
       return { ok: true, room: slug, locked: true, created: true };
     }
 
@@ -958,8 +959,18 @@ export class MqttSync {
     }
 
     const isKnownOccupied = this.lobbyRooms.has(slug) && (this.lobbyRooms.get(slug)?.count ?? 0) > 0;
-    await this.switchChannel(slug, slug, false, '', '', !meta && !isKnownOccupied, gen);
-    return { ok: true, room: slug, locked: false, created: !meta && !isKnownOccupied };
+    const creating = !meta && !isKnownOccupied;
+    await this.switchChannel(
+      slug,
+      slug,
+      false,
+      '',
+      '',
+      creating,
+      gen,
+      creating ? cleanTitle : slug
+    );
+    return { ok: true, room: slug, locked: false, created: creating };
   }
 
   setName(name: string): void {
@@ -1253,7 +1264,8 @@ export class MqttSync {
     roomPassword: string,
     roomLockHash: string,
     claimHost: boolean,
-    gen: number
+    gen: number,
+    initialTitle = ''
   ): Promise<void> {
     this.cancelMetaQuery(null);
 
@@ -1296,10 +1308,14 @@ export class MqttSync {
 
     // Reconfigure topics, LWT & pre-allocated binary header, and re-arm 5m behind-last-player discovery
     this._displayRoom = displayRoom;
-    this._roomTitle = displayRoom;
+    const resolvedTitle =
+      displayRoom !== 'global' && claimHost
+        ? sanitizeRoomTitle(initialTitle, displayRoom)
+        : displayRoom;
+    this._roomTitle = resolvedTitle;
     this._roomHostId = displayRoom !== 'global' && claimHost ? this.clientId : '';
-    this._roomInfoRev = 0;
-    this._roomInfoTs = 0;
+    this._roomInfoRev = displayRoom !== 'global' && claimHost && resolvedTitle !== displayRoom ? 1 : 0;
+    this._roomInfoTs = this._roomInfoRev > 0 ? Date.now() : 0;
     this._isRoomLocked = locked;
     this._roomPassword = locked ? roomPassword : '';
     this._roomLockHash = locked ? roomLockHash : '';

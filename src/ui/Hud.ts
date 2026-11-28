@@ -79,7 +79,7 @@ export interface HudCallbacks {
   onRegroupPack(): void;
   onGyroSteer(steer: number | null): void;
   onRoomModalToggle?(open: boolean): void;
-  onJoinRoom?(room: string, password: string): Promise<void>;
+  onJoinRoom?(room: string, password: string, title?: string): Promise<void>;
   onCopyRoomLink?(): void;
   onRenameRoom?(title: string): void;
   onRefreshLobbyRooms?(): void;
@@ -268,6 +268,7 @@ export class Hud {
   private readonly homeLobbyRefreshBtnEl: HTMLButtonElement;
   private readonly homeLobbyListEl: HTMLDivElement;
   private readonly homeRoomInputEl: HTMLInputElement;
+  private readonly homeTitleInputEl: HTMLInputElement;
   private readonly homePassInputEl: HTMLInputElement;
   private readonly homeDiceBtnEl: HTMLButtonElement;
   private readonly homeErrorEl: HTMLDivElement;
@@ -1420,6 +1421,15 @@ export class Hud {
 
     roomFieldWrap.append(this.homeRoomInputEl, this.homeDiceBtnEl);
 
+    this.homeTitleInputEl = document.createElement('input');
+    this.homeTitleInputEl.type = 'text';
+    this.homeTitleInputEl.maxLength = 20;
+    this.homeTitleInputEl.spellcheck = false;
+    this.homeTitleInputEl.autocomplete = 'off';
+    this.homeTitleInputEl.className = 'vm-home-input';
+    this.homeTitleInputEl.placeholder = t('roomNameOptionalPlaceholder');
+    this.homeTitleInputEl.setAttribute('aria-label', 'Room title');
+
     this.homePassInputEl = document.createElement('input');
     this.homePassInputEl.type = 'password';
     this.homePassInputEl.maxLength = 24;
@@ -1437,10 +1447,12 @@ export class Hud {
     };
     this.homeRoomInputEl.addEventListener('keydown', stopInputKeys);
     this.homeRoomInputEl.addEventListener('keyup', (e: KeyboardEvent) => e.stopPropagation());
+    this.homeTitleInputEl.addEventListener('keydown', stopInputKeys);
+    this.homeTitleInputEl.addEventListener('keyup', (e: KeyboardEvent) => e.stopPropagation());
     this.homePassInputEl.addEventListener('keydown', stopInputKeys);
     this.homePassInputEl.addEventListener('keyup', (e: KeyboardEvent) => e.stopPropagation());
 
-    homeInputs.append(roomFieldWrap, this.homePassInputEl);
+    homeInputs.append(roomFieldWrap, this.homeTitleInputEl, this.homePassInputEl);
 
     this.homeErrorEl = document.createElement('div');
     this.homeErrorEl.className = 'vm-home-error is-hidden';
@@ -1834,6 +1846,7 @@ export class Hud {
 
     if (typeof prefillRoom === 'string') {
       this.homeRoomInputEl.value = prefillRoom;
+      this.homeTitleInputEl.value = '';
       this.homePassInputEl.value = '';
     } else if (!this.homeRoomInputEl.value && this.currentRoom !== 'global') {
       this.homeRoomInputEl.value = this.currentRoom;
@@ -1876,7 +1889,12 @@ export class Hud {
     this.homeBtnEl.classList.remove('is-active');
     this.setHomeError(null);
     this.homeRoomInputEl.blur();
+    this.homeTitleInputEl.blur();
     this.homePassInputEl.blur();
+    if (force) {
+      this.homeTitleInputEl.value = '';
+      this.homePassInputEl.value = '';
+    }
     if (!this.avatarPopoverOpen) {
       document.removeEventListener('keydown', this.onDocKeyDown, true);
     }
@@ -1928,6 +1946,7 @@ export class Hud {
   setHomeBusy(busy: boolean): void {
     this.homeBusy = busy;
     this.homeRoomInputEl.disabled = busy;
+    this.homeTitleInputEl.disabled = busy;
     this.homePassInputEl.disabled = busy;
     this.homeDiceBtnEl.disabled = busy;
     this.homeJoinBtnEl.disabled = busy;
@@ -1991,6 +2010,7 @@ export class Hud {
     this.homeLobbyRefreshBtnEl.title = t('refreshRooms');
     this.homeCopyBtnEl.title = t('copyLink');
     this.homeRoomInputEl.placeholder = t('roomCodePlaceholder');
+    this.homeTitleInputEl.placeholder = t('roomNameOptionalPlaceholder');
     this.homePassInputEl.placeholder = t('roomPassPlaceholder');
     this.homeJoinTextEl.textContent = this.homeBusy ? t('checkingRoom') : t('createOrJoin');
     this.homePublicTextEl.textContent = t('enterPublic');
@@ -2055,15 +2075,20 @@ export class Hud {
 
   private submitHomeForm(): void {
     if (this.homeBusy) return;
-    const room = this.homeRoomInputEl.value.trim();
+    let room = this.homeRoomInputEl.value.trim();
+    const title = this.homeTitleInputEl.value.trim();
     const password = this.homePassInputEl.value;
+    if (!room && title) {
+      room = `moto-${Math.floor(100 + Math.random() * 900)}`;
+      this.homeRoomInputEl.value = room;
+    }
     if (!room) {
       this.setHomeError(t('invalidRoom'));
       this.homeRoomInputEl.focus();
       return;
     }
     this.setHomeError(null);
-    void this.callbacks.onJoinRoom?.(room, password);
+    void this.callbacks.onJoinRoom?.(room, password, title);
   }
 
   private syncRoomPill(): void {
@@ -2183,6 +2208,7 @@ export class Hud {
         if (this.homeBusy || room.isCurrent) return;
         if (room.locked) {
           this.homeRoomInputEl.value = room.slug;
+          this.homeTitleInputEl.value = '';
           this.homePassInputEl.value = '';
           this.setHomeError(t('enterPassForRoom', { room: displayTitle }));
           this.homePassInputEl.focus();
@@ -2245,6 +2271,7 @@ export class Hud {
       chip.addEventListener('click', () => {
         if (this.homeBusy) return;
         this.homeRoomInputEl.value = slug;
+        this.homeTitleInputEl.value = '';
         this.setHomeError(null);
         this.homePassInputEl.focus();
       });

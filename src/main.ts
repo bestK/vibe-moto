@@ -532,12 +532,12 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
   onRefreshLobbyRooms() {
     mqtt.refreshLobbyRooms();
   },
-  async onJoinRoom(room: string, password: string) {
+  async onJoinRoom(room: string, password: string, title = '') {
     audio.unlock();
     hud.setHomeBusy(true);
     hud.setHomeError(null);
     try {
-      const res = await mqtt.joinRoom(room, password);
+      const res = await mqtt.joinRoom(room, password, title);
       hud.setHomeBusy(false);
       if (!res.ok) {
         const errKey =
@@ -557,7 +557,7 @@ hud = new Hud(hudContainer, initialName, colorIdx, initialAvatar, {
       player.state.incomingLockName = null;
       animals.reset();
       audio.playSpawnChime();
-      const displayLabel = res.room === 'global' ? t('publicHall') : res.room;
+      const displayLabel = res.room === 'global' ? t('publicHall') : roomInfo.title || res.room;
       hud.showToast(
         t(res.created ? 'roomCreated' : 'roomJoined', { room: displayLabel }),
         'cyan',
